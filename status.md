@@ -6,7 +6,7 @@ tracker** — `docs/architecture.md` §5 summarizes the milestone arc and points
 here.
 
 - **Current position:** M1 complete · M2 starting · next item: **#2 Child-process support end-to-end**
-- **Last verified:** 2026-10-05 (`go vet` clean · `gofmt` clean · 65 tests in 10 packages, all passing with `-race` · Windows + Linux cross-compile OK · rebrand to Gostalgia re-verified end to end)
+- **Last verified:** 2026-10-05 (`go vet` clean · `gofmt` clean · 65 tests in 10 packages, all passing with `-race` · **CI green on ubuntu, macOS, and Windows** · repo: `drawmeanelephant/gostalgia`, private)
 
 Rules for touching this file:
 
@@ -135,6 +135,8 @@ the affected docs. Grouped under the milestone arc from `docs/architecture.md`
 
 | Date | Check | Result |
 |---|---|---|
+| 2026-10-05 | Published private repo `drawmeanelephant/gostalgia`; CI matrix (ubuntu/macos/windows: vet, test, race-on-unix, gofmt) | **all three green** |
+| 2026-10-05 | Windows CI hardening: HostFS handle lifecycle at shutdown, backslash-name rejection, single-source metadata; fstest metadata gate scoped to unix with structural checks everywhere (OS-level limitation, `docs/filesystem.md`) | Windows runner fully passing |
 | 2026-10-05 | Rebrand FakeDOS → Gostalgia: module `gostalgia`, binaries `gostalgia`/`gctl`, app id `com.gostalgia.echo`, root `~/.gostalgia`, `$GOSTALGIA_ROOT`, socket `gostalgia-*.sock` | 171 references renamed, zero old names remain; full gate re-run green; live e2e clean |
 | 2026-10-04 | `go test -race ./...` | 65 tests, 10 packages, all pass |
 | 2026-10-04 | `go vet ./...`, `gofmt -l .` | clean |
