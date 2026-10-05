@@ -64,6 +64,7 @@ type Runtime struct {
 
 	svcCtx    *service.Context
 	logFile   *os.File
+	hostFS    *vfs.HostFS   // closed at shutdown; Windows cannot delete an open directory tree
 	done      chan struct{} // closed when shutdown begins
 	completed chan struct{} // closed when shutdown finishes
 	once      sync.Once
@@ -88,7 +89,7 @@ func ResolveRoot(explicit string) (string, error) {
 // Boot starts a complete environment: root, config, logging, services,
 // session, and the first application. It returns once the environment is
 // serving IPC; shutdown is triggered by signal or Runtime.Shutdown.
-func Boot(ctx context.Context, opts Options) (*Runtime, error) {
+func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 	root, err := ResolveRoot(opts.Root)
 	if err != nil {
 		return nil, err
@@ -128,6 +129,14 @@ func Boot(ctx context.Context, opts Options) (*Runtime, error) {
 		logFile.Close()
 		return nil, err
 	}
+	rt.hostFS = hostFS
+	// On any later boot failure, release the host root handle: on
+	// Windows an open handle prevents the directory from being removed.
+	defer func() {
+		if retErr != nil {
+			hostFS.Close()
+		}
+	}()
 	rt.VFS = vfs.New(hostFS)
 	if err := rt.VFS.Mount("/tmp", vfs.NewMem()); err != nil {
 		logFile.Close()
@@ -305,6 +314,11 @@ func (rt *Runtime) Shutdown(reason string) {
 		}
 		if err := rt.Services.StopAll(ctx); err != nil {
 			rt.Log.Warn("service shutdown problems", "err", err)
+		}
+		if rt.hostFS != nil {
+			if err := rt.hostFS.Close(); err != nil {
+				rt.Log.Warn("vfs close problem", "err", err)
+			}
 		}
 		if rt.logFile != nil {
 			rt.Log.Info("shutdown complete")

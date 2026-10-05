@@ -8,12 +8,19 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strings"
 )
 
 // validFSName enforces the io/fs name contract on the raw backends:
 // names arrive here already in fs form (no leading slash, no dot
-// segments) and must stay that way.
+// segments) and must stay that way. Backslashes are rejected on every
+// platform: they are ordinary filename characters on Unix but path
+// separators on Windows, and one portable contract is easier to reason
+// about than two.
 func validFSName(op, name string) error {
+	if strings.ContainsRune(name, '\\') {
+		return &fs.PathError{Op: op, Path: name, Err: fs.ErrInvalid}
+	}
 	if !fs.ValidPath(name) {
 		return &fs.PathError{Op: op, Path: name, Err: fs.ErrInvalid}
 	}
@@ -84,8 +91,30 @@ func (h *HostFS) ReadDir(name string) ([]fs.DirEntry, error) {
 		return entries, err
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+
+	// Back each entry's Info with the same Lstat source Stat uses. On
+	// Windows, directory metadata read through an open enumeration
+	// handle differs from Lstat of the same directory; one source keeps
+	// entry.Info() == Stat() true everywhere.
+	for i, e := range entries {
+		child := e.Name()
+		if name != "." {
+			child = name + "/" + e.Name()
+		}
+		if info, err := h.root.Lstat(child); err == nil {
+			entries[i] = hostEntry{DirEntry: e, info: info}
+		}
+	}
 	return entries, nil
 }
+
+// hostEntry overrides DirEntry.Info with an Lstat-backed FileInfo.
+type hostEntry struct {
+	fs.DirEntry
+	info fs.FileInfo
+}
+
+func (he hostEntry) Info() (fs.FileInfo, error) { return he.info, nil }
 
 func (h *HostFS) MkdirAll(name string) error {
 	if err := validFSName("mkdir", name); err != nil {

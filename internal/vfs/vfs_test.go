@@ -15,6 +15,7 @@ func TestHostFSMatchesFstest(t *testing.T) {
 	must(t, os.WriteFile(filepath.Join(root, "dir", "sub", "c.txt"), []byte("gamma"), 0o644))
 
 	h, err := NewHost(root)
+	t.Cleanup(func() { h.Close() })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,6 +26,7 @@ func TestHostFSMatchesFstest(t *testing.T) {
 
 func TestHostFSWriteReadRoundTrip(t *testing.T) {
 	h, err := NewHost(t.TempDir())
+	t.Cleanup(func() { h.Close() })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +53,7 @@ func TestHostFSWriteReadRoundTrip(t *testing.T) {
 
 func TestHostFSRejectsEscape(t *testing.T) {
 	h, err := NewHost(t.TempDir())
+	t.Cleanup(func() { h.Close() })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +75,7 @@ func TestHostFSBlocksSymlinkEscape(t *testing.T) {
 	must(t, os.Symlink(secret, filepath.Join(root, "sub", "link")))
 
 	h, err := NewHost(root)
+	t.Cleanup(func() { h.Close() })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,6 +115,7 @@ func TestMemFSRemoveEmptyDirOnly(t *testing.T) {
 
 func TestVFSMountShadowsRoot(t *testing.T) {
 	h, err := NewHost(t.TempDir())
+	t.Cleanup(func() { h.Close() })
 	if err != nil {
 		t.Fatal(err)
 	}
