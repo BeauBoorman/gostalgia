@@ -107,7 +107,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		Root:      root,
 		Version:   Version,
 		Cfg:       cfg,
-		Bus:       events.NewBus(),
+		Bus:       events.NewBusWithLogger(log),
 		Router:    ipc.NewRouter(),
 		logFile:   logFile,
 		done:      make(chan struct{}),
