@@ -312,6 +312,67 @@ func TestAppControlPermissionsAndRequestLifetime(t *testing.T) {
 	}
 }
 
+func TestFSMkdirAndRemoveOverIPC(t *testing.T) {
+	env := newTestEnv(t)
+	admin := security.AdminCapabilities()
+
+	resp := env.call(context.Background(), admin, "fs/mkdir", map[string]string{"path": "/users/guest/documents/newdir"})
+	if !resp.OK {
+		t.Fatalf("fs/mkdir failed: %s", resp.Error)
+	}
+	info, err := env.ctx.VFS.Stat("/users/guest/documents/newdir")
+	if err != nil || !info.IsDir() {
+		t.Fatalf("mkdir result visible in VFS: info=%v err=%v", info, err)
+	}
+
+	// A non-empty directory cannot be removed.
+	resp = env.call(context.Background(), admin, "fs/write", map[string]string{
+		"path": "/users/guest/documents/newdir/keep.txt",
+	})
+	if !resp.OK {
+		t.Fatalf("fs/write into new dir failed: %s", resp.Error)
+	}
+	resp = env.call(context.Background(), admin, "fs/remove", map[string]string{"path": "/users/guest/documents/newdir"})
+	if resp.OK {
+		t.Fatal("fs/remove succeeded on a non-empty directory, want error")
+	}
+
+	resp = env.call(context.Background(), admin, "fs/remove", map[string]string{"path": "/users/guest/documents/newdir/keep.txt"})
+	if !resp.OK {
+		t.Fatalf("fs/remove of file failed: %s", resp.Error)
+	}
+	resp = env.call(context.Background(), admin, "fs/remove", map[string]string{"path": "/users/guest/documents/newdir"})
+	if !resp.OK {
+		t.Fatalf("fs/remove of emptied dir failed: %s", resp.Error)
+	}
+	if _, err := env.ctx.VFS.Stat("/users/guest/documents/newdir"); err == nil {
+		t.Fatal("removed directory still visible in VFS")
+	}
+
+	// Missing path is an error, not a silent success.
+	resp = env.call(context.Background(), admin, "fs/remove", map[string]string{"path": "/users/guest/documents/ghost"})
+	if resp.OK {
+		t.Fatal("fs/remove of missing path succeeded, want error")
+	}
+}
+
+func TestFSMkdirAndRemoveDeniedWithoutCapability(t *testing.T) {
+	env := newTestEnv(t)
+	readOnly := security.NewCapabilities(security.CapFileRead)
+
+	resp := env.call(context.Background(), readOnly, "fs/mkdir", map[string]string{"path": "/users/guest/documents/denied"})
+	if resp.OK {
+		t.Fatal("fs/mkdir succeeded without the fs.write capability")
+	}
+	if resp := env.call(context.Background(), readOnly, "fs/remove", map[string]string{"path": "/users/guest/documents"}); resp.OK {
+		t.Fatal("fs/remove succeeded without the fs.write capability")
+	}
+	// And neither call had any effect.
+	if _, err := env.ctx.VFS.Stat("/users/guest/documents/denied"); err == nil {
+		t.Fatal("denied mkdir still created the directory")
+	}
+}
+
 func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {

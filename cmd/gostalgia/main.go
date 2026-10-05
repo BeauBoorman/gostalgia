@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"syscall"
 
 	"gostalgia/internal/experience/shell"
 	"gostalgia/internal/ipc"
@@ -79,7 +78,9 @@ func cmdBoot(args []string) error {
 	fmt.Printf("Gostalgia %s ready\n  root:     %s\n  endpoint: %s\n  (Ctrl-C to shut down)\n",
 		rt.Version, rt.Root, rt.Endpoint())
 
-	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// The signal set is platform-specific (platform.ShutdownSignals):
+	// unix delivers SIGTERM, Windows only ever delivers os.Interrupt.
+	sigCtx, stop := signal.NotifyContext(context.Background(), platform.ShutdownSignals()...)
 	defer stop()
 
 	select {
@@ -99,7 +100,7 @@ func cmdShell(args []string) error {
 	root := rootFlag(fs)
 	verbose := fs.Bool("verbose", false, "enable debug logging to the runtime log")
 	fs.Parse(args)
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), platform.ShutdownSignals()...)
 	defer stop()
 	rt, err := runtime.Boot(context.Background(), runtime.Options{Root: *root, Verbose: *verbose, LogOutput: io.Discard})
 	if err != nil {

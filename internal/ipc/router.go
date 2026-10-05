@@ -10,13 +10,31 @@ import (
 
 // Router maps method names to handlers. The same router serves in-process
 // callers and socket clients, so the wire never defines a second API.
+//
+// Route retraction is safe against in-flight dispatches: a dispatch that
+// has resolved a route holds a reference to it, and Unhandle and
+// UnhandlePrefix wait for those references to drain before returning. Once
+// either returns, no dispatch has or will reach a retracted handler.
+// Handlers run outside the router lock — a handler may register routes
+// (application launch does exactly that) — but a handler must not
+// synchronously retract its own route: retraction waits for the handler
+// to return.
 type Router struct {
 	mu     sync.RWMutex
-	routes map[string]Handler
+	routes map[string]*route
+}
+
+// route is one registered handler plus the count of in-flight dispatches.
+// A dispatch counts itself while still under the router's read lock, so a
+// retraction can never slip between resolving the route and counting the
+// dispatch.
+type route struct {
+	h      Handler
+	flight sync.WaitGroup
 }
 
 func NewRouter() *Router {
-	return &Router{routes: map[string]Handler{}}
+	return &Router{routes: map[string]*route{}}
 }
 
 // Handle registers a handler. Duplicate methods are rejected: routes are
@@ -30,7 +48,7 @@ func (r *Router) Handle(method string, h Handler) error {
 	if _, dup := r.routes[method]; dup {
 		return fmt.Errorf("ipc: route %q is already registered", method)
 	}
-	r.routes[method] = h
+	r.routes[method] = &route{h: h}
 	return nil
 }
 
@@ -48,28 +66,47 @@ func (r *Router) HandleBatch(routes map[string]Handler) error {
 		}
 	}
 	for method, h := range routes {
-		r.routes[method] = h
+		r.routes[method] = &route{h: h}
 	}
 	return nil
 }
 
-// Unhandle removes one method.
+// Unhandle removes one method and waits for in-flight dispatches to it to
+// complete.
 func (r *Router) Unhandle(method string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.routes, method)
+	rt := r.remove(method)
+	if rt != nil {
+		rt.flight.Wait()
+	}
 }
 
-// UnhandlePrefix removes every method with the prefix; applications use
-// it to retract all their routes ("app/<id>") on exit.
+// UnhandlePrefix removes every method with the prefix and waits for
+// in-flight dispatches to any of them to complete; applications use it to
+// retract all their routes ("app/<id>") on exit.
 func (r *Router) UnhandlePrefix(prefix string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	var removed []*route
 	for method := range r.routes {
 		if strings.HasPrefix(method, prefix) {
+			removed = append(removed, r.routes[method])
 			delete(r.routes, method)
 		}
 	}
+	r.mu.Unlock()
+	for _, rt := range removed {
+		rt.flight.Wait()
+	}
+}
+
+func (r *Router) remove(method string) *route {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rt, ok := r.routes[method]
+	if !ok {
+		return nil
+	}
+	delete(r.routes, method)
+	return rt
 }
 
 // Methods lists registered method names, sorted.
@@ -94,12 +131,17 @@ func (r *Router) Dispatch(ctx context.Context, req Request) (resp Response) {
 		}
 	}()
 	r.mu.RLock()
-	h, ok := r.routes[req.Method]
+	rt, ok := r.routes[req.Method]
+	if ok {
+		rt.flight.Add(1)
+	}
 	r.mu.RUnlock()
 	if !ok {
 		return Response{ID: req.ID, Error: fmt.Sprintf("unknown method %q", req.Method)}
 	}
-	data, err := h(ctx, req)
+	defer rt.flight.Done()
+
+	data, err := rt.h(ctx, req)
 	if err != nil {
 		return Response{ID: req.ID, Error: err.Error()}
 	}

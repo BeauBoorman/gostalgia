@@ -53,15 +53,27 @@ func (s *IPCService) Start(ctx context.Context) error {
 	s.listener = ln
 	s.endpoint = endpoint
 
-	s.server = ipc.NewServer(ln, s.ctx.Router, s.ctx.Token, s.log)
+	srv := ipc.NewServer(ln, s.ctx.Router, s.ctx.Token, s.log)
+	s.server = srv
+	// Serve from a local: the unwind path below nils s.server, and the
+	// goroutine must not race that write.
 	go func() {
-		if err := s.server.Serve(); err != nil {
+		if err := srv.Serve(); err != nil {
 			s.log.Error("ipc server stopped with error", "err", err)
 		}
 	}()
 
 	s.ctx.Endpoint = endpoint
 	if err := s.writeRuntimeFile(); err != nil {
+		// Unwind the partial state before reporting failure: the
+		// framework's rollback never Stops a service whose Start
+		// failed, so nothing else would close this listener or stop
+		// the serve goroutine. The endpoint field is kept for
+		// diagnostics; ctx.Endpoint is reset, the listener is not live.
+		srv.Close()
+		s.server = nil
+		s.listener = nil
+		s.ctx.Endpoint = ""
 		return err
 	}
 	s.log.Info("ipc listening", "endpoint", endpoint)
@@ -100,7 +112,9 @@ func (s *IPCService) writeRuntimeFile() error {
 	if err != nil {
 		return err
 	}
-	// 0600: the file embeds the IPC token; it is local trust, not a
-	// security boundary, but it should not be world-readable.
+	// 0600 (unix): the file embeds the IPC token; it is local trust, not
+	// a security boundary, but it should not be world-readable. On
+	// Windows the mode does not map to an ACL and the file inherits the
+	// environment directory's permissions.
 	return os.WriteFile(s.runtimeFilePath(), append(data, '\n'), 0o600)
 }

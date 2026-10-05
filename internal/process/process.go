@@ -65,11 +65,11 @@ type Info struct {
 	State     State     `json:"state"`
 	SessionID string    `json:"session,omitempty"`
 	User      string    `json:"user,omitempty"`
+	Caps      []string  `json:"caps,omitempty"` // granted capabilities, from the spec
 	StartedAt time.Time `json:"started_at,omitempty"`
 	ExitedAt  time.Time `json:"exited_at,omitempty"`
 	Err       string    `json:"error,omitempty"`
 	ExitCode  int       `json:"exit_code,omitempty"`
-	Caps      []string  `json:"caps,omitempty"`
 }
 
 // Event is published on every state transition.
@@ -110,6 +110,13 @@ func (p *Process) Info() Info {
 	info := p.info
 	info.Caps = append([]string(nil), info.Caps...)
 	return info
+}
+
+// Caps returns the capabilities granted to this process (from its spec).
+func (p *Process) Caps() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.info.Caps
 }
 
 func (p *Process) setState(state State, err error) {

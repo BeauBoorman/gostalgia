@@ -263,14 +263,20 @@ func (m *Manager) topoOrder() ([]string, error) {
 		}
 	}
 
-	// Registration order defines the ready queue's tie-break.
+	// Registration order — not name order — defines the ready queue's
+	// tie-break, so services start in the order the runtime registered
+	// them, dependencies aside.
 	var ready []string
 	for _, name := range m.order {
 		if indegree[name] == 0 {
 			ready = append(ready, name)
 		}
 	}
-	sort.Strings(ready)
+	index := make(map[string]int, len(m.order))
+	for i, name := range m.order {
+		index[name] = i
+	}
+	byRegistration := func(i, j int) bool { return index[ready[i]] < index[ready[j]] }
 
 	var order []string
 	for len(ready) > 0 {
@@ -281,7 +287,7 @@ func (m *Manager) topoOrder() ([]string, error) {
 			indegree[dep]--
 			if indegree[dep] == 0 {
 				ready = append(ready, dep)
-				sort.Strings(ready)
+				sort.Slice(ready, byRegistration)
 			}
 		}
 	}

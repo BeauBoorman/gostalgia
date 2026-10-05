@@ -6,7 +6,7 @@ tracker** — `docs/architecture.md` §5 summarizes the milestone arc and points
 here.
 
 - **Current position:** M1 complete · Charm experience + capability-scoped app SDK implemented · next core item: **#2 Child-process support end-to-end**
-- **Last verified:** 2026-10-05 (`go build` / `go vet` / `gofmt` clean · `go test -race ./...` green · pure-Go + Windows/Linux cross-builds OK · compiled Charm CLI exercised in a real PTY; terminal restored and runtime cleaned up)
+- **Last verified:** 2026-10-05 (`go build` / `go vet` / `gofmt` clean · `go test -race ./...` green · test/package counts are CI's to report · pure-Go + Windows/Linux cross-builds OK · compiled Charm CLI exercised in a real PTY; terminal restored and runtime cleaned up · **CI green on ubuntu, macOS, and Windows** · repo: `drawmeanelephant/gostalgia`, private)
 
 Rules for touching this file:
 
@@ -33,9 +33,9 @@ Rules for touching this file:
 | Charm shell: DOS-style prompt, app shelf, history/completion, VFS/process commands | ✅ working | `internal/experience/shell` (real Bubble Tea + authenticated IPC) |
 | Event bus (typed, synchronous, wildcard) | ✅ working | `internal/events` tests |
 | Config store (dotted paths, atomic persist) | ✅ working | `internal/config` tests |
-| Sessions + capability checks on privileged IPC methods | ✅ working | `internal/session`, `internal/services` tests |
+| Sessions exist; capability checks are tested but not enforced in production | ⚠️ honest state | `internal/session`, `internal/services` tests; every production dispatch path runs as admin — see `docs/security.md` |
 | Cross-platform compile (darwin/linux/windows) | ✅ compiles | `GOOS=` builds in CI matrix |
-| Windows/Linux **behavior** parity | ❌ not yet tested | — (backlog #12) |
+| Cross-platform behavior: CI runs the full test suite on ubuntu, macOS, and Windows runners | ✅ CI-green (Windows: full fstest skipped — see `docs/filesystem.md` metadata caveat; structural checks run everywhere) | `.github/workflows/ci.yml` |
 
 Quick check from a clean checkout:
 
@@ -62,7 +62,9 @@ go run ./cmd/gctl --root /tmp/gs status      # terminal 2
   server-push notifications.
 - **Desktop, networking, packages, notifications** do not exist yet — by
   design, they are behind the core milestones.
-- **Windows/Linux runtime behavior is untested** (compile-only so far).
+- **Windows filesystem metadata:** directory mtimes are advisory on Windows
+  (OS-level API inconsistency; see `docs/filesystem.md`). Deep platform
+  behavior beyond the CI suite (packaging, GUI paths) is still backlog #12.
 
 ---
 
@@ -141,6 +143,10 @@ the affected docs. Grouped under the milestone arc from `docs/architecture.md`
 | Date | Check | Result |
 |---|---|---|
 | 2026-10-05 | Charm shell + public capability-scoped SDK; one embedded-manifest Echo demo; spec read against implementation | Build/vet/gofmt/race green; pure-Go and Windows/Linux builds OK; real Bubble Tea socket integration + compiled CLI PTY smoke (echo, scoped identity, stop/relaunch, F2 shelf, exit/terminal restoration/runtime cleanup); no second demo built |
+| 2026-10-05 | FIFO regression (#16): `HostFS.Stat`/`ReadDir` no longer `os.Root.Open` special files — Lstat fallback for FIFOs, sockets, devices, symlinks; regression tests for `Stat`, `ReadDir`, and `ipc.Server.Close` with a `fs/list` handler in flight over a real socket | repro tests fail unfixed, pass fixed; full gate green (`vet`, `gofmt`, `-race`) |
+| 2026-10-05 | Docs drift (#17): `status.md` "Last verified" no longer hardcodes test counts (CI is the source of truth); `security.md`/`ipc.md` scope the `runtime.json` 0600 mode to unix — Windows inherits directory ACLs | docs match the code |
+| 2026-10-05 | Published private repo `drawmeanelephant/gostalgia`; CI matrix (ubuntu/macos/windows: vet, test, race-on-unix, gofmt) | **all three green** |
+| 2026-10-05 | Windows CI hardening: HostFS handle lifecycle at shutdown, backslash-name rejection, single-source metadata; fstest metadata gate scoped to unix with structural checks everywhere (OS-level limitation, `docs/filesystem.md`) | Windows runner fully passing |
 | 2026-10-05 | Rebrand FakeDOS → Gostalgia: module `gostalgia`, binaries `gostalgia`/`gctl`, app id `com.gostalgia.echo`, root `~/.gostalgia`, `$GOSTALGIA_ROOT`, socket `gostalgia-*.sock` | 171 references renamed, zero old names remain; full gate re-run green; live e2e clean |
 | 2026-10-04 | `go test -race ./...` | 65 tests, 10 packages, all pass |
 | 2026-10-04 | `go vet ./...`, `gofmt -l .` | clean |

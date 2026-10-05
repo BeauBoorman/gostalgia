@@ -57,14 +57,29 @@ func (s *Server) Serve() error {
 				return fmt.Errorf("ipc: accept: %w", err)
 			}
 		}
-		s.track(conn)
+		// Track and arm the connection while holding the same mutex
+		// Close sweeps s.conns under, and re-check done inside it. A
+		// connection accepted concurrently with Close can then never
+		// escape being closed, and wg.Add can never race wg.Wait from
+		// a zero counter.
+		s.mu.Lock()
+		select {
+		case <-s.done:
+			s.mu.Unlock()
+			conn.Close()
+			return nil
+		default:
+		}
+		s.conns[conn] = struct{}{}
 		s.wg.Add(1)
+		s.mu.Unlock()
 		go s.handleConn(conn)
 	}
 }
 
 // Close stops the listener and drops all live connections, including
-// idle ones — shutdown must never hang on a connected client.
+// idle ones — shutdown must never hang on a connected client, and it
+// never waits on a connection it did not close itself.
 func (s *Server) Close() error {
 	select {
 	case <-s.done:
@@ -80,12 +95,6 @@ func (s *Server) Close() error {
 	s.mu.Unlock()
 	s.wg.Wait()
 	return err
-}
-
-func (s *Server) track(conn net.Conn) {
-	s.mu.Lock()
-	s.conns[conn] = struct{}{}
-	s.mu.Unlock()
 }
 
 func (s *Server) untrack(conn net.Conn) {

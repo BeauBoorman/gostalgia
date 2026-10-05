@@ -2,11 +2,14 @@
 // is a value implementing Event; publishers attach a source; subscribers
 // receive envelopes. Handlers run synchronously in the publisher's
 // goroutine: delivery is ordered and deterministic, and the bus does no
-// buffering. Handlers must be fast and must not panic; slow consumers
-// should move work to their own goroutine.
+// buffering. Handlers must be fast and should not panic; slow consumers
+// should move work to their own goroutine. A panicking handler is
+// contained by the bus and logged with its topic — one bad subscriber
+// cannot take down the publisher or the runtime.
 package events
 
 import (
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -42,14 +45,24 @@ type Bus struct {
 	seq    uint64
 	subSeq uint64
 	topics map[string][]subscription
+	log    *slog.Logger // reports subscriber panics; never nil
 }
 
-func NewBus() *Bus {
-	return &Bus{topics: make(map[string][]subscription)}
+func NewBus() *Bus { return NewBusWithLogger(nil) }
+
+// NewBusWithLogger builds a bus that reports subscriber panics to log. A
+// nil logger falls back to the slog default.
+func NewBusWithLogger(log *slog.Logger) *Bus {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &Bus{topics: make(map[string][]subscription), log: log}
 }
 
 // Publish delivers ev to all current subscribers of ev.Type() and "*".
-// Invalid publishes (nil event or empty source) are ignored.
+// Invalid publishes (nil event or empty source) are ignored. A handler
+// that panics is contained here and logged; delivery to the remaining
+// handlers continues.
 func (b *Bus) Publish(source string, ev Event) {
 	if ev == nil || source == "" {
 		return
@@ -72,8 +85,25 @@ func (b *Bus) Publish(source string, ev Event) {
 	}
 	b.mu.Unlock()
 	for _, h := range targets {
-		h(env)
+		deliver(b.log, env, h)
 	}
+}
+
+// deliver invokes one handler, containing its panic: handlers are
+// subscribers across a trust line (applications subscribe from inside the
+// runtime), and a panic must not propagate into the publisher's goroutine.
+func deliver(log *slog.Logger, env Envelope, h Handler) {
+	defer func() {
+		if p := recover(); p != nil {
+			log.Error("events: subscriber panicked",
+				"topic", env.Type,
+				"source", env.Source,
+				"event_id", env.ID,
+				"panic", p,
+			)
+		}
+	}()
+	h(env)
 }
 
 // Subscribe registers h for topic and returns a cancel function that

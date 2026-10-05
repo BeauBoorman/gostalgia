@@ -31,11 +31,18 @@ Permission tokens (`security.Capabilities`) travel with IPC call contexts:
 - Shell and gctl are trusted operator clients using the same token/admin grant;
   this is distinct from application execution authority.
 
+**State this plainly: `RequireCap` cannot fail in production today.** Both
+production dispatch paths (authenticated socket clients and the boot
+self-test) present the admin set, so every guard passes. The checks are
+exercised only by tests that hand-build a limited context. Deny-by-default
+enforcement against the per-app grant is backlog #13.
+
 ### Transport authentication
 
 The local socket requires a token handshake (constant-time compare) before
 any other method. The token is generated per boot and stored in `runtime.json`
-(mode 0600).
+(mode 0600 on unix; on Windows the mode does not map to an ACL — the file
+inherits the environment directory's permissions).
 
 ## Isolation levels — honest labels
 

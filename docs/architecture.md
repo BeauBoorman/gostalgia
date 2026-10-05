@@ -216,11 +216,20 @@ Only what is genuinely host-specific, kept thin and behind build tags:
 
 - IPC listener/dial: unix socket (`unix` build tag) vs loopback TCP
   (`windows`).
+- Shutdown signal set: unix requests `os.Interrupt` + `SIGTERM`; Windows
+  requests `os.Interrupt` only (see below).
 - Environment-root resolution defaults.
 
-Everything else (signals, filesystem, exec, clocks) is already portable in
-the standard library. As desktop/audio arrive, their host bits get adapters
-here.
+Signals are the one item on the "host integration" list that the standard
+library does not make portable: which terminating signals a host delivers
+differs per platform, so the requested set lives behind build tags in
+`platform/`. On Windows only Ctrl-C / console close reaches the process;
+other termination paths (`taskkill /f`, job-object teardown) deliver no
+signal at all, so a Windows host currently gets graceful shutdown via
+Ctrl-C or IPC only — a known gap recorded in `docs/platform.md` and
+scheduled for the platform-parity milestone. Everything else (filesystem,
+exec, clocks) is already portable in the standard library. As desktop/audio
+arrive, their host bits get adapters here.
 
 ## 4. Decisions and trade-offs
 

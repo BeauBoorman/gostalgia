@@ -10,10 +10,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -67,6 +65,7 @@ type Runtime struct {
 
 	svcCtx    *service.Context
 	logFile   *os.File
+	hostFS    *vfs.HostFS   // closed at shutdown; Windows cannot delete an open directory tree
 	done      chan struct{} // closed when shutdown begins
 	completed chan struct{} // closed when shutdown finishes
 	once      sync.Once
@@ -91,7 +90,7 @@ func ResolveRoot(explicit string) (string, error) {
 // Boot starts a complete environment: root, config, logging, services,
 // session, and the first application. It returns once the environment is
 // serving IPC; shutdown is triggered by signal or Runtime.Shutdown.
-func Boot(ctx context.Context, opts Options) (*Runtime, error) {
+func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 	root, err := ResolveRoot(opts.Root)
 	if err != nil {
 		return nil, err
@@ -111,7 +110,7 @@ func Boot(ctx context.Context, opts Options) (*Runtime, error) {
 		Root:      root,
 		Version:   Version,
 		Cfg:       cfg,
-		Bus:       events.NewBus(),
+		Bus:       events.NewBusWithLogger(log),
 		Router:    ipc.NewRouter(),
 		logFile:   logFile,
 		done:      make(chan struct{}),
@@ -131,6 +130,14 @@ func Boot(ctx context.Context, opts Options) (*Runtime, error) {
 		logFile.Close()
 		return nil, err
 	}
+	rt.hostFS = hostFS
+	// On any later boot failure, release the host root handle: on
+	// Windows an open handle prevents the directory from being removed.
+	defer func() {
+		if retErr != nil {
+			hostFS.Close()
+		}
+	}()
 	rt.VFS = vfs.New(hostFS)
 	if err := rt.VFS.Mount("/tmp", vfs.NewMem()); err != nil {
 		logFile.Close()
@@ -199,7 +206,10 @@ func Boot(ctx context.Context, opts Options) (*Runtime, error) {
 	svcCtx.Shutdown = rt.Shutdown
 
 	if err := sm.StartAll(ctx); err != nil {
-		logFile.Close()
+		// StartAll has already rolled back the services that reached
+		// running; Shutdown finishes the boot-failure teardown (VFS
+		// handle, log file, lifecycle channels) exactly once.
+		rt.Shutdown("boot failure")
 		return nil, err
 	}
 
@@ -309,6 +319,11 @@ func (rt *Runtime) Shutdown(reason string) {
 		if err := rt.Services.StopAll(ctx); err != nil {
 			rt.Log.Warn("service shutdown problems", "err", err)
 		}
+		if rt.hostFS != nil {
+			if err := rt.hostFS.Close(); err != nil {
+				rt.Log.Warn("vfs close problem", "err", err)
+			}
+		}
 		if rt.logFile != nil {
 			rt.Log.Info("shutdown complete")
 			rt.logFile.Close()
@@ -344,15 +359,14 @@ func newToken() (string, error) {
 }
 
 // checkNotRunning refuses to boot if a live environment already owns this
-// root. A runtime.json whose endpoint does not answer is stale and is
-// ignored.
+// root. Anything that answers on the recorded endpoint and accepts the
+// recorded token is a live instance — including one still mid-boot, whose
+// sys routes may not be registered yet. A stale file from a dead instance
+// is ignored.
 func checkNotRunning(root string) error {
 	data, err := os.ReadFile(filepath.Join(root, "runtime.json"))
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		return nil // unreadable: treat as stale; boot overwrites it
+		return nil // missing or unreadable: stale; boot overwrites it
 	}
 	var info struct {
 		PID      int    `json:"pid"`
@@ -364,17 +378,12 @@ func checkNotRunning(root string) error {
 	}
 	conn, err := platform.DialIPC(info.Endpoint)
 	if err != nil {
-		return nil // stale file from a dead instance
+		return nil // nothing is listening: stale file from a dead instance
 	}
 	client, err := ipc.NewClient(conn, info.Token)
 	if err != nil {
-		return nil
+		return nil // the listener rejected the recorded token: not our instance
 	}
-	defer client.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := client.Call(ctx, "sys/ping", nil, nil); err == nil {
-		return fmt.Errorf("runtime: environment is already running (pid %d, endpoint %s)", info.PID, info.Endpoint)
-	}
-	return nil
+	client.Close()
+	return fmt.Errorf("runtime: environment is already running (pid %d, endpoint %s)", info.PID, info.Endpoint)
 }

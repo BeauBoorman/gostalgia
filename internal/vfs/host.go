@@ -8,12 +8,19 @@ import (
 	"os"
 	"path"
 	"sort"
+	"strings"
 )
 
 // validFSName enforces the io/fs name contract on the raw backends:
 // names arrive here already in fs form (no leading slash, no dot
-// segments) and must stay that way.
+// segments) and must stay that way. Backslashes are rejected on every
+// platform: they are ordinary filename characters on Unix but path
+// separators on Windows, and one portable contract is easier to reason
+// about than two.
 func validFSName(op, name string) error {
+	if strings.ContainsRune(name, '\\') {
+		return &fs.PathError{Op: op, Path: name, Err: fs.ErrInvalid}
+	}
 	if !fs.ValidPath(name) {
 		return &fs.PathError{Op: op, Path: name, Err: fs.ErrInvalid}
 	}
@@ -55,7 +62,27 @@ func (h *HostFS) Stat(name string) (fs.FileInfo, error) {
 	if err := validFSName("stat", name); err != nil {
 		return nil, err
 	}
-	return h.root.Lstat(name)
+	// Lstat first, and Open only what cannot block: os.Root.Open on a
+	// FIFO (or other special file) waits until a writer opens the other
+	// end, and Stat is a metadata call. The handle-based path exists for
+	// Windows: there os.Root.Lstat disagrees with handle Stat for
+	// directories (stale mtimes), and every consumer — fstest included
+	// — compares entry metadata against the handle's Stat, so regular
+	// files and directories still go through the handle. Special files
+	// report Lstat, which is what ReadDir's entries report for them too.
+	info, err := h.root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() && !info.IsDir() {
+		return info, nil
+	}
+	f, err := h.root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return f.Stat()
 }
 
 func (h *HostFS) ReadFile(name string) ([]byte, error) {
@@ -84,8 +111,46 @@ func (h *HostFS) ReadDir(name string) ([]fs.DirEntry, error) {
 		return entries, err
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+
+	// Back each entry's Info with the same metadata that HostFS.Stat
+	// (and Open+File.Stat) reports. On Windows, directory metadata from
+	// an enumeration differs from a handle Stat; one source keeps
+	// entry.Info() == Stat() true everywhere. Only regular files and
+	// directories may be opened here: os.Root.Open on a FIFO blocks
+	// until a writer arrives and would stall the whole listing (and
+	// shutdown behind it), so special entries — symlinks, FIFOs,
+	// sockets, devices — fall back to Lstat, which cannot block. Info
+	// reports whatever the fallback returned, keeping the per-entry
+	// invariant for them too.
+	for i, e := range entries {
+		child := e.Name()
+		if name != "." {
+			child = name + "/" + e.Name()
+		}
+		if !e.Type().IsRegular() && !e.IsDir() {
+			if info, err := h.root.Lstat(child); err == nil {
+				entries[i] = hostEntry{DirEntry: e, info: info}
+			}
+			continue
+		}
+		if cf, err := h.root.Open(child); err == nil {
+			info, err := cf.Stat()
+			cf.Close()
+			if err == nil {
+				entries[i] = hostEntry{DirEntry: e, info: info}
+			}
+		}
+	}
 	return entries, nil
 }
+
+// hostEntry overrides DirEntry.Info with a handle-backed FileInfo.
+type hostEntry struct {
+	fs.DirEntry
+	info fs.FileInfo
+}
+
+func (he hostEntry) Info() (fs.FileInfo, error) { return he.info, nil }
 
 func (h *HostFS) MkdirAll(name string) error {
 	if err := validFSName("mkdir", name); err != nil {

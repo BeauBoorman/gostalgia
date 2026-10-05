@@ -122,6 +122,29 @@ func TestStartFailureRollsBack(t *testing.T) {
 	}
 }
 
+// TestStartAllBreaksTiesByRegistrationOrder: dependency-free services
+// start in registration order, not name order — the runtime relies on
+// this to have sys routes registered before the ipc service publishes
+// runtime.json.
+func TestStartAllBreaksTiesByRegistrationOrder(t *testing.T) {
+	var seq []string
+	m := newTestManager(t)
+	mustRegister(t, m,
+		&fakeService{name: "zulu", events: &seq},
+		&fakeService{name: "alpha", events: &seq},
+	)
+	mustStart(t, m)
+	want := []string{"init:zulu", "start:zulu", "init:alpha", "start:alpha"}
+	if len(seq) != len(want) {
+		t.Fatalf("sequence = %v, want %v", seq, want)
+	}
+	for i := range want {
+		if seq[i] != want[i] {
+			t.Fatalf("sequence = %v, want %v (registration order must break ties, not name order)", seq, want)
+		}
+	}
+}
+
 func TestUnknownDependencyFails(t *testing.T) {
 	var seq []string
 	m := newTestManager(t)
