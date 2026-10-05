@@ -42,6 +42,9 @@ type Options struct {
 	Root string
 	// Verbose enables debug logging.
 	Verbose bool
+	// LogOutput overrides console logging. Interactive hosts pass io.Discard
+	// so service logs cannot corrupt a TUI; file logging remains enabled.
+	LogOutput io.Writer
 }
 
 // Runtime is a booted Gostalgia environment.
@@ -101,7 +104,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		return nil, err
 	}
 
-	logFile, log := newLogger(root, opts.Verbose)
+	logFile, log := newLogger(root, opts.Verbose, opts.LogOutput)
 
 	rt := &Runtime{
 		Root:      root,
@@ -330,15 +333,18 @@ func (rt *Runtime) Shutdown(reason string) {
 	<-rt.completed
 }
 
-func newLogger(root string, verbose bool) (*os.File, *slog.Logger) {
+func newLogger(root string, verbose bool, output io.Writer) (*os.File, *slog.Logger) {
 	level := slog.LevelInfo
 	if verbose {
 		level = slog.LevelDebug
 	}
 	file, err := os.OpenFile(filepath.Join(root, "logs", "gostalgia.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-	var w io.Writer = os.Stdout
+	if output == nil {
+		output = os.Stdout
+	}
+	var w io.Writer = output
 	if err == nil {
-		w = io.MultiWriter(os.Stdout, file)
+		w = io.MultiWriter(output, file)
 	}
 	handler := slog.NewTextHandler(w, &slog.HandlerOptions{Level: level})
 	return file, slog.New(handler)

@@ -17,7 +17,7 @@ document disagree, one of them is wrong; fix both.
 ┌──────────────────────────────────────────────────────────────┐
 │  APPLICATIONS        echo · terminal · editor · file mgr …   │
 ├──────────────────────────────────────────────────────────────┤
-│  DESKTOP ENVIRONMENT (M4+)  windows · panels · notifications │
+│  EXPERIENCE  Charm shell now · desktop/windows later (M4+) │
 ├──────────────────────────────────────────────────────────────┤
 │  SYSTEM SERVICES     sys · process · fs · ipc · session …    │
 ├──────────────────────────────────────────────────────────────┤
@@ -57,8 +57,10 @@ gostalgia
 │   ├── session/        # user sessions
 │   ├── service/        # service lifecycle framework
 │   ├── services/       # concrete core services (sys, process, fs, ipc)
+│   ├── experience/     # Charm shell (imports IPC client contracts only)
 │   ├── app/            # application model, manifests, launcher
 │   └── runtime/        # boot, wiring, shutdown
+├── sdk/                # public stdlib-only app contract
 ├── apps/               # builtin applications: echo/ + registration & manifest seeding
 ├── platform/           # host-specific endpoints (sockets, paths)
 ├── cmd/gostalgia         # the environment runtime binary
@@ -155,14 +157,26 @@ memory FS, remote FS, per-app private storage, host-dir mounts.
 
 An application is declared by a **manifest** (id, name, version, entrypoint,
 permissions, description; JSON — see 4.3) and implemented by a factory that
-produces an `Instance` with `Run(ctx, proc)` and `RegisterRoutes(router,
-base)`. Launching: manifest → factory → instance routes registered under
-`app/<id>/…` (namespaced per app; routes are **not** scoped to the
-manifest's capabilities — enforcement is backlog #13) → in-proc process
-started, carrying the manifest's permissions on the process record and on
-the application's call context → `app.launched` event. Single instance per
-app id for now (duplicates are rejected). Out-of-proc apps reuse the same
-manifest and talk to the runtime over the socket transport.
+produces an `sdk.Instance` with `Init(*sdk.Context)`, `Run(ctx)`, and
+`Stop(ctx)`. Factories/apps receive no raw router, VFS, or process manager.
+Launch reserves the ID before factory/Init, stages routes atomically under
+`app/<id>/…`, and runs a tracked process with manifest capabilities on its
+context. SDK calls and handlers replace inherited caller permissions, including
+operator permissions, with the app's grant. Cleanup drains handlers, calls Stop,
+and retracts routes/state on failure or exit. Events use `app.state` with
+`launched`/`exited`. Single instance per app ID; compiled builtin manifests win
+over seeded disk copies. See [applications.md](applications.md) for the spec.
+
+### 3.6a Terminal experience (`internal/experience/shell`)
+
+Bubble Tea owns the event loop/terminal; Lip Gloss supplies the DOS-inspired
+styling. The shell talks through authenticated IPC, never via runtime managers.
+`gostalgia` (no args) or `gostalgia shell` owns boot → shell → graceful shutdown;
+`gostalgia boot` remains the headless entrypoint. Runtime logging accepts an
+`io.Writer` so the interactive host suppresses console logs without importing
+Charm into runtime. App shelf, launch/stop, VFS navigation, process inspection,
+history, completion, and safe bounded scrollback are documented in
+[shell.md](shell.md).
 
 ### 3.7 Events (`internal/events`)
 
@@ -177,14 +191,12 @@ types; nothing publishes untyped maps.
 
 Users and sessions exist as first-class environment concepts from day one
 (the slice creates user `guest` and one session at boot). Security model:
-**capabilities**. A process's capabilities are its manifest permissions;
-they are stored on the process record and attached to the application's own
-call context. Handler guards exist (`ipc.RequireCap`, backed by
-`security.Capabilities.Has`), but they are **structurally unreachable in
-production today**: both production dispatch paths (authenticated socket
-clients and the boot self-test) present the admin capability set, so a
-guard can only fail in tests. Real enforcement with per-app call contexts
-is backlog #13; until it lands, capabilities are carried, not enforced.
+**capabilities**. A process's capabilities come from its manifest
+permissions; they are attached to the IPC context and enforced at handler
+boundaries (`security.Capabilities.Has`). Read/write VFS methods, process
+listing/stopping, app listing/launching/stopping, and shutdown check their
+individual grants; app route publication/invocation checks `ipc`. See the
+complete permission table in [applications.md](applications.md).
 
 **Honesty clause:** this is *logical* isolation only. The auth token on the
 socket protects against accidental cross-user access, not a determined local
@@ -221,13 +233,24 @@ arrive, their host bits get adapters here.
 
 ## 4. Decisions and trade-offs
 
-### 4.1 Zero external dependencies (for now)
+### 4.1 Dependency policy
 
-stdlib-only keeps the slice auditable, builds trivially on all three OSes,
-and forces the abstractions to be ours. Costs accepted: hand-rolled
-subcommand parsing, JSON manifests, no YAML. We will add dependencies when
-they buy real capability (first likely: a pure-Go UI toolkit), evaluated
-then — not before.
+**Core and SDK: standard library only. Experience: approved Charm family.**
+Bubble Tea v1.3.10 and Lip Gloss v1.1.0 are direct dependencies only in
+`internal/experience/shell`. They buy terminal lifecycle/event handling and
+styling; no alternate UI framework or unrelated direct dependency is added.
+Their required transitive dependencies (terminal, ANSI, Unicode width,
+color/input helpers and `golang.org/x/*`) are pinned by go.mod/go.sum and are
+part of this explicit exception, not hand-added runtime dependencies.
+
+`go list -deps gostalgia/internal/runtime gostalgia/sdk` contains only Gostalgia
+and standard-library packages. An automated test enforces that boundary.
+`gctl` and the SDK/demo dependency closures likewise remain stdlib-only.
+The repository shares one module, so module downloads include Charm, but
+headless runtime packages never import it. No cgo requirement; verify with
+`CGO_ENABLED=0 go build ./...`. JSON manifests and stdlib command parsing remain
+intentional. A future VirelaiOS port can omit the experience layer entirely;
+userspace porting is not implemented here.
 
 ### 4.2 JSON manifests, not YAML
 
@@ -268,7 +291,7 @@ Big-picture milestones (from the project brief, refined):
 - **M1 Runtime vertical slice** ✅ — boot → config → services → session → one
   app → IPC → clean shutdown.
 - **M2 Hardened core** — child processes with log capture; config layering;
-  event persistence; shell (gsh) over env APIs. *Next up.*
+  event persistence; Charm shell over env APIs (**implemented**). Core hardening next.
 - **M3 Application model v2** — manifests with deps; out-of-proc apps over
   the socket transport; per-app VFS views.
 - **M4 Desktop** — window service; pick toolkit; one window; terminal app.

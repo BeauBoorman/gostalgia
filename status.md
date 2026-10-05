@@ -5,8 +5,8 @@ honestly missing, and the itemized milestone list. This is the **canonical
 tracker** — `docs/architecture.md` §5 summarizes the milestone arc and points
 here.
 
-- **Current position:** M1 complete · M2 starting · next item: **#2 Child-process support end-to-end**
-- **Last verified:** 2026-10-05 (`go vet` clean · `gofmt` clean · full test suite passing with `-race` — test/package counts are CI's to report; this line stopped hardcoding them after the count drifted · **CI green on ubuntu, macOS, and Windows** · repo: `drawmeanelephant/gostalgia`, private)
+- **Current position:** M1 complete · Charm experience + capability-scoped app SDK implemented · next core item: **#2 Child-process support end-to-end**
+- **Last verified:** 2026-10-05 (`go build` / `go vet` / `gofmt` clean · `go test -race ./...` green · test/package counts are CI's to report · pure-Go + Windows/Linux cross-builds OK · compiled Charm CLI exercised in a real PTY; terminal restored and runtime cleaned up · **CI green on ubuntu, macOS, and Windows** · repo: `drawmeanelephant/gostalgia`, private)
 
 Rules for touching this file:
 
@@ -29,7 +29,8 @@ Rules for touching this file:
 | IPC: in-proc + socket transports, token handshake, NDJSON | ✅ working | `internal/ipc` tests + `gctl` manual/e2e |
 | Process model: in-proc lifecycle, child spawn/kill/exit-status | ✅ working | `internal/process` tests (self-exec child helper) |
 | VFS: env paths, host backend confined via `os.Root`, memfs `/tmp`, mounts | ✅ working | `testing/fstest` + escape/mount tests |
-| Application model: manifests, builtin factories, single-instance launch | ✅ working | `internal/app` + services tests |
+| App SDK: embedded JSON manifest, Init/Run/Stop, scoped calls/routes, launch/stop | ✅ working | `sdk`, `internal/app`, services + shell socket lifecycle tests |
+| Charm shell: DOS-style prompt, app shelf, history/completion, VFS/process commands | ✅ working | `internal/experience/shell` (real Bubble Tea + authenticated IPC) |
 | Event bus (typed, synchronous, wildcard) | ✅ working | `internal/events` tests |
 | Config store (dotted paths, atomic persist) | ✅ working | `internal/config` tests |
 | Sessions exist; capability checks are tested but not enforced in production | ⚠️ honest state | `internal/session`, `internal/services` tests; every production dispatch path runs as admin — see `docs/security.md` |
@@ -39,19 +40,20 @@ Rules for touching this file:
 Quick check from a clean checkout:
 
 ```sh
-go vet ./... && go test -race ./...
+go build ./... && go vet ./... && go test -race ./...
+gofmt -l .  # empty output = clean
+go run ./cmd/gostalgia shell --root /tmp/gs # interactive; exit shuts down
+# Or headless:
 go run ./cmd/gostalgia boot --root /tmp/gs   # terminal 1
 go run ./cmd/gctl --root /tmp/gs status      # terminal 2
 ```
 
 ## Known gaps (honest list)
 
-- **Isolation is logical only.** Applications run in-process; a malicious app
-  could bypass capability checks. The socket token is local trust, not a
-  boundary. Capability guards (`ipc.RequireCap`) are structurally
-  unreachable in production today: both dispatch paths present the admin
-  set, and the per-app grant is carried but not enforced until backlog #13.
-  Details and roadmap: `docs/security.md`.
+- **No OS sandbox.** SDK calls/routes enforce manifest capability scoping and
+  prevent borrowing caller permissions, but apps still run in-process; malicious
+  Go code could bypass the SDK boundary. The socket token is local trust, not a
+  boundary. Details and roadmap: `docs/security.md`.
 - **No supervision yet:** exited processes stay listed (no reaping), no
   restart policies, no per-process log capture.
 - **Single-user, single-session:** user `guest` is fixed; no login.
@@ -85,8 +87,10 @@ the affected docs. Grouped under the milestone arc from `docs/architecture.md`
   exit-code surfacing over IPC, `gctl` visibility)*.
 - [ ] **3. Process supervision** — restart policies, process reaping,
   resource snapshots; `proc/list` grows history.
-- [ ] **4. `gsh` native shell** — fs/ps/apps/launch built on IPC only; no
-  privileged shell internals.
+- [x] **4. Native shell** — `gostalgia shell` (default command), Bubble Tea +
+  Lip Gloss experience, fs/ps/apps/launch/stop via authenticated IPC only;
+  app shelf, history, completion, bounded safe scrollback. `gsh` is not a
+  separate binary. See `docs/shell.md`.
 - [ ] **5. Config layering** — system + per-user + per-app layers, change
   events, `gctl config get/set`.
 - [ ] **6. Event persistence** — event log on disk, `events/recent` endpoint
@@ -138,6 +142,7 @@ the affected docs. Grouped under the milestone arc from `docs/architecture.md`
 
 | Date | Check | Result |
 |---|---|---|
+| 2026-10-05 | Charm shell + public capability-scoped SDK; one embedded-manifest Echo demo; spec read against implementation | Build/vet/gofmt/race green; pure-Go and Windows/Linux builds OK; real Bubble Tea socket integration + compiled CLI PTY smoke (echo, scoped identity, stop/relaunch, F2 shelf, exit/terminal restoration/runtime cleanup); no second demo built |
 | 2026-10-05 | FIFO regression (#16): `HostFS.Stat`/`ReadDir` no longer `os.Root.Open` special files — Lstat fallback for FIFOs, sockets, devices, symlinks; regression tests for `Stat`, `ReadDir`, and `ipc.Server.Close` with a `fs/list` handler in flight over a real socket | repro tests fail unfixed, pass fixed; full gate green (`vet`, `gofmt`, `-race`) |
 | 2026-10-05 | Docs drift (#17): `status.md` "Last verified" no longer hardcodes test counts (CI is the source of truth); `security.md`/`ipc.md` scope the `runtime.json` 0600 mode to unix — Windows inherits directory ACLs | docs match the code |
 | 2026-10-05 | Published private repo `drawmeanelephant/gostalgia`; CI matrix (ubuntu/macos/windows: vet, test, race-on-unix, gofmt) | **all three green** |

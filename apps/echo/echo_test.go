@@ -6,33 +6,42 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"gostalgia/internal/app"
+	"gostalgia/internal/events"
 	"gostalgia/internal/ipc"
+	"gostalgia/internal/process"
+	"gostalgia/internal/security"
 )
 
-func appLaunchContext(t *testing.T) app.LaunchContext {
+// launchEcho boots the real application through the real Manager, so its
+// routes reach the router exactly as a launch publishes them.
+func launchEcho(t *testing.T) *ipc.Router {
 	t.Helper()
-	return app.LaunchContext{
-		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	bus := events.NewBus()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	router := ipc.NewRouter()
+	reg := app.NewRegistry()
+	if err := reg.RegisterBuiltin(Manifest(), Factory); err != nil {
+		t.Fatal(err)
 	}
+	mgr := app.NewManager(reg, process.NewManager(bus, log), router, bus, log)
+	if _, err := mgr.Launch(context.Background(), ID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = mgr.Stop(ID, 2*time.Second) })
+	return router
 }
 
-// TestEchoServesOverRouter registers the application's routes on a fresh
-// router and dispatches requests at them, the way a socket client's
-// dispatch does.
+// TestEchoServesOverRouter dispatches requests at the launched routes, the
+// way a socket client's dispatch does.
 func TestEchoServesOverRouter(t *testing.T) {
-	e, err := Factory(appLaunchContext(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := ipc.NewRouter()
-	if err := e.RegisterRoutes(r, "app/"+ID); err != nil {
-		t.Fatal(err)
-	}
+	r := launchEcho(t)
 	dispatch := func(id int64, method string, params string) ipc.Response {
 		t.Helper()
-		return r.Dispatch(context.Background(), ipc.Request{
+		ctx := ipc.WithCapabilities(context.Background(), security.NewCapabilities(security.CapIPC))
+		return r.Dispatch(ctx, ipc.Request{
 			ID:     id,
 			Method: "app/" + ID + "/" + method,
 			Params: json.RawMessage(params),
@@ -84,7 +93,7 @@ func TestEchoServesOverRouter(t *testing.T) {
 	if resp := dispatch(5, "echo", `{not json`); resp.OK {
 		t.Error("echo with malformed params succeeded, want error")
 	}
-	if resp := r.Dispatch(context.Background(), ipc.Request{ID: 6, Method: "app/" + ID + "/missing"}); resp.OK {
+	if resp := dispatch(6, "missing", ""); resp.OK {
 		t.Error("unknown route dispatch succeeded, want unknown-method error")
 	}
 }

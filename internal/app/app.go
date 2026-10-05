@@ -1,16 +1,15 @@
-// Package app implements the environment's application model: manifests
-// (what an application is), a registry (what is installed), and a manager
-// (how applications launch, run, and stop inside the environment).
+// Package app implements the standard-library-only application registry and
+// lifecycle manager. Application-facing contracts live in gostalgia/sdk.
 package app
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"path"
-	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -19,87 +18,31 @@ import (
 	"gostalgia/internal/ipc"
 	"gostalgia/internal/process"
 	"gostalgia/internal/security"
-	"gostalgia/internal/vfs"
+	"gostalgia/sdk"
 )
 
-// Manifest declares an application. It is the environment-facing
-// description: identity, version, the entrypoint (a registered factory
-// for builtin apps, a binary name for out-of-proc apps later), and the
-// permissions the application requires.
-type Manifest struct {
-	ID          string   `json:"id"`         // reverse-DNS: com.gostalgia.echo
-	Name        string   `json:"name"`       // display name
-	Version     string   `json:"version"`    // semver-ish: 0.1.0
-	Entrypoint  string   `json:"entrypoint"` // registered factory name
-	Permissions []string `json:"permissions,omitempty"`
-	Description string   `json:"description,omitempty"`
-}
-
-var idPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(\.[a-z0-9-]+)+$`)
-
-// Validate checks the manifest's required structure.
-func (m Manifest) Validate() error {
-	if !idPattern.MatchString(m.ID) {
-		return fmt.Errorf("app: manifest id %q is not a reverse-DNS name like com.example.editor", m.ID)
-	}
-	if m.Name == "" {
-		return fmt.Errorf("app: manifest %s: name is required", m.ID)
-	}
-	if m.Version == "" {
-		return fmt.Errorf("app: manifest %s: version is required", m.ID)
-	}
-	if m.Entrypoint == "" {
-		return fmt.Errorf("app: manifest %s: entrypoint is required", m.ID)
-	}
-	return nil
-}
-
-// Instance is a running application. Run must return promptly when ctx is
-// canceled (ctx is the owning process's context).
-type Instance interface {
-	Run(ctx context.Context, p *process.Process) error
-	// RegisterRoutes installs the application's IPC methods under base
-	// ("app/<id>"), e.g. base+"/echo".
-	RegisterRoutes(r *ipc.Router, base string) error
-}
-
-// LaunchContext carries the wiring an application factory may use.
-type LaunchContext struct {
-	Manifest Manifest
-	Log      *slog.Logger
-	VFS      vfs.FS
-	Router   *ipc.Router
-	Procs    *process.Manager
-	Events   *events.Bus
-	// Caps is the capability set granted to this instance: exactly the
-	// manifest's declared permissions. The same set travels on the
-	// instance's run context (see ipc.Capabilities).
-	Caps *security.Capabilities
-}
-
-// Factory creates an application instance for launch.
-type Factory func(lc LaunchContext) (Instance, error)
+type Manifest = sdk.Manifest
+type Instance = sdk.Instance
+type Factory = sdk.Factory
 
 // Event is published when an application launches or exits.
 type Event struct {
 	ID    string `json:"id"`
 	PID   int32  `json:"pid"`
-	State string `json:"state"` // "launched" or "exited"
+	State string `json:"state"`
 	Err   string `json:"error,omitempty"`
 }
 
 func (Event) Type() string { return "app.state" }
 
-// Status is one installed application and whether it is running.
 type Status struct {
 	Manifest Manifest `json:"manifest"`
 	Running  bool     `json:"running"`
 	PID      int32    `json:"pid,omitempty"`
 }
 
-// Registry holds builtin factories and known manifests. Manifests also
-// arrive as JSON documents in the VFS (/apps/manifests); factories are
-// always builtin for now — out-of-proc entrypoints are a later milestone.
+// Registry holds compiled-in factories and installed manifests. JSON alone
+// cannot install executable code; builtin registrations win over disk copies.
 type Registry struct {
 	mu        sync.RWMutex
 	factories map[string]Factory
@@ -107,13 +50,14 @@ type Registry struct {
 }
 
 func NewRegistry() *Registry {
-	return &Registry{
-		factories: map[string]Factory{},
-		manifests: map[string]Manifest{},
-	}
+	return &Registry{factories: map[string]Factory{}, manifests: map[string]Manifest{}}
 }
 
-// RegisterBuiltin registers a manifest with its factory.
+func cloneManifest(m Manifest) Manifest {
+	m.Permissions = append([]string(nil), m.Permissions...)
+	return m
+}
+
 func (r *Registry) RegisterBuiltin(m Manifest, f Factory) error {
 	if err := m.Validate(); err != nil {
 		return err
@@ -129,60 +73,57 @@ func (r *Registry) RegisterBuiltin(m Manifest, f Factory) error {
 	if _, dup := r.factories[m.Entrypoint]; dup {
 		return fmt.Errorf("app: entrypoint %q is already registered", m.Entrypoint)
 	}
-	r.manifests[m.ID] = m
+	r.manifests[m.ID] = cloneManifest(m)
 	r.factories[m.Entrypoint] = f
 	return nil
 }
 
-// LoadManifests reads manifest JSON documents from dir in fsys and adds
-// them to the registry. Manifests whose id is already known are skipped
-// (builtin registrations win). A malformed document is an error.
+// LoadManifests validates the entire directory before adding any documents.
 func (r *Registry) LoadManifests(fsys fs.FS, dir string) (int, error) {
 	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {
 		return 0, fmt.Errorf("app: read manifests from %s: %w", dir, err)
 	}
-	loaded := 0
+	var pending []Manifest
 	for _, e := range entries {
 		if e.IsDir() || path.Ext(e.Name()) != ".json" {
 			continue
 		}
 		b, err := fs.ReadFile(fsys, path.Join(dir, e.Name()))
 		if err != nil {
-			return loaded, fmt.Errorf("app: read %s/%s: %w", dir, e.Name(), err)
+			return 0, fmt.Errorf("app: read %s/%s: %w", dir, e.Name(), err)
 		}
-		var m Manifest
-		if err := json.Unmarshal(b, &m); err != nil {
-			return loaded, fmt.Errorf("app: parse %s/%s: %w", dir, e.Name(), err)
+		m, err := sdk.ParseManifest(b)
+		if err != nil {
+			return 0, fmt.Errorf("app: %s/%s: %w", dir, e.Name(), err)
 		}
-		if err := m.Validate(); err != nil {
-			return loaded, fmt.Errorf("app: %s/%s: %w", dir, e.Name(), err)
-		}
-		r.mu.Lock()
+		pending = append(pending, m)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	loaded := 0
+	for _, m := range pending {
 		if _, exists := r.manifests[m.ID]; !exists {
-			r.manifests[m.ID] = m
+			r.manifests[m.ID] = cloneManifest(m)
 			loaded++
 		}
-		r.mu.Unlock()
 	}
 	return loaded, nil
 }
 
-// Manifest returns the manifest for id.
 func (r *Registry) Manifest(id string) (Manifest, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	m, ok := r.manifests[id]
-	return m, ok
+	return cloneManifest(m), ok
 }
 
-// Manifests lists all known manifests, sorted by id.
 func (r *Registry) Manifests() []Manifest {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]Manifest, 0, len(r.manifests))
 	for _, m := range r.manifests {
-		out = append(out, m)
+		out = append(out, cloneManifest(m))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
@@ -195,41 +136,39 @@ func (r *Registry) factory(entrypoint string) (Factory, bool) {
 	return f, ok
 }
 
-// Manager launches and tracks application instances. For now one instance
-// per application id is allowed (single-instance policy); duplicates are
-// rejected with the running pid.
+// Manager reserves the app id before invoking user code. No manager lock is
+// held across application callbacks or synchronous bus publications.
 type Manager struct {
-	reg    *Registry
-	procs  *process.Manager
-	router *ipc.Router
-	bus    *events.Bus
-	log    *slog.Logger
-
+	reg     *Registry
+	procs   *process.Manager
+	router  *ipc.Router
+	bus     *events.Bus
+	log     *slog.Logger
 	mu      sync.Mutex
 	running map[string]*runningApp
 }
 
-// runningApp tracks one live instance. Cleanup runs exactly once whether
-// the app is stopped deliberately or exits on its own, and Stop waits for
-// it — callers must never observe stale routes or running state.
 type runningApp struct {
-	pid  int32
-	once sync.Once
-	done func()
+	pid        int32 // zero while initializing
+	cleanupErr error // written before process Done closes
 }
 
 func NewManager(reg *Registry, procs *process.Manager, router *ipc.Router, bus *events.Bus, log *slog.Logger) *Manager {
-	return &Manager{
-		reg:     reg,
-		procs:   procs,
-		router:  router,
-		bus:     bus,
-		log:     log,
-		running: map[string]*runningApp{},
-	}
+	return &Manager{reg: reg, procs: procs, router: router, bus: bus, log: log, running: map[string]*runningApp{}}
 }
 
-// Launch starts application id inside the environment.
+// invoke turns lifecycle panics into process/launch errors, never success.
+func invoke(phase string, fn func() error) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("app: %s panicked: %v", phase, p)
+		}
+	}()
+	return fn()
+}
+
+// Launch runs Factory -> Init -> Run -> Stop. ctx owns the instance lifetime.
+// IPC launchers must supply a runtime-lifetime context, not a request deadline.
 func (m *Manager) Launch(ctx context.Context, id string) (*process.Process, error) {
 	man, ok := m.reg.Manifest(id)
 	if !ok {
@@ -239,93 +178,197 @@ func (m *Manager) Launch(ctx context.Context, id string) (*process.Process, erro
 	if !ok {
 		return nil, fmt.Errorf("app: no factory for entrypoint %q", man.Entrypoint)
 	}
+	ra := &runningApp{}
 	m.mu.Lock()
-	if ra, dup := m.running[id]; dup {
+	if existing, dup := m.running[id]; dup {
+		pid := existing.pid
 		m.mu.Unlock()
-		return nil, fmt.Errorf("app: %s is already running (pid %d)", id, ra.pid)
+		return nil, fmt.Errorf("app: %s is already running or initializing (pid %d)", id, pid)
 	}
-	m.mu.Unlock()
-
-	// The application's capabilities are exactly its manifest's
-	// declared permissions. They are stored on the process record and
-	// attached to the instance's run context, so every call the app
-	// makes from that context carries its own grant. Production
-	// enforcement against this grant lands with backlog #13; today the
-	// grant is carried and observable, not yet enforced on dispatch.
-	caps := security.NewCapabilities(man.Permissions...)
-
-	inst, err := factory(LaunchContext{
-		Manifest: man,
-		Log:      m.log.With("app", id),
-		VFS:      nil, // per-app scoped views arrive with permission enforcement
-		Router:   m.router,
-		Procs:    m.procs,
-		Events:   m.bus,
-		Caps:     caps,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("app: create %s: %w", id, err)
-	}
-
-	base := "app/" + man.ID
-	if err := inst.RegisterRoutes(m.router, base); err != nil {
-		return nil, fmt.Errorf("app: %s: register routes: %w", id, err)
-	}
-
-	proc, err := m.procs.StartInProc(ctx, process.Spec{
-		Name: man.ID,
-		Kind: process.KindInProc,
-		Caps: man.Permissions,
-	}, func(p *process.Process) error {
-		return inst.Run(ipc.WithCapabilities(p.Context(), caps), p)
-	})
-	if err != nil {
-		m.router.UnhandlePrefix(base)
-		return nil, fmt.Errorf("app: start %s: %w", id, err)
-	}
-
-	ra := &runningApp{pid: proc.ID()}
-	ra.done = func() {
-		ra.once.Do(func() {
-			m.router.UnhandlePrefix(base)
-			m.mu.Lock()
-			delete(m.running, id)
-			m.mu.Unlock()
-			info := proc.Info()
-			m.bus.Publish("app", Event{ID: id, PID: info.ID, State: "exited", Err: info.Err})
-			m.log.Info("application exited", "app", id, "pid", info.ID, "state", info.State, "err", info.Err)
-		})
-	}
-	m.mu.Lock()
 	m.running[id] = ra
 	m.mu.Unlock()
-	m.bus.Publish("app", Event{ID: id, PID: proc.ID(), State: "launched"})
-	m.log.Info("application launched", "app", id, "pid", proc.ID(), "version", man.Version)
+	forget := func() {
+		m.mu.Lock()
+		delete(m.running, id)
+		m.mu.Unlock()
+	}
 
-	go func() {
-		<-proc.Done()
-		ra.done()
-	}()
+	var inst Instance
+	if err := invoke("factory", func() (err error) { inst, err = factory(); return err }); err != nil {
+		forget()
+		return nil, fmt.Errorf("app: create %s: %w", id, err)
+	}
+	if inst == nil {
+		forget()
+		return nil, fmt.Errorf("app: %s: factory returned nil", id)
+	}
+
+	life, cancel := context.WithCancel(ctx)
+	caps := append([]string(nil), man.Permissions...)
+	base := "app/" + id + "/"
+	var mu sync.Mutex
+	initializing, active := true, true
+	registered := false
+	routes := map[string]ipc.Handler{}
+	var inflight sync.WaitGroup
+	// Always replace incoming caps: an operator calling this app must not
+	// lend the app operator privileges (the confused-deputy boundary).
+	scope := func(parent context.Context) (context.Context, func()) {
+		c, stop := context.WithCancel(parent)
+		detach := context.AfterFunc(life, stop)
+		c = ipc.WithCapabilities(c, security.NewCapabilities(caps...))
+		return c, func() { detach(); stop() }
+	}
+	call := func(parent context.Context, method string, params, out any) error {
+		if err := life.Err(); err != nil {
+			return fmt.Errorf("app: instance stopped: %w", err)
+		}
+		c, stop := scope(parent)
+		defer stop()
+		if err := ipc.RequireCap(c, security.CapIPC); err != nil {
+			return err
+		}
+		raw, err := ipc.Encode(params)
+		if err != nil {
+			return err
+		}
+		if err := c.Err(); err != nil {
+			return err
+		}
+		resp := m.router.Dispatch(c, ipc.Request{Method: method, Params: raw})
+		if !resp.OK {
+			return errors.New(resp.Error)
+		}
+		if out != nil {
+			return json.Unmarshal(resp.Data, out)
+		}
+		return nil
+	}
+	handle := func(name string, h sdk.Handler) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if !initializing {
+			return fmt.Errorf("app: routes may only be declared during Init")
+		}
+		if !security.NewCapabilities(caps...).Has(security.CapIPC) {
+			return fmt.Errorf("permission denied: missing capability %q", security.CapIPC)
+		}
+		method := base + name
+		if _, dup := routes[method]; dup {
+			return fmt.Errorf("app: duplicate route %q", name)
+		}
+		routes[method] = func(parent context.Context, req ipc.Request) (any, error) {
+			if err := ipc.RequireCap(parent, security.CapIPC); err != nil {
+				return nil, err
+			}
+			mu.Lock()
+			if !active {
+				mu.Unlock()
+				return nil, fmt.Errorf("app: instance stopped")
+			}
+			inflight.Add(1)
+			mu.Unlock()
+			defer inflight.Done()
+			c, stop := scope(parent)
+			defer stop()
+			if err := c.Err(); err != nil {
+				return nil, err
+			}
+			return h(c, req.Params)
+		}
+		return nil
+	}
+	cleanup := func() error {
+		mu.Lock()
+		active, initializing = false, false
+		mu.Unlock()
+		cancel()
+		if registered {
+			for method := range routes {
+				m.router.Unhandle(method)
+			}
+		}
+		stopCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		drained := make(chan struct{})
+		go func() { inflight.Wait(); close(drained) }()
+		var drainErr error
+		select {
+		case <-drained:
+		case <-stopCtx.Done():
+			drainErr = fmt.Errorf("app: handlers did not drain: %w", stopCtx.Err())
+		}
+		return errors.Join(drainErr, invoke("Stop", func() error { return inst.Stop(stopCtx) }))
+	}
+	lc := sdk.NewContext(cloneManifest(man), m.log.With("app", id), call, handle)
+	err := invoke("Init", func() error { return inst.Init(lc) })
+	mu.Lock()
+	initializing = false
+	mu.Unlock()
+	if err == nil {
+		err = life.Err()
+	}
+	if err == nil {
+		err = m.router.HandleBatch(routes)
+	}
+	if err != nil {
+		stopErr := cleanup()
+		forget()
+		return nil, fmt.Errorf("app: init %s: %w", id, errors.Join(err, stopErr))
+	}
+
+	registered = true
+	ready := make(chan struct{})
+	proc, err := m.procs.StartInProc(life, process.Spec{Name: id, Caps: caps}, func(p *process.Process) (runErr error) {
+		<-ready
+		defer func() {
+			ra.cleanupErr = cleanup()
+			runErr = errors.Join(runErr, ra.cleanupErr)
+			forget()
+			msg := ""
+			if runErr != nil {
+				msg = runErr.Error()
+			}
+			m.bus.Publish("app", Event{ID: id, PID: p.ID(), State: "exited", Err: msg})
+		}()
+		return invoke("Run", func() error { return inst.Run(p.Context()) })
+	})
+	if err != nil {
+		stopErr := cleanup()
+		forget()
+		return nil, errors.Join(err, stopErr)
+	}
+	m.mu.Lock()
+	ra.pid = proc.ID()
+	m.mu.Unlock()
+	// Release Run before publishing: event subscribers may synchronously Stop.
+	close(ready)
+	m.bus.Publish("app", Event{ID: id, PID: proc.ID(), State: "launched"})
+	m.log.Info("application launched", "app", id, "pid", proc.ID())
 	return proc, nil
 }
 
-// Stop stops a running application and waits until its routes and state
-// have been retracted.
+// Stop waits for Run, handler draining, Stop, and route/state retraction.
 func (m *Manager) Stop(id string, timeout time.Duration) error {
 	m.mu.Lock()
 	ra, ok := m.running[id]
+	pid := int32(0)
+	if ok {
+		pid = ra.pid
+	}
 	m.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("app: %s is not running", id)
 	}
-	if err := m.procs.Stop(ra.pid, timeout); err != nil {
+	if pid == 0 {
+		return fmt.Errorf("app: %s is still initializing", id)
+	}
+	if err := m.procs.Stop(pid, timeout); err != nil {
 		return err
 	}
-	ra.done()
-	return nil
+	return ra.cleanupErr
 }
 
-// IsRunning reports whether an instance of id is running.
 func (m *Manager) IsRunning(id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -333,7 +376,6 @@ func (m *Manager) IsRunning(id string) bool {
 	return ok
 }
 
-// Running returns a copy of the app-id -> pid map.
 func (m *Manager) Running() map[string]int32 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -344,17 +386,12 @@ func (m *Manager) Running() map[string]int32 {
 	return out
 }
 
-// List reports every known application with its running state.
 func (m *Manager) List() []Status {
 	running := m.Running()
 	out := make([]Status, 0)
 	for _, man := range m.reg.Manifests() {
-		st := Status{Manifest: man, Running: false}
-		if pid, ok := running[man.ID]; ok {
-			st.Running = true
-			st.PID = pid
-		}
-		out = append(out, st)
+		pid, ok := running[man.ID]
+		out = append(out, Status{Manifest: man, Running: ok, PID: pid})
 	}
 	return out
 }

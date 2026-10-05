@@ -41,5 +41,9 @@ been delivered.
 ## Ownership
 
 A `Spec` carries the owning session and user and the capability list granted to
-the process. Applications get their capabilities from their manifest
-(see applications.md).
+the process. `Process.Context()` replaces inherited caller capabilities with
+that spec grant, and `Info.Caps` exposes a defensive snapshot over IPC.
+Applications get their capabilities from their manifest. SDK lifecycle panics
+are converted to errors and cleanup always runs; the process manager itself
+still relies on direct non-app callbacks to behave. See
+[applications.md](applications.md).

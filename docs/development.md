@@ -15,6 +15,8 @@ Or `make build|vet|fmt|test|race`. Requires Go ≥ 1.25 (`os.Root.MkdirAll`).
 ## Run the environment
 
 ```sh
+go run ./cmd/gostalgia shell --root /tmp/gs       # interactive Charm shell
+# Or headless:
 go run ./cmd/gostalgia boot --root /tmp/gs        # terminal 1
 go run ./cmd/gctl --root /tmp/gs status        # terminal 2
 ```
@@ -43,7 +45,8 @@ cmd/gostalgia        environment runtime binary
 cmd/gctl          control CLI for a running environment
 internal/          config, events, ipc, vfs, process, session, security,
                    service (framework), services (core services), app,
-                   runtime
+                   runtime, experience/shell (Charm, IPC only)
+sdk/               public stdlib-only app authoring contract
 apps/              builtin applications: echo/ plus registration and
                    manifest seeding (apps.go)
 platform/          host-specific listeners/dialers (build tags)
@@ -54,8 +57,11 @@ status.md          living status + the canonical backlog list
 
 ## Conventions
 
-- Zero external dependencies; stdlib only. Justify any new `require` in the
-  PR and in docs/architecture.md §4.
+- Core, SDK, and demo apps are stdlib-only. The experience layer has the
+  approved Bubble Tea / Lip Gloss exception plus their required transitives;
+  no other direct external dependencies. See docs/architecture.md §4.1.
+- Write apps using [the SDK specification](applications.md); do not import
+  internal runtime packages, host APIs, or Charm into apps.
 - No `GOOS` conditionals outside `platform/`.
 - Every subsystem ships with tests; new IPC methods need a capability decision
   (docs/security.md) and a test covering the deny path.

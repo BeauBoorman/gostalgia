@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"gostalgia/internal/events"
+	"gostalgia/internal/ipc"
+	"gostalgia/internal/security"
 )
 
 type Kind string
@@ -105,7 +107,9 @@ func (p *Process) Done() <-chan struct{} { return p.done }
 func (p *Process) Info() Info {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.info
+	info := p.info
+	info.Caps = append([]string(nil), info.Caps...)
+	return info
 }
 
 // Caps returns the capabilities granted to this process (from its spec).
@@ -170,7 +174,7 @@ func (m *Manager) StartInProc(ctx context.Context, spec Spec, run func(p *Proces
 	}
 	spec.Kind = KindInProc
 	id := m.alloc()
-	procCtx, cancel := context.WithCancel(ctx)
+	procCtx, cancel := context.WithCancel(ipc.WithCapabilities(ctx, security.NewCapabilities(spec.Caps...)))
 	p := &Process{done: make(chan struct{}), ctx: procCtx, cancel: cancel}
 	p.info = Info{
 		ID:        id,
@@ -179,8 +183,8 @@ func (m *Manager) StartInProc(ctx context.Context, spec Spec, run func(p *Proces
 		State:     StateStarting,
 		SessionID: spec.SessionID,
 		User:      spec.User,
-		Caps:      spec.Caps,
 		StartedAt: time.Now(),
+		Caps:      append([]string(nil), spec.Caps...),
 	}
 	m.add(p)
 	m.publish(p) // starting
@@ -226,7 +230,7 @@ func (m *Manager) StartChild(ctx context.Context, spec Spec) (*Process, error) {
 	}
 	spec.Kind = KindChild
 	id := m.alloc()
-	procCtx, cancel := context.WithCancel(ctx)
+	procCtx, cancel := context.WithCancel(ipc.WithCapabilities(ctx, security.NewCapabilities(spec.Caps...)))
 	cmd := exec.CommandContext(procCtx, spec.Args[0], spec.Args[1:]...)
 	cmd.Dir = spec.Dir
 	if spec.Env != nil {
@@ -241,8 +245,8 @@ func (m *Manager) StartChild(ctx context.Context, spec Spec) (*Process, error) {
 		State:     StateStarting,
 		SessionID: spec.SessionID,
 		User:      spec.User,
-		Caps:      spec.Caps,
 		StartedAt: time.Now(),
+		Caps:      append([]string(nil), spec.Caps...),
 	}
 
 	if err := cmd.Start(); err != nil {

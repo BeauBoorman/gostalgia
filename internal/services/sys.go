@@ -16,7 +16,8 @@ import (
 // SysService exposes runtime status, control, and application endpoints.
 // It owns the "sys/*", "app/*", and "session/*" method namespaces.
 type SysService struct {
-	ctx *service.Context
+	ctx      *service.Context
+	lifetime context.Context
 }
 
 func NewSys() *SysService { return &SysService{} }
@@ -30,12 +31,14 @@ func (s *SysService) Init(ctx *service.Context) error {
 }
 
 func (s *SysService) Start(ctx context.Context) error {
+	s.lifetime = ctx
 	routes := map[string]ipc.Handler{
 		"sys/ping":       s.ping,
 		"sys/status":     s.status,
 		"sys/shutdown":   s.shutdown,
 		"app/list":       s.appList,
 		"app/launch":     s.appLaunch,
+		"app/stop":       s.appStop,
 		"session/whoami": s.whoami,
 	}
 	for method, h := range routes {
@@ -168,11 +171,30 @@ func (s *SysService) appLaunch(ctx context.Context, req ipc.Request) (any, error
 	if p.ID == "" {
 		return nil, fmt.Errorf("params.id is required")
 	}
-	proc, err := s.ctx.Apps.Launch(ctx, p.ID)
+	proc, err := s.ctx.Apps.Launch(s.lifetime, p.ID)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"id": p.ID, "pid": proc.ID()}, nil
+}
+
+func (s *SysService) appStop(ctx context.Context, req ipc.Request) (any, error) {
+	if err := ipc.RequireCap(ctx, security.CapProcStop); err != nil {
+		return nil, err
+	}
+	var p struct {
+		ID string `json:"id"`
+	}
+	if err := ipc.DecodeParams(req.Params, &p); err != nil {
+		return nil, err
+	}
+	if p.ID == "" {
+		return nil, fmt.Errorf("params.id is required")
+	}
+	if err := s.ctx.Apps.Stop(p.ID, 6*time.Second); err != nil {
+		return nil, err
+	}
+	return map[string]any{"id": p.ID, "stopped": true}, nil
 }
 
 func (s *SysService) whoami(ctx context.Context, req ipc.Request) (any, error) {

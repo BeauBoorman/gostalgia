@@ -281,6 +281,37 @@ func TestAppLaunchViaIPC(t *testing.T) {
 	}
 }
 
+func TestAppControlPermissionsAndRequestLifetime(t *testing.T) {
+	env := newTestEnv(t)
+	for _, method := range []string{"app/launch", "app/stop"} {
+		resp := env.call(context.Background(), security.NewCapabilities(security.CapIPC), method, map[string]string{"id": "com.gostalgia.echo"})
+		if resp.OK {
+			t.Fatalf("%s without capability succeeded", method)
+		}
+	}
+	request, cancel := context.WithCancel(context.Background())
+	resp := env.call(request, security.AdminCapabilities(), "app/launch", map[string]string{"id": "com.gostalgia.echo"})
+	if !resp.OK {
+		t.Fatal(resp.Error)
+	}
+	cancel() // A client's request/disconnection cannot own the app lifetime.
+	resp = env.call(context.Background(), security.AdminCapabilities(), "app/com.gostalgia.echo/identity", nil)
+	if !resp.OK {
+		t.Fatal(resp.Error)
+	}
+	var out struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	must(t, json.Unmarshal(resp.Data, &out))
+	if len(out.Capabilities) != 1 || out.Capabilities[0] != security.CapIPC {
+		t.Fatalf("caps = %v", out.Capabilities)
+	}
+	resp = env.call(context.Background(), security.AdminCapabilities(), "app/stop", map[string]string{"id": "com.gostalgia.echo"})
+	if !resp.OK || env.ctx.Apps.IsRunning("com.gostalgia.echo") {
+		t.Fatalf("stop = %+v", resp)
+	}
+}
+
 func TestFSMkdirAndRemoveOverIPC(t *testing.T) {
 	env := newTestEnv(t)
 	admin := security.AdminCapabilities()
