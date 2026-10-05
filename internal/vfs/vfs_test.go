@@ -151,6 +151,21 @@ func TestHostFSBlocksSymlinkEscape(t *testing.T) {
 	if _, err := h.ReadFile("sub/link/secret.txt"); err == nil {
 		t.Fatal("ReadFile through symlink escape succeeded, want failure")
 	}
+	// Every mutating operation routed through os.Root must fail closed
+	// the same way, and the target must come out untouched.
+	if err := h.WriteFile("sub/link/secret.txt", []byte("overwritten"), 0o644); err == nil {
+		t.Error("WriteFile through symlink escape succeeded, want failure")
+	}
+	if err := h.MkdirAll("sub/link/escaped"); err == nil {
+		t.Error("MkdirAll through symlink escape succeeded, want failure")
+	}
+	if err := h.Remove("sub/link/secret.txt"); err == nil {
+		t.Error("Remove through symlink escape succeeded, want failure")
+	}
+	data, err := os.ReadFile(filepath.Join(secret, "secret.txt"))
+	if err != nil || string(data) != "secret" {
+		t.Fatalf("secret file changed through a blocked escape: %q (err %v)", data, err)
+	}
 }
 
 func TestMemFSMatchesFstest(t *testing.T) {
