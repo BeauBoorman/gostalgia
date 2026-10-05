@@ -37,8 +37,9 @@ synchronously retract its own route.
 
 The first request on every connection must be `auth` with the environment
 token (`{"method":"auth","params":{"token":"..."}}`). The token lives in
-`runtime.json` (mode 0600) under the environment root. Authenticated
-connections receive the admin capability set.
+`runtime.json` (mode 0600 on unix; on Windows the mode does not map to an
+ACL — the file inherits the environment directory's permissions) under the
+environment root. Authenticated connections receive the admin capability set.
 
 This protects against accidental cross-user access only. It is local trust,
 not a security boundary — see security.md.
