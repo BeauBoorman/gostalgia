@@ -157,10 +157,12 @@ An application is declared by a **manifest** (id, name, version, entrypoint,
 permissions, description; JSON — see 4.3) and implemented by a factory that
 produces an `Instance` with `Run(ctx, proc)` and `RegisterRoutes(router,
 base)`. Launching: manifest → factory → instance routes registered under
-`app/<id>/…` (scoped to the manifest's capabilities) → in-proc process
-started → `app.launched` event. Single instance per app id for now
-(duplicates are rejected). Out-of-proc apps reuse the same manifest and talk
-to the runtime over the socket transport.
+`app/<id>/…` (namespaced per app; routes are **not** scoped to the
+manifest's capabilities — enforcement is backlog #13) → in-proc process
+started, carrying the manifest's permissions on the process record and on
+the application's call context → `app.launched` event. Single instance per
+app id for now (duplicates are rejected). Out-of-proc apps reuse the same
+manifest and talk to the runtime over the socket transport.
 
 ### 3.7 Events (`internal/events`)
 
@@ -175,10 +177,14 @@ types; nothing publishes untyped maps.
 
 Users and sessions exist as first-class environment concepts from day one
 (the slice creates user `guest` and one session at boot). Security model:
-**capabilities**. A process's capabilities come from its manifest
-permissions; they are attached to the IPC context and enforced at handler
-boundaries (`security.Capabilities.Has`). Capabilities currently enforced:
-`fs.write`, `proc.stop`, `shutdown`, `admin`.
+**capabilities**. A process's capabilities are its manifest permissions;
+they are stored on the process record and attached to the application's own
+call context. Handler guards exist (`ipc.RequireCap`, backed by
+`security.Capabilities.Has`), but they are **structurally unreachable in
+production today**: both production dispatch paths (authenticated socket
+clients and the boot self-test) present the admin capability set, so a
+guard can only fail in tests. Real enforcement with per-app call contexts
+is backlog #13; until it lands, capabilities are carried, not enforced.
 
 **Honesty clause:** this is *logical* isolation only. The auth token on the
 socket protects against accidental cross-user access, not a determined local

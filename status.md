@@ -32,7 +32,7 @@ Rules for touching this file:
 | Application model: manifests, builtin factories, single-instance launch | ✅ working | `internal/app` + services tests |
 | Event bus (typed, synchronous, wildcard) | ✅ working | `internal/events` tests |
 | Config store (dotted paths, atomic persist) | ✅ working | `internal/config` tests |
-| Sessions + capability checks on privileged IPC methods | ✅ working | `internal/session`, `internal/services` tests |
+| Sessions exist; capability checks are tested but not enforced in production | ⚠️ honest state | `internal/session`, `internal/services` tests; every production dispatch path runs as admin — see `docs/security.md` |
 | Cross-platform compile (darwin/linux/windows) | ✅ compiles | `GOOS=` builds in CI matrix |
 | Cross-platform behavior: CI runs the full test suite on ubuntu, macOS, and Windows runners | ✅ CI-green (Windows: full fstest skipped — see `docs/filesystem.md` metadata caveat; structural checks run everywhere) | `.github/workflows/ci.yml` |
 
@@ -48,7 +48,10 @@ go run ./cmd/gctl --root /tmp/gs status      # terminal 2
 
 - **Isolation is logical only.** Applications run in-process; a malicious app
   could bypass capability checks. The socket token is local trust, not a
-  boundary. Details and roadmap: `docs/security.md`.
+  boundary. Capability guards (`ipc.RequireCap`) are structurally
+  unreachable in production today: both dispatch paths present the admin
+  set, and the per-app grant is carried but not enforced until backlog #13.
+  Details and roadmap: `docs/security.md`.
 - **No supervision yet:** exited processes stay listed (no reaping), no
   restart policies, no per-process log capture.
 - **Single-user, single-session:** user `guest` is fixed; no login.

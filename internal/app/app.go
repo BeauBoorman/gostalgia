@@ -18,6 +18,7 @@ import (
 	"gostalgia/internal/events"
 	"gostalgia/internal/ipc"
 	"gostalgia/internal/process"
+	"gostalgia/internal/security"
 	"gostalgia/internal/vfs"
 )
 
@@ -70,6 +71,10 @@ type LaunchContext struct {
 	Router   *ipc.Router
 	Procs    *process.Manager
 	Events   *events.Bus
+	// Caps is the capability set granted to this instance: exactly the
+	// manifest's declared permissions. The same set travels on the
+	// instance's run context (see ipc.Capabilities).
+	Caps *security.Capabilities
 }
 
 // Factory creates an application instance for launch.
@@ -241,6 +246,14 @@ func (m *Manager) Launch(ctx context.Context, id string) (*process.Process, erro
 	}
 	m.mu.Unlock()
 
+	// The application's capabilities are exactly its manifest's
+	// declared permissions. They are stored on the process record and
+	// attached to the instance's run context, so every call the app
+	// makes from that context carries its own grant. Production
+	// enforcement against this grant lands with backlog #13; today the
+	// grant is carried and observable, not yet enforced on dispatch.
+	caps := security.NewCapabilities(man.Permissions...)
+
 	inst, err := factory(LaunchContext{
 		Manifest: man,
 		Log:      m.log.With("app", id),
@@ -248,6 +261,7 @@ func (m *Manager) Launch(ctx context.Context, id string) (*process.Process, erro
 		Router:   m.router,
 		Procs:    m.procs,
 		Events:   m.bus,
+		Caps:     caps,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("app: create %s: %w", id, err)
@@ -263,7 +277,7 @@ func (m *Manager) Launch(ctx context.Context, id string) (*process.Process, erro
 		Kind: process.KindInProc,
 		Caps: man.Permissions,
 	}, func(p *process.Process) error {
-		return inst.Run(p.Context(), p)
+		return inst.Run(ipc.WithCapabilities(p.Context(), caps), p)
 	})
 	if err != nil {
 		m.router.UnhandlePrefix(base)
