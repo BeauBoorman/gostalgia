@@ -1,0 +1,13 @@
+# binaries (anchored so cmd/gostalgia and cmd/gctl stay tracked)
+/gostalgia
+/gctl
+*.test
+
+# macOS Finder metadata
+.DS_Store
+
+# local environment roots used during development
+/gs-root/
+
+# go
+*.out

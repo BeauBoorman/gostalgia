@@ -1,0 +1,254 @@
+// Command gctl controls a running Gostalgia environment over IPC. It is
+// the operator's window into the environment and the proof that the IPC
+// transport works end to end from outside the process.
+//
+//	gctl [--root DIR] <command> [args]
+//
+// Commands: status, ps, apps, echo MSG, ls PATH, cat PATH, shutdown,
+// call METHOD [JSON-PARAMS]
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"text/tabwriter"
+	"time"
+
+	"gostalgia/internal/ipc"
+	"gostalgia/internal/runtime"
+	"gostalgia/platform"
+)
+
+const usageText = `gctl — control a running Gostalgia environment
+
+Usage:
+  gctl [--root DIR] status              runtime status
+  gctl [--root DIR] ps                  environment processes
+  gctl [--root DIR] apps                installed applications
+  gctl [--root DIR] echo MESSAGE        send a message to the echo app
+  gctl [--root DIR] ls [PATH]           list a directory in the VFS
+  gctl [--root DIR] cat PATH            print a file from the VFS
+  gctl [--root DIR] shutdown            request a clean shutdown
+  gctl [--root DIR] call METHOD [JSON]  raw IPC call (debug)
+`
+
+func main() {
+	args := os.Args[1:]
+	if len(args) > 0 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h") {
+		fmt.Print(usageText)
+		return
+	}
+
+	fs := flag.NewFlagSet("gctl", flag.ExitOnError)
+	root := fs.String("root", "", "environment root directory (default $GOSTALGIA_ROOT or ~/.gostalgia)")
+	fs.Parse(args)
+
+	cmd := "status"
+	rest := fs.Args()
+	if len(rest) > 0 {
+		cmd = rest[0]
+		rest = rest[1:]
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	client, err := connect(*root)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gctl:", err)
+		os.Exit(1)
+	}
+	defer client.Close()
+
+	if err := run(ctx, client, cmd, rest); err != nil {
+		fmt.Fprintln(os.Stderr, "gctl:", err)
+		os.Exit(1)
+	}
+}
+
+// connect locates a running environment and authenticates.
+func connect(root string) (*ipc.Client, error) {
+	dir, err := runtime.ResolveRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(dir + "/runtime.json")
+	if err != nil {
+		return nil, fmt.Errorf("no running environment found at %s (is gostalgia booted?)", dir)
+	}
+	var info struct {
+		Endpoint string `json:"endpoint"`
+		Token    string `json:"token"`
+	}
+	if err := json.Unmarshal(data, &info); err != nil || info.Endpoint == "" {
+		return nil, fmt.Errorf("corrupt runtime.json in %s", dir)
+	}
+	conn, err := platform.DialIPC(info.Endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("environment at %s is not reachable: %w", info.Endpoint, err)
+	}
+	return ipc.NewClient(conn, info.Token)
+}
+
+func run(ctx context.Context, client *ipc.Client, cmd string, args []string) error {
+	switch cmd {
+	case "status":
+		var raw json.RawMessage
+		if err := client.Call(ctx, "sys/status", nil, &raw); err != nil {
+			return err
+		}
+		return pretty(raw)
+
+	case "ps":
+		var procs []struct {
+			ID    int32  `json:"id"`
+			Name  string `json:"name"`
+			Kind  string `json:"kind"`
+			State string `json:"state"`
+		}
+		if err := client.Call(ctx, "proc/list", nil, &procs); err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "PID\tNAME\tKIND\tSTATE")
+		for _, p := range procs {
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", p.ID, p.Name, p.Kind, p.State)
+		}
+		return w.Flush()
+
+	case "apps":
+		var apps []struct {
+			Manifest struct {
+				ID      string `json:"id"`
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			} `json:"manifest"`
+			Running bool  `json:"running"`
+			PID     int32 `json:"pid"`
+		}
+		if err := client.Call(ctx, "app/list", nil, &apps); err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "ID\tNAME\tVERSION\tSTATE")
+		for _, a := range apps {
+			state := "stopped"
+			if a.Running {
+				state = fmt.Sprintf("running (pid %d)", a.PID)
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", a.Manifest.ID, a.Manifest.Name, a.Manifest.Version, state)
+		}
+		return w.Flush()
+
+	case "echo":
+		if len(args) == 0 {
+			return fmt.Errorf("usage: gctl echo MESSAGE")
+		}
+		var out struct {
+			Msg    string `json:"msg"`
+			Echoes int64  `json:"echoes"`
+		}
+		params := map[string]string{"msg": join(args)}
+		if err := client.Call(ctx, "app/com.gostalgia.echo/echo", params, &out); err != nil {
+			return err
+		}
+		fmt.Printf("%s (echo #%d)\n", out.Msg, out.Echoes)
+		return nil
+
+	case "ls":
+		path := "/"
+		if len(args) > 0 {
+			path = args[0]
+		}
+		var out struct {
+			Path    string `json:"path"`
+			Entries []struct {
+				Name  string `json:"name"`
+				IsDir bool   `json:"is_dir"`
+				Size  int64  `json:"size"`
+			} `json:"entries"`
+		}
+		if err := client.Call(ctx, "fs/list", map[string]string{"path": path}, &out); err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintf(w, "%s:\n", out.Path)
+		for _, e := range out.Entries {
+			if e.IsDir {
+				fmt.Fprintf(w, "  %s/\n", e.Name)
+				continue
+			}
+			fmt.Fprintf(w, "  %s\t(%d bytes)\n", e.Name, e.Size)
+		}
+		return w.Flush()
+
+	case "cat":
+		if len(args) == 0 {
+			return fmt.Errorf("usage: gctl cat PATH")
+		}
+		var out struct {
+			Data string `json:"data_base64"`
+		}
+		if err := client.Call(ctx, "fs/read", map[string]string{"path": args[0]}, &out); err != nil {
+			return err
+		}
+		data, err := base64.StdEncoding.DecodeString(out.Data)
+		if err != nil {
+			return err
+		}
+		os.Stdout.Write(data)
+		return nil
+
+	case "shutdown":
+		var out struct {
+			Reason string `json:"reason"`
+		}
+		if err := client.Call(ctx, "sys/shutdown", map[string]string{"reason": "requested by gctl"}, &out); err != nil {
+			return err
+		}
+		fmt.Println("shutdown requested")
+		return nil
+
+	case "call":
+		if len(args) == 0 {
+			return fmt.Errorf("usage: gctl call METHOD [JSON-PARAMS]")
+		}
+		var params any
+		if len(args) > 1 {
+			if err := json.Unmarshal([]byte(args[1]), &params); err != nil {
+				return fmt.Errorf("params must be JSON: %w", err)
+			}
+		}
+		var raw json.RawMessage
+		if err := client.Call(ctx, args[0], params, &raw); err != nil {
+			return err
+		}
+		return pretty(raw)
+
+	default:
+		return fmt.Errorf("unknown command %q\n\n%s", cmd, usageText)
+	}
+}
+
+func join(args []string) string {
+	out := args[0]
+	for _, a := range args[1:] {
+		out += " " + a
+	}
+	return out
+}
+
+func pretty(raw json.RawMessage) error {
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, raw, "", "  "); err != nil {
+		fmt.Println(string(raw))
+		return nil
+	}
+	fmt.Println(buf.String())
+	return nil
+}
