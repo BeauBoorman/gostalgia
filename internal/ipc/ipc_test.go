@@ -6,6 +6,8 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -240,5 +242,218 @@ func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestServerCloseUnderConnectionBurst hammers Close against a server that
+// is accepting a stream of connections. It fails if Close ever fails to
+// return promptly (the shutdown-hang: a connection accepted concurrently
+// with Close escaping the sweep, or wg.Add racing wg.Wait).
+func TestServerCloseUnderConnectionBurst(t *testing.T) {
+	for iteration := 0; iteration < 50; iteration++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := NewServer(ln, NewRouter(), "t", slog.New(slog.NewTextHandler(discard{}, nil)))
+		go srv.Serve()
+
+		var mu sync.Mutex
+		var conns []net.Conn
+		stop := make(chan struct{})
+		var dialers sync.WaitGroup
+		for i := 0; i < 4; i++ {
+			dialers.Add(1)
+			go func() {
+				defer dialers.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					conn, err := net.DialTimeout("tcp", ln.Addr().String(), 100*time.Millisecond)
+					if err != nil {
+						time.Sleep(200 * time.Microsecond) // listener closed; back off
+						continue
+					}
+					mu.Lock()
+					conns = append(conns, conn)
+					mu.Unlock()
+				}
+			}()
+		}
+		time.Sleep(2 * time.Millisecond) // let connections land mid-accept
+
+		closed := make(chan error, 1)
+		go func() { closed <- srv.Close() }()
+		select {
+		case <-closed:
+		case <-time.After(10 * time.Second):
+			t.Fatalf("iteration %d: Close did not return (shutdown hang)", iteration)
+		}
+		close(stop)
+		dialers.Wait()
+		mu.Lock()
+		for _, conn := range conns {
+			conn.Close()
+		}
+		mu.Unlock()
+	}
+}
+
+// TestUnhandlePrefixWaitsForInFlightDispatch pins the retraction
+// contract: UnhandlePrefix does not return while a dispatch to a matching
+// route is still in flight, and after it returns the route is gone.
+func TestUnhandlePrefixWaitsForInFlightDispatch(t *testing.T) {
+	r := NewRouter()
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var runs int64
+	must(t, r.Handle("app/test/m", func(ctx context.Context, req Request) (any, error) {
+		atomic.AddInt64(&runs, 1)
+		started <- struct{}{}
+		<-release
+		return "ok", nil
+	}))
+
+	respCh := make(chan Response, 1)
+	go func() {
+		respCh <- r.Dispatch(context.Background(), Request{ID: 1, Method: "app/test/m"})
+	}()
+	<-started
+
+	retracted := make(chan struct{})
+	go func() { r.UnhandlePrefix("app/"); close(retracted) }()
+	select {
+	case <-retracted:
+		t.Fatal("UnhandlePrefix returned while a dispatch was still in flight")
+	case <-time.After(100 * time.Millisecond):
+		// Expected: retraction is waiting for the in-flight dispatch.
+	}
+	close(release)
+	select {
+	case <-retracted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("UnhandlePrefix did not return after the dispatch completed")
+	}
+	resp := <-respCh
+	if !resp.OK {
+		t.Fatalf("in-flight dispatch failed: %s", resp.Error)
+	}
+	if got := atomic.LoadInt64(&runs); got != 1 {
+		t.Fatalf("handler ran %d times, want 1", got)
+	}
+	if resp := r.Dispatch(context.Background(), Request{ID: 2, Method: "app/test/m"}); resp.OK {
+		t.Fatal("dispatch to retracted route succeeded")
+	}
+}
+
+// TestNoDispatchRunsAfterRetraction hammers dispatch concurrent with
+// retraction: once UnhandlePrefix returns, no handler invocation may
+// start (the route-retraction TOCTOU).
+func TestNoDispatchRunsAfterRetraction(t *testing.T) {
+	for iteration := 0; iteration < 50; iteration++ {
+		r := NewRouter()
+		var mu sync.Mutex
+		afterRetraction := 0
+		retractedFlag := make(chan struct{})
+		release := make(chan struct{})
+		must(t, r.Handle("app/x/m", func(ctx context.Context, req Request) (any, error) {
+			select {
+			case <-release:
+			case <-time.After(25 * time.Millisecond):
+			}
+			select {
+			case <-retractedFlag:
+				mu.Lock()
+				afterRetraction++
+				mu.Unlock()
+			default:
+			}
+			return nil, nil
+		}))
+
+		stop := make(chan struct{})
+		var dispatchers sync.WaitGroup
+		for i := 0; i < 4; i++ {
+			dispatchers.Add(1)
+			go func() {
+				defer dispatchers.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					resp := r.Dispatch(context.Background(), Request{ID: 1, Method: "app/x/m"})
+					if !resp.OK {
+						return // route retracted; retire
+					}
+				}
+			}()
+		}
+		time.Sleep(time.Millisecond)
+		r.UnhandlePrefix("app/")
+		close(retractedFlag)
+		close(release)
+		close(stop)
+		dispatchers.Wait()
+		mu.Lock()
+		bad := afterRetraction
+		mu.Unlock()
+		if bad != 0 {
+			t.Fatalf("iteration %d: %d dispatch(es) ran the handler after retraction returned", iteration, bad)
+		}
+	}
+}
+
+// TestClientCancelWithoutDeadlineAbortsCall: cancelling a context without
+// a deadline must abort an in-flight call well inside defaultCallTimeout
+// (the default 30 s must not apply to a caller that gave up).
+func TestClientCancelWithoutDeadlineAbortsCall(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := NewRouter()
+	must(t, r.Handle("test/slow", func(ctx context.Context, req Request) (any, error) {
+		time.Sleep(2 * time.Second)
+		return "done", nil
+	}))
+	srv := NewServer(ln, r, "t", slog.New(slog.NewTextHandler(discard{}, nil)))
+	defer srv.Close()
+	go srv.Serve()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClient(conn, "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	err = client.Call(ctx, "test/slow", nil, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("cancellation not honored: call took %s", elapsed)
+	}
+
+	// The aborted call leaves the stream framing unverifiable: the next
+	// call must fail fast instead of hanging on a desynchronized line.
+	if err := client.Call(context.Background(), "test/slow", nil, nil); err == nil {
+		t.Fatal("call on aborted client succeeded, want a broken-connection error")
 	}
 }

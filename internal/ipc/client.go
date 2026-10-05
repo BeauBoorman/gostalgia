@@ -17,6 +17,11 @@ const defaultCallTimeout = 30 * time.Second
 // Client is an authenticated IPC client over one connection. Calls are
 // serialized (one outstanding request per client); multiplexing is future
 // work. Safe for concurrent use.
+//
+// A call aborted by its context — cancellation or deadline — gives up
+// mid-protocol: the response may still arrive later, so the framing can
+// no longer be trusted and the client marks itself broken. Further calls
+// fail immediately; use a fresh client.
 type Client struct {
 	conn net.Conn
 	r    *bufio.Scanner
@@ -24,6 +29,7 @@ type Client struct {
 
 	mu     sync.Mutex
 	nextID int64
+	broken bool
 }
 
 // NewClient authenticates a fresh connection with token and returns a
@@ -52,6 +58,9 @@ func (c *Client) Call(ctx context.Context, method string, params, out any) error
 func (c *Client) call(ctx context.Context, method string, params, out any) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.broken {
+		return errors.New("ipc: connection is unusable: an earlier call was aborted mid-protocol")
+	}
 	c.nextID++
 	id := c.nextID
 
@@ -75,24 +84,44 @@ func (c *Client) call(ctx context.Context, method string, params, out any) error
 	_ = c.conn.SetDeadline(time.Now().Add(timeout))
 	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
 
+	// The context is honored even without a deadline: a watcher expires
+	// the connection deadline on cancellation, breaking the blocked
+	// write or read below promptly.
+	if done := ctx.Done(); done != nil {
+		watchStop := make(chan struct{})
+		watcherDone := make(chan struct{})
+		go func() {
+			defer close(watcherDone)
+			select {
+			case <-done:
+				_ = c.conn.SetDeadline(time.Now())
+			case <-watchStop:
+			}
+		}()
+		defer func() {
+			close(watchStop)
+			<-watcherDone
+		}()
+	}
+
 	b, err := json.Marshal(req)
 	if err != nil {
 		return err
 	}
 	if _, err := c.w.Write(b); err != nil {
-		return fmt.Errorf("ipc: write: %w", err)
+		return c.gaveUp(ctx, fmt.Errorf("ipc: write: %w", err))
 	}
 	if err := c.w.WriteByte('\n'); err != nil {
-		return fmt.Errorf("ipc: write: %w", err)
+		return c.gaveUp(ctx, fmt.Errorf("ipc: write: %w", err))
 	}
 	if err := c.w.Flush(); err != nil {
-		return fmt.Errorf("ipc: flush: %w", err)
+		return c.gaveUp(ctx, fmt.Errorf("ipc: flush: %w", err))
 	}
 
 	for c.r.Scan() {
 		var resp Response
 		if err := json.Unmarshal(c.r.Bytes(), &resp); err != nil {
-			return fmt.Errorf("ipc: bad response: %w", err)
+			return c.gaveUp(ctx, fmt.Errorf("ipc: bad response: %w", err))
 		}
 		if resp.ID != id {
 			continue // unsolicited line; ignore for now
@@ -109,7 +138,18 @@ func (c *Client) call(ctx context.Context, method string, params, out any) error
 	if err == nil {
 		err = errors.New("connection closed")
 	}
-	return fmt.Errorf("ipc: read: %w", err)
+	return c.gaveUp(ctx, fmt.Errorf("ipc: read: %w", err))
+}
+
+// gaveUp reports err, or — when the call failed because the caller's
+// context gave up — the context error, after marking the client broken.
+func (c *Client) gaveUp(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		c.broken = true
+		_ = c.conn.Close()
+		return fmt.Errorf("ipc: call aborted: %w", ctxErr)
+	}
+	return err
 }
 
 // Close closes the underlying connection.
