@@ -36,9 +36,25 @@ Two path forms are accepted where documented:
 
 - **HostFS** — a directory on the host, opened through `os.Root`. Path escapes
   via `..` or symlinks fail closed; errors reference the environment path, not
-  the host path.
+  the host path. Backslash names are rejected on every platform (they are
+  separators on Windows, characters on Unix — one portable contract).
 - **MemFS** — in-memory FS, used for `/tmp` (the environment's tmpfs) and as
   the platform test double.
+
+### Windows metadata caveat
+
+HostFS metadata is served from one source (the open handle's `Stat`) so that
+`entry.Info()`, `Stat()`, and `Open()+File.Stat()` agree. For *directories* on
+Windows, the OS itself reports inconsistent values across those calls for
+freshly created directories (the first query of a new directory reports the
+query time rather than its mtime), so exact cross-call equality is impossible
+to guarantee there — `testing/fstest.TestFS` cannot pass for any host-backed
+FS on Windows, including stdlib `os.DirFS`. Consequences:
+
+- `TestHostFSMatchesFstest` runs on unix; on Windows a structural
+  consistency suite (`TestHostFSConsistency`) runs instead.
+- Directory `ModTime` values on Windows should be treated as advisory until
+  the OS behavior is worked around (backlog: revisit with #12).
 
 ## Mounts
 

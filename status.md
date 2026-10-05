@@ -34,7 +34,7 @@ Rules for touching this file:
 | Config store (dotted paths, atomic persist) | ✅ working | `internal/config` tests |
 | Sessions + capability checks on privileged IPC methods | ✅ working | `internal/session`, `internal/services` tests |
 | Cross-platform compile (darwin/linux/windows) | ✅ compiles | `GOOS=` builds in CI matrix |
-| Windows/Linux **behavior** parity | ❌ not yet tested | — (backlog #12) |
+| Cross-platform behavior: CI runs the full test suite on ubuntu, macOS, and Windows runners | ✅ CI-green (Windows: full fstest skipped — see `docs/filesystem.md` metadata caveat; structural checks run everywhere) | `.github/workflows/ci.yml` |
 
 Quick check from a clean checkout:
 
@@ -57,7 +57,9 @@ go run ./cmd/gctl --root /tmp/gs status      # terminal 2
   server-push notifications.
 - **Desktop, networking, packages, notifications** do not exist yet — by
   design, they are behind the core milestones.
-- **Windows/Linux runtime behavior is untested** (compile-only so far).
+- **Windows filesystem metadata:** directory mtimes are advisory on Windows
+  (OS-level API inconsistency; see `docs/filesystem.md`). Deep platform
+  behavior beyond the CI suite (packaging, GUI paths) is still backlog #12.
 
 ---
 
