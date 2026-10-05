@@ -62,7 +62,16 @@ func (h *HostFS) Stat(name string) (fs.FileInfo, error) {
 	if err := validFSName("stat", name); err != nil {
 		return nil, err
 	}
-	return h.root.Lstat(name)
+	// Stat through an open handle, not os.Root.Lstat: on Windows the two
+	// disagree for directories (Lstat reports stale mtimes), and every
+	// consumer — fstest included — compares entry metadata against the
+	// handle's Stat. One source keeps entry.Info() == Stat() true.
+	f, err := h.root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return f.Stat()
 }
 
 func (h *HostFS) ReadFile(name string) ([]byte, error) {
@@ -92,23 +101,27 @@ func (h *HostFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 
-	// Back each entry's Info with the same Lstat source Stat uses. On
-	// Windows, directory metadata read through an open enumeration
-	// handle differs from Lstat of the same directory; one source keeps
-	// entry.Info() == Stat() true everywhere.
+	// Back each entry's Info with the same handle-based Stat that
+	// HostFS.Stat (and Open+File.Stat) reports. On Windows, directory
+	// metadata from an enumeration differs from a handle Stat; one
+	// source keeps entry.Info() == Stat() true everywhere.
 	for i, e := range entries {
 		child := e.Name()
 		if name != "." {
 			child = name + "/" + e.Name()
 		}
-		if info, err := h.root.Lstat(child); err == nil {
-			entries[i] = hostEntry{DirEntry: e, info: info}
+		if cf, err := h.root.Open(child); err == nil {
+			info, err := cf.Stat()
+			cf.Close()
+			if err == nil {
+				entries[i] = hostEntry{DirEntry: e, info: info}
+			}
 		}
 	}
 	return entries, nil
 }
 
-// hostEntry overrides DirEntry.Info with an Lstat-backed FileInfo.
+// hostEntry overrides DirEntry.Info with a handle-backed FileInfo.
 type hostEntry struct {
 	fs.DirEntry
 	info fs.FileInfo
