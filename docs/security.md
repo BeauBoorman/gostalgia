@@ -17,12 +17,17 @@ specs record the owning session and user.
 Permission tokens (`security.Capabilities`) travel with IPC call contexts:
 
 - Socket clients that complete the token handshake receive the admin set.
-- Applications declare required permissions in their manifests; the runtime
-  grants them to the application's process (enforcement at handler boundaries
-  is exercised in services tests; per-app call contexts arrive with the
-  out-of-process launcher, backlog #9).
-- `ipc.RequireCap(ctx, cap)` guards privileged methods today: `fs.write`,
+- Applications declare required permissions in their manifests. The runtime
+  stores that set on the application's process and attaches it to the
+  application's own call context, so the grant is carried and observable.
+- `ipc.RequireCap(ctx, cap)` guards privileged methods: `fs.write`,
   `proc.stop`, `app.launch`, `shutdown`, `admin`.
+
+**State this plainly: `RequireCap` cannot fail in production today.** Both
+production dispatch paths (authenticated socket clients and the boot
+self-test) present the admin set, so every guard passes. The checks are
+exercised only by tests that hand-build a limited context. Deny-by-default
+enforcement against the per-app grant is backlog #13.
 
 ### Transport authentication
 

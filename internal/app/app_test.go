@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"sort"
 	"sync"
 	"testing"
 	"testing/fstest"
@@ -176,6 +177,94 @@ func TestListReflectsRunningState(t *testing.T) {
 	if len(list) != 1 || !list[0].Running || list[0].PID == 0 {
 		t.Fatalf("list after launch = %+v", list)
 	}
+}
+
+// capsInstance records the capability set its run context carries.
+type capsInstance struct {
+	ran chan struct{}
+
+	mu   sync.Mutex
+	seen []string
+}
+
+func (c *capsInstance) Run(ctx context.Context, p *process.Process) error {
+	if caps := ipc.Capabilities(ctx); caps != nil {
+		c.mu.Lock()
+		c.seen = caps.List()
+		c.mu.Unlock()
+	}
+	close(c.ran)
+	<-ctx.Done()
+	return nil
+}
+
+func (c *capsInstance) RegisterRoutes(r *ipc.Router, base string) error { return nil }
+
+func (c *capsInstance) seenCaps() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.seen
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestLaunchGrantsManifestCapabilities is the regression for the dropped
+// Spec.Caps: the manifest's declared permissions must survive on the
+// process record and travel on the application's call context.
+func TestLaunchGrantsManifestCapabilities(t *testing.T) {
+	perms := []string{security.CapIPC, security.CapFileRead}
+	manifest := Manifest{
+		ID:          "com.test.caps",
+		Name:        "Caps",
+		Version:     "1.0.0",
+		Entrypoint:  "caps",
+		Permissions: perms,
+	}
+	inst := &capsInstance{ran: make(chan struct{})}
+	bus := events.NewBus()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	router := ipc.NewRouter()
+	procs := process.NewManager(bus, log)
+	reg := NewRegistry()
+	must(t, reg.RegisterBuiltin(manifest, func(lc LaunchContext) (Instance, error) {
+		if lc.Caps == nil {
+			t.Error("LaunchContext.Caps is nil: manifest permissions were dropped")
+		}
+		return inst, nil
+	}))
+	m := NewManager(reg, procs, router, bus, log)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	proc, err := m.Launch(ctx, manifest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-inst.ran
+
+	want := append([]string(nil), perms...)
+	sort.Strings(want)
+	// The process record preserves declaration order; compare as sets.
+	gotInfo := append([]string(nil), proc.Info().Caps...)
+	sort.Strings(gotInfo)
+	if !equalStrings(gotInfo, want) {
+		t.Errorf("process caps = %v, want %v (manifest permissions must not be dropped)", gotInfo, want)
+	}
+	if got := inst.seenCaps(); !equalStrings(got, want) {
+		t.Errorf("run-context caps = %v, want %v", got, want)
+	}
+
+	must(t, m.Stop(manifest.ID, 2*time.Second))
 }
 
 func must(t *testing.T, err error) {
