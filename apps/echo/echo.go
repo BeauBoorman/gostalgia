@@ -1,90 +1,72 @@
-// Package echo implements com.gostalgia.echo — the environment's first
-// application. It demonstrates the full application contract: declared by
-// a manifest, launched and supervised by the runtime, serving its own IPC
-// methods, and stopping cleanly when its process is stopped.
+// Package echo is the reference Gostalgia app. It imports only the public SDK
+// and the standard library; copy its manifest, factory, and lifecycle pattern.
 package echo
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"sync"
 	"time"
 
-	"gostalgia/internal/app"
-	"gostalgia/internal/ipc"
-	"gostalgia/internal/process"
-	"gostalgia/internal/security"
+	"gostalgia/sdk"
 )
 
-const (
-	ID         = "com.gostalgia.echo"
-	Entrypoint = "echo"
-)
+const ID = "com.gostalgia.echo"
 
-// Manifest returns the application's manifest. The same document is
-// seeded into /apps/manifests so the on-disk manifest format is
-// exercised end to end.
-func Manifest() app.Manifest {
-	return app.Manifest{
-		ID:          ID,
-		Name:        "Echo",
-		Version:     "0.1.0",
-		Entrypoint:  Entrypoint,
-		Permissions: []string{security.CapIPC},
-		Description: "Returns whatever it is sent; the environment's hello-world application.",
-	}
-}
+//go:embed manifest.json
+var manifestJSON []byte
 
-// ManifestJSON renders the manifest in the on-disk format.
-func ManifestJSON() []byte {
-	b, err := json.MarshalIndent(Manifest(), "", "  ")
+// Manifest parses the embedded source of truth, never a duplicate Go literal.
+func Manifest() sdk.Manifest {
+	m, err := sdk.ParseManifest(manifestJSON)
 	if err != nil {
-		panic("echo: manifest cannot fail to marshal: " + err.Error())
+		panic(err) // invalid builtin data is a programming error
 	}
-	return append(b, '\n')
+	return m
 }
 
-// Echo is the application instance.
+func ManifestJSON() []byte { return append([]byte(nil), manifestJSON...) }
+
 type Echo struct {
-	log     *slog.Logger
+	app     *sdk.Context
 	started time.Time
-
-	mu    sync.Mutex
-	count int64
+	mu      sync.Mutex
+	count   int64
 }
 
-// Factory builds an Echo instance.
-func Factory(lc app.LaunchContext) (app.Instance, error) {
-	return &Echo{
-		log:     lc.Log,
-		started: time.Now(),
-	}, nil
-}
+func Factory() (sdk.Instance, error) { return &Echo{}, nil }
 
-// RegisterRoutes installs the application's IPC methods.
-func (e *Echo) RegisterRoutes(r *ipc.Router, base string) error {
-	if err := r.Handle(base+"/echo", e.handleEcho); err != nil {
-		return err
+// Init runs before routes become visible. Mutable state uses a mutex because
+// handlers can run concurrently with each other and with Run.
+func (e *Echo) Init(app *sdk.Context) error {
+	e.app, e.started = app, time.Now()
+	for _, route := range []struct {
+		name string
+		h    sdk.Handler
+	}{{"echo", e.echo}, {"stats", e.stats}, {"identity", e.identity}} {
+		if err := app.Handle(route.name, route.h); err != nil {
+			return err
+		}
 	}
-	return r.Handle(base+"/stats", e.handleStats)
-}
-
-// Run blocks until the process is stopped. A real application would run
-// its event loop here; this one just waits to be told to stop.
-func (e *Echo) Run(ctx context.Context, p *process.Process) error {
-	e.log.Info("echo app running", "pid", p.ID())
-	<-ctx.Done()
-	e.log.Info("echo app stopping")
 	return nil
 }
 
-func (e *Echo) handleEcho(ctx context.Context, req ipc.Request) (any, error) {
+func (e *Echo) Run(ctx context.Context) error {
+	e.app.Log.Info("echo running")
+	<-ctx.Done()
+	return nil
+}
+
+// Stop is called once, including after failed Init. Echo owns no resources.
+func (e *Echo) Stop(ctx context.Context) error { return nil }
+
+func (e *Echo) echo(ctx context.Context, raw json.RawMessage) (any, error) {
 	var p struct {
 		Msg string `json:"msg"`
 	}
-	if err := ipc.DecodeParams(req.Params, &p); err != nil {
+	if err := sdk.DecodeParams(raw, &p); err != nil {
 		return nil, err
 	}
 	if p.Msg == "" {
@@ -97,12 +79,19 @@ func (e *Echo) handleEcho(ctx context.Context, req ipc.Request) (any, error) {
 	return map[string]any{"msg": p.Msg, "echoes": n}, nil
 }
 
-func (e *Echo) handleStats(ctx context.Context, req ipc.Request) (any, error) {
+func (e *Echo) stats(ctx context.Context, raw json.RawMessage) (any, error) {
 	e.mu.Lock()
 	n := e.count
 	e.mu.Unlock()
-	return map[string]any{
-		"echoes":         n,
-		"uptime_seconds": time.Since(e.started).Seconds(),
-	}, nil
+	return map[string]any{"echoes": n, "uptime_seconds": time.Since(e.started).Seconds()}, nil
+}
+
+// identity calls a system service through the SDK. Even an admin invoking this
+// route sees only Echo's manifest grant, proving no caller privilege is borrowed.
+func (e *Echo) identity(ctx context.Context, raw json.RawMessage) (any, error) {
+	var out json.RawMessage
+	if err := e.app.Call(ctx, "session/whoami", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

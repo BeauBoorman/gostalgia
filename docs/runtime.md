@@ -1,8 +1,9 @@
 # Runtime
 
 The runtime (`internal/runtime`, booted by `cmd/gostalgia`) owns the
-environment's lifecycle. This document matches the implementation as of
-Milestone 1.
+environment's lifecycle. The default CLI entrypoint owns boot plus the
+[Charm shell](shell.md); `gostalgia boot` remains headless. The runtime package
+itself remains standard-library-only and does not import the experience layer.
 
 ## Environment root
 
@@ -75,3 +76,7 @@ Written when the IPC service starts, removed at shutdown:
 process lifecycle, sessions, and applications log at info; every event on the
 bus is mirrored at debug. The log file is opened append-only; rotation is
 future work.
+
+`Options.LogOutput` lets an experience-layer host replace console output.
+The shell passes `io.Discard`, retaining file logs without corrupting terminal
+rendering. This boundary uses a standard-library interface, not Charm types.

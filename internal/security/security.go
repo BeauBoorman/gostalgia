@@ -7,6 +7,8 @@ package security
 import (
 	"sort"
 	"sync"
+
+	"gostalgia/sdk"
 )
 
 // User is an environment-level identity. Users exist independently of the
@@ -20,14 +22,14 @@ type User struct {
 // their manifest; the runtime grants them to the application's call
 // context, and system services check them before acting.
 const (
-	CapIPC       = "ipc"
-	CapFileRead  = "fs.read"
-	CapFileWrite = "fs.write"
-	CapProcList  = "proc.list"
-	CapProcStop  = "proc.stop"
-	CapAppList   = "app.list"
-	CapAppLaunch = "app.launch"
-	CapShutdown  = "shutdown"
+	CapIPC       = sdk.CapIPC
+	CapFileRead  = sdk.CapFileRead
+	CapFileWrite = sdk.CapFileWrite
+	CapProcList  = sdk.CapProcList
+	CapProcStop  = sdk.CapProcStop
+	CapAppList   = sdk.CapAppList
+	CapAppLaunch = sdk.CapAppLaunch
+	CapShutdown  = sdk.CapShutdown
 	CapAdmin     = "admin"
 )
 

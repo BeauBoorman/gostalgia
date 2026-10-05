@@ -16,7 +16,7 @@ race:
 	go test -race ./...
 
 run:
-	go run ./cmd/gostalgia boot
+	go run ./cmd/gostalgia shell
 
 clean:
 	rm -f gostalgia gctl

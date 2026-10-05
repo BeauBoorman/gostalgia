@@ -17,12 +17,19 @@ specs record the owning session and user.
 Permission tokens (`security.Capabilities`) travel with IPC call contexts:
 
 - Socket clients that complete the token handshake receive the admin set.
-- Applications declare required permissions in their manifests; the runtime
-  grants them to the application's process (enforcement at handler boundaries
-  is exercised in services tests; per-app call contexts arrive with the
-  out-of-process launcher, backlog #9).
-- `ipc.RequireCap(ctx, cap)` guards privileged methods today: `fs.write`,
-  `proc.stop`, `app.launch`, `shutdown`, `admin`.
+- Applications declare their complete grants in JSON manifests; the runtime
+  attaches those grants to the process context and process info. Unknown,
+  duplicate, or operator-only `admin` declarations are rejected.
+- The public SDK exposes scoped Call and Init-only Handle adapters, not raw
+  runtime managers. Calls always replace incoming caps with the app's grant;
+  app handlers require `ipc` from their caller and execute with the app's own
+  grant. An admin invoking a handler cannot lend it admin privileges.
+- `ipc.RequireCap` guards filesystem read/write, process list/stop, app
+  list/launch/stop, and shutdown. SDK calls and app route declaration/invocation
+  require `ipc`. See [applications.md](applications.md) for method schemas and
+  the exact capability table. Filesystem grants are service-wide, not per-path.
+- Shell and gctl are trusted operator clients using the same token/admin grant;
+  this is distinct from application execution authority.
 
 ### Transport authentication
 

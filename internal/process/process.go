@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"gostalgia/internal/events"
+	"gostalgia/internal/ipc"
+	"gostalgia/internal/security"
 )
 
 type Kind string
@@ -67,6 +69,7 @@ type Info struct {
 	ExitedAt  time.Time `json:"exited_at,omitempty"`
 	Err       string    `json:"error,omitempty"`
 	ExitCode  int       `json:"exit_code,omitempty"`
+	Caps      []string  `json:"caps,omitempty"`
 }
 
 // Event is published on every state transition.
@@ -104,7 +107,9 @@ func (p *Process) Done() <-chan struct{} { return p.done }
 func (p *Process) Info() Info {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.info
+	info := p.info
+	info.Caps = append([]string(nil), info.Caps...)
+	return info
 }
 
 func (p *Process) setState(state State, err error) {
@@ -162,7 +167,7 @@ func (m *Manager) StartInProc(ctx context.Context, spec Spec, run func(p *Proces
 	}
 	spec.Kind = KindInProc
 	id := m.alloc()
-	procCtx, cancel := context.WithCancel(ctx)
+	procCtx, cancel := context.WithCancel(ipc.WithCapabilities(ctx, security.NewCapabilities(spec.Caps...)))
 	p := &Process{done: make(chan struct{}), ctx: procCtx, cancel: cancel}
 	p.info = Info{
 		ID:        id,
@@ -172,6 +177,7 @@ func (m *Manager) StartInProc(ctx context.Context, spec Spec, run func(p *Proces
 		SessionID: spec.SessionID,
 		User:      spec.User,
 		StartedAt: time.Now(),
+		Caps:      append([]string(nil), spec.Caps...),
 	}
 	m.add(p)
 	m.publish(p) // starting
@@ -217,7 +223,7 @@ func (m *Manager) StartChild(ctx context.Context, spec Spec) (*Process, error) {
 	}
 	spec.Kind = KindChild
 	id := m.alloc()
-	procCtx, cancel := context.WithCancel(ctx)
+	procCtx, cancel := context.WithCancel(ipc.WithCapabilities(ctx, security.NewCapabilities(spec.Caps...)))
 	cmd := exec.CommandContext(procCtx, spec.Args[0], spec.Args[1:]...)
 	cmd.Dir = spec.Dir
 	if spec.Env != nil {
@@ -233,6 +239,7 @@ func (m *Manager) StartChild(ctx context.Context, spec Spec) (*Process, error) {
 		SessionID: spec.SessionID,
 		User:      spec.User,
 		StartedAt: time.Now(),
+		Caps:      append([]string(nil), spec.Caps...),
 	}
 
 	if err := cmd.Start(); err != nil {

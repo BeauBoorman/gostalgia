@@ -16,6 +16,8 @@ IPC endpoint, and shuts down cleanly — with tests at every layer.
 ## Try it
 
 ```sh
+go run ./cmd/gostalgia shell --root /tmp/gs     # gorgeous DOS-style Charm shell
+# Or run headless with the existing control client:
 go run ./cmd/gostalgia boot --root /tmp/gs      # terminal 1 — boot the environment
 go run ./cmd/gctl --root /tmp/gs status      # terminal 2 — inspect it
 go run ./cmd/gctl --root /tmp/gs echo hello  # talk to the first application
@@ -36,12 +38,19 @@ go run ./cmd/gctl --root /tmp/gs shutdown    # clean shutdown
   token handshake, capability-carrying call contexts.
 - **VFS** (`internal/vfs`) — environment-rooted filesystem with mounts,
   host backend confined via `os.Root`, memfs `/tmp`; `testing/fstest`-verified.
-- **Application model** (`internal/app`, `apps/`) — JSON manifests, builtin
-  factories, single-instance launch, route retraction on exit.
+- **Charm shell** (`internal/experience/shell`) — Bubble Tea + Lip Gloss,
+  DOS-style prompt, app shelf, command history, completion, scrollback; IPC only.
+- **App SDK** (`sdk`, `internal/app`, `apps/`) — embedded JSON manifests,
+  Init/Run/Stop, capability-scoped service calls and routes, single-instance
+  launch, failure cleanup. Echo is the single copyable demo.
 - **Events, config, sessions, capabilities** — the small primitives the rest
   builds on.
 
-Zero external dependencies. See [docs/architecture.md](docs/architecture.md)
+The runtime core and app SDK are standard-library-only. The terminal experience
+uses the allowed Charm family (and its transitive dependencies), without cgo.
+See [docs/applications.md](docs/applications.md) for the complete app-writing
+spec, [docs/shell.md](docs/shell.md) for the terminal experience, and
+[docs/architecture.md](docs/architecture.md)
 for the design, decisions, milestone arc, and risks; subsystem details in
 [docs/](docs/); the itemized backlog and current state in
 [status.md](status.md).
@@ -49,7 +58,8 @@ for the design, decisions, milestone arc, and risks; subsystem details in
 ## Checks
 
 ```sh
-go vet ./... && go test -race ./...
+go build ./... && go vet ./... && go test -race ./...
+gofmt -l .  # empty output = clean
 ```
 
 Requires Go ≥ 1.25.

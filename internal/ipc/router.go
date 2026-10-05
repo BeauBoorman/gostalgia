@@ -34,6 +34,25 @@ func (r *Router) Handle(method string, h Handler) error {
 	return nil
 }
 
+// HandleBatch installs a route set atomically, rejecting any conflict without
+// publishing partial application initialization.
+func (r *Router) HandleBatch(routes map[string]Handler) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for method, h := range routes {
+		if method == "" || h == nil {
+			return fmt.Errorf("ipc: invalid route %q", method)
+		}
+		if _, dup := r.routes[method]; dup {
+			return fmt.Errorf("ipc: route %q is already registered", method)
+		}
+	}
+	for method, h := range routes {
+		r.routes[method] = h
+	}
+	return nil
+}
+
 // Unhandle removes one method.
 func (r *Router) Unhandle(method string) {
 	r.mu.Lock()

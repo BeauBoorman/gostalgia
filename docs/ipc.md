@@ -9,8 +9,8 @@ The same `ipc.Router` serves:
 
 - **In-process callers** — `Router.Dispatch(ctx, req)` directly (used by the
   runtime self-test, tests, and any in-process code).
-- **Local socket clients** — `cmd/gctl`, and later out-of-process
-  applications.
+- **Local socket clients** — `cmd/gctl`, the Charm shell, and later
+  out-of-process applications.
 
 Because both go through the same routes, the wire never defines a second API.
 
@@ -43,8 +43,14 @@ not a security boundary — see security.md.
 | `sys/*` (`ping`, `status`, `shutdown`) | sys service |
 | `proc/*` (`list`, `stop`) | process service |
 | `fs/*` (`list`, `read`, `write`, `mkdir`, `remove`) | fs service |
-| `app/list`, `app/launch`, `session/whoami` | sys service |
+| `app/list`, `app/launch`, `app/stop`, `session/whoami` | sys service |
 | `app/<app-id>/<method>` | the application instance |
+
+App routes require `ipc` from the incoming caller, then execute under the
+app's manifest grant (not the caller's grant). SDK service calls likewise
+replace capabilities. `app/stop` checks `proc.stop`; `app/launch` uses the
+runtime lifetime, not the request lifetime. The app contract includes the
+[complete method schemas and capability table](applications.md#5-routes-and-scoped-service-calls).
 
 ## Endpoints per platform
 
