@@ -43,8 +43,12 @@ Two path forms are accepted where documented:
 
 ### Windows metadata caveat
 
-HostFS metadata is served from one source (the open handle's `Stat`) so that
-`entry.Info()`, `Stat()`, and `Open()+File.Stat()` agree. For *directories* on
+HostFS metadata comes from one source per file kind, so that `entry.Info()`,
+`Stat()`, and `Open()+File.Stat()` agree: regular files and directories are
+served through the open handle's `Stat`; special files (FIFOs, sockets,
+devices, symlinks) are never opened — `Open` on a FIFO blocks until a writer
+arrives on the other end — and report `Lstat` instead, which is what their
+directory entries report too. For *directories* on
 Windows, the OS itself reports inconsistent values across those calls for
 freshly created directories (the first query of a new directory reports the
 query time rather than its mtime), so exact cross-call equality is impossible

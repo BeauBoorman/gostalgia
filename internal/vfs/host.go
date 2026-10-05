@@ -62,10 +62,21 @@ func (h *HostFS) Stat(name string) (fs.FileInfo, error) {
 	if err := validFSName("stat", name); err != nil {
 		return nil, err
 	}
-	// Stat through an open handle, not os.Root.Lstat: on Windows the two
-	// disagree for directories (Lstat reports stale mtimes), and every
-	// consumer — fstest included — compares entry metadata against the
-	// handle's Stat. One source keeps entry.Info() == Stat() true.
+	// Lstat first, and Open only what cannot block: os.Root.Open on a
+	// FIFO (or other special file) waits until a writer opens the other
+	// end, and Stat is a metadata call. The handle-based path exists for
+	// Windows: there os.Root.Lstat disagrees with handle Stat for
+	// directories (stale mtimes), and every consumer — fstest included
+	// — compares entry metadata against the handle's Stat, so regular
+	// files and directories still go through the handle. Special files
+	// report Lstat, which is what ReadDir's entries report for them too.
+	info, err := h.root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() && !info.IsDir() {
+		return info, nil
+	}
 	f, err := h.root.Open(name)
 	if err != nil {
 		return nil, err
@@ -101,14 +112,26 @@ func (h *HostFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 
-	// Back each entry's Info with the same handle-based Stat that
-	// HostFS.Stat (and Open+File.Stat) reports. On Windows, directory
-	// metadata from an enumeration differs from a handle Stat; one
-	// source keeps entry.Info() == Stat() true everywhere.
+	// Back each entry's Info with the same metadata that HostFS.Stat
+	// (and Open+File.Stat) reports. On Windows, directory metadata from
+	// an enumeration differs from a handle Stat; one source keeps
+	// entry.Info() == Stat() true everywhere. Only regular files and
+	// directories may be opened here: os.Root.Open on a FIFO blocks
+	// until a writer arrives and would stall the whole listing (and
+	// shutdown behind it), so special entries — symlinks, FIFOs,
+	// sockets, devices — fall back to Lstat, which cannot block. Info
+	// reports whatever the fallback returned, keeping the per-entry
+	// invariant for them too.
 	for i, e := range entries {
 		child := e.Name()
 		if name != "." {
 			child = name + "/" + e.Name()
+		}
+		if !e.Type().IsRegular() && !e.IsDir() {
+			if info, err := h.root.Lstat(child); err == nil {
+				entries[i] = hostEntry{DirEntry: e, info: info}
+			}
+			continue
 		}
 		if cf, err := h.root.Open(child); err == nil {
 			info, err := cf.Stat()
