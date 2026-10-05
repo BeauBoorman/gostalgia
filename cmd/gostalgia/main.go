@@ -11,9 +11,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"syscall"
 
 	"gostalgia/internal/runtime"
+	"gostalgia/platform"
 )
 
 const usageText = `gostalgia — the Gostalgia environment runtime
@@ -69,7 +69,9 @@ func cmdBoot(args []string) error {
 	fmt.Printf("Gostalgia %s ready\n  root:     %s\n  endpoint: %s\n  (Ctrl-C to shut down)\n",
 		rt.Version, rt.Root, rt.Endpoint())
 
-	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// The signal set is platform-specific (platform.ShutdownSignals):
+	// unix delivers SIGTERM, Windows only ever delivers os.Interrupt.
+	sigCtx, stop := signal.NotifyContext(context.Background(), platform.ShutdownSignals()...)
 	defer stop()
 
 	select {

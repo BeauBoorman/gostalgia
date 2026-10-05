@@ -9,9 +9,17 @@ abstract, kept deliberately thin.
 |---|---|---|
 | IPC listener | unix domain socket (`$TMPDIR/gostalgia-<hash>.sock`, derived from the root to respect the 104-byte socket path limit) | loopback TCP, ephemeral port |
 | IPC dial | `unix://` scheme | `tcp://` scheme |
+| Shutdown signal set | `os.Interrupt`, `SIGTERM` | `os.Interrupt` only (Ctrl-C / console close) |
 
 Both are selected by build tags (`//go:build unix`, `//go:build windows`).
-Everything else — signals, filesystem, exec, clocks, randomness — is already
+Signals are the exception to portability, not an accident of it: the set of
+terminating signals a host delivers differs per platform, so the requested
+set lives behind build tags here. On Windows, termination paths other than
+Ctrl-C / console close (`taskkill /f`, job-object teardown) deliver no
+signal at all and give the process no callback — a **known gap** until the
+platform-parity milestone (backlog #12) adds service/job-object
+integration; until then, Windows shutdown is graceful via Ctrl-C or IPC
+only. Everything else — filesystem, exec, clocks, randomness — is already
 portable in the standard library and is used directly.
 
 ## Rules
