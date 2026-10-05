@@ -6,7 +6,7 @@ tracker** — `docs/architecture.md` §5 summarizes the milestone arc and points
 here.
 
 - **Current position:** M1 complete · M2 starting · next item: **#2 Child-process support end-to-end**
-- **Last verified:** 2026-10-05 (`go vet` clean · `gofmt` clean · 65 tests in 10 packages, all passing with `-race` · **CI green on ubuntu, macOS, and Windows** · repo: `drawmeanelephant/gostalgia`, private)
+- **Last verified:** 2026-10-05 (`go vet` clean · `gofmt` clean · full test suite passing with `-race` — test/package counts are CI's to report; this line stopped hardcoding them after the count drifted · **CI green on ubuntu, macOS, and Windows** · repo: `drawmeanelephant/gostalgia`, private)
 
 Rules for touching this file:
 
@@ -138,6 +138,8 @@ the affected docs. Grouped under the milestone arc from `docs/architecture.md`
 
 | Date | Check | Result |
 |---|---|---|
+| 2026-10-05 | FIFO regression (#16): `HostFS.Stat`/`ReadDir` no longer `os.Root.Open` special files — Lstat fallback for FIFOs, sockets, devices, symlinks; regression tests for `Stat`, `ReadDir`, and `ipc.Server.Close` with a `fs/list` handler in flight over a real socket | repro tests fail unfixed, pass fixed; full gate green (`vet`, `gofmt`, `-race`) |
+| 2026-10-05 | Docs drift (#17): `status.md` "Last verified" no longer hardcodes test counts (CI is the source of truth); `security.md`/`ipc.md` scope the `runtime.json` 0600 mode to unix — Windows inherits directory ACLs | docs match the code |
 | 2026-10-05 | Published private repo `drawmeanelephant/gostalgia`; CI matrix (ubuntu/macos/windows: vet, test, race-on-unix, gofmt) | **all three green** |
 | 2026-10-05 | Windows CI hardening: HostFS handle lifecycle at shutdown, backslash-name rejection, single-source metadata; fstest metadata gate scoped to unix with structural checks everywhere (OS-level limitation, `docs/filesystem.md`) | Windows runner fully passing |
 | 2026-10-05 | Rebrand FakeDOS → Gostalgia: module `gostalgia`, binaries `gostalgia`/`gctl`, app id `com.gostalgia.echo`, root `~/.gostalgia`, `$GOSTALGIA_ROOT`, socket `gostalgia-*.sock` | 171 references renamed, zero old names remain; full gate re-run green; live e2e clean |

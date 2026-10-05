@@ -112,7 +112,9 @@ func (s *IPCService) writeRuntimeFile() error {
 	if err != nil {
 		return err
 	}
-	// 0600: the file embeds the IPC token; it is local trust, not a
-	// security boundary, but it should not be world-readable.
+	// 0600 (unix): the file embeds the IPC token; it is local trust, not
+	// a security boundary, but it should not be world-readable. On
+	// Windows the mode does not map to an ACL and the file inherits the
+	// environment directory's permissions.
 	return os.WriteFile(s.runtimeFilePath(), append(data, '\n'), 0o600)
 }

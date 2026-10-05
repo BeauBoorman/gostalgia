@@ -33,7 +33,8 @@ enforcement against the per-app grant is backlog #13.
 
 The local socket requires a token handshake (constant-time compare) before
 any other method. The token is generated per boot and stored in `runtime.json`
-(mode 0600).
+(mode 0600 on unix; on Windows the mode does not map to an ACL — the file
+inherits the environment directory's permissions).
 
 ## Isolation levels — honest labels
 
