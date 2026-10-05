@@ -10,10 +10,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -205,7 +203,10 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 	svcCtx.Shutdown = rt.Shutdown
 
 	if err := sm.StartAll(ctx); err != nil {
-		logFile.Close()
+		// StartAll has already rolled back the services that reached
+		// running; Shutdown finishes the boot-failure teardown (VFS
+		// handle, log file, lifecycle channels) exactly once.
+		rt.Shutdown("boot failure")
 		return nil, err
 	}
 
@@ -352,15 +353,14 @@ func newToken() (string, error) {
 }
 
 // checkNotRunning refuses to boot if a live environment already owns this
-// root. A runtime.json whose endpoint does not answer is stale and is
-// ignored.
+// root. Anything that answers on the recorded endpoint and accepts the
+// recorded token is a live instance — including one still mid-boot, whose
+// sys routes may not be registered yet. A stale file from a dead instance
+// is ignored.
 func checkNotRunning(root string) error {
 	data, err := os.ReadFile(filepath.Join(root, "runtime.json"))
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		return nil // unreadable: treat as stale; boot overwrites it
+		return nil // missing or unreadable: stale; boot overwrites it
 	}
 	var info struct {
 		PID      int    `json:"pid"`
@@ -372,17 +372,12 @@ func checkNotRunning(root string) error {
 	}
 	conn, err := platform.DialIPC(info.Endpoint)
 	if err != nil {
-		return nil // stale file from a dead instance
+		return nil // nothing is listening: stale file from a dead instance
 	}
 	client, err := ipc.NewClient(conn, info.Token)
 	if err != nil {
-		return nil
+		return nil // the listener rejected the recorded token: not our instance
 	}
-	defer client.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := client.Call(ctx, "sys/ping", nil, nil); err == nil {
-		return fmt.Errorf("runtime: environment is already running (pid %d, endpoint %s)", info.PID, info.Endpoint)
-	}
-	return nil
+	client.Close()
+	return fmt.Errorf("runtime: environment is already running (pid %d, endpoint %s)", info.PID, info.Endpoint)
 }
