@@ -1,6 +1,9 @@
 package events
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -129,5 +132,39 @@ func TestTopics(t *testing.T) {
 	topics := bus.Topics()
 	if len(topics) != 2 || topics[0] != "*" || topics[1] != "a.b" {
 		t.Fatalf("topics = %v, want [* a.b]", topics)
+	}
+}
+
+// TestPublishContainsSubscriberPanic: a panicking subscriber must not take
+// down the publisher; the bus keeps delivering to the remaining handlers,
+// and the panic is logged with the topic so the misbehaving subscriber is
+// diagnosable.
+func TestPublishContainsSubscriberPanic(t *testing.T) {
+	var buf bytes.Buffer
+	bus := NewBusWithLogger(slog.New(slog.NewTextHandler(&buf, nil)))
+
+	delivered := 0
+	var mu sync.Mutex
+	bus.Subscribe("*", func(Envelope) { panic("subscriber exploded") })
+	bus.Subscribe("test.thing", func(Envelope) {
+		mu.Lock()
+		delivered++
+		mu.Unlock()
+	})
+
+	// Wildcard subscribers run before topic subscribers, so the panic
+	// fires mid-delivery and the healthy handler proves delivery
+	// continued past it.
+	bus.Publish("tester", testEvent{tag: "one"})
+	bus.Publish("tester", testEvent{tag: "two"})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if delivered != 2 {
+		t.Fatalf("healthy handler delivered %d times, want 2 (bus must keep delivering past a panic)", delivered)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "subscriber panicked") || !strings.Contains(logged, "test.thing") || !strings.Contains(logged, "subscriber exploded") {
+		t.Fatalf("panic not logged with topic and cause:\n%s", logged)
 	}
 }
