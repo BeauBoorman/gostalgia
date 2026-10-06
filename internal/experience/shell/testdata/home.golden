@@ -1,10 +1,16 @@
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃ G O S T A L G I A  /  PERSONAL COMPUTING, REIMAGINED                         ┃
-┃ [Home / Prompt]  App Shelf                                                   ┃
+┃ [Home]  Apps   Prompt                                                        ┃
 ┃ ✓ ONLINE   guest · C: environment drive                                      ┃
 ┃                                                                              ┃
-┃ Welcome home. A familiar prompt. A whole new environment.                    ┃
-┃ Type help to explore, or F2 to open your app shelf.                          ┃
+┃ SYSTEM ACTIVITY                                                              ┃
+┃ Uptime: just booted · Processes: 0 · Services: 0 · User: guest · Drive: C:   ┃
+┃                                                                              ┃
+┃ RUNNING APPLICATIONS                                                         ┃
+┃   ◇ No applications running (press F2 for App Launcher)                      ┃
+┃                                                                              ┃
+┃ DOCUMENT SHORTCUTS (C:\users\guest\documents)                                ┃
+┃   ◇ No documents found in C:\users\guest\documents                           ┃
 ┃                                                                              ┃
 ┃                                                                              ┃
 ┃                                                                              ┃
@@ -13,12 +19,6 @@
 ┃                                                                              ┃
 ┃                                                                              ┃
 ┃                                                                              ┃
-┃                                                                              ┃
-┃                                                                              ┃
-┃                                                                              ┃
-┃                                                                              ┃
-┃                                                                              ┃
-┃                                                                              ┃
-┃ C:\users\guest>                                                              ┃
+┃ C:\users\guest> Home view owns focus. Esc returns to prompt · Ctrl-P palett… ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-Ctrl-C EXIT · F2 APPS · Tab COMPLETE · ↑↓ HISTORY · PgUp SCROLL
+F1 PROMPT · F2 APPS · Ctrl-P PALETTE · (↑↓) SELECT · (Enter) OPEN · Ctrl-C EXIT

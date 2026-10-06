@@ -1,8 +1,9 @@
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃ G O S T A L G I A  /  PERSONAL COMPUTING, REIMAGINED                         ┃
-┃  Home / Prompt  [App Shelf]                                                  ┃
+┃  Home  [Apps]  Prompt                                                        ┃
 ┃ ✓ ONLINE   guest · C: environment drive                                      ┃
 ┃                                                                              ┃
+┃ SEARCH: type to filter apps...                                               ┃
 ┃ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓ ┃
 ┃ ┃ › Echo                                                                   ┃ ┃
 ┃ ┃ ✓ LIVE / PID 1                                                           ┃ ┃
@@ -18,7 +19,6 @@
 ┃                                                                              ┃
 ┃                                                                              ┃
 ┃                                                                              ┃
-┃                                                                              ┃
-┃ C:\users\guest>                                                              ┃
+┃ C:\users\guest> Echo is LIVE (PID 1). Enter relaunch, F3 stop, F4 view.      ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-Esc PROMPT · Enter LAUNCH · F3 STOP · ↑↓ SELECT · Ctrl-C EXIT
+Esc PROMPT · Enter RUN · F3 STOP · F4 VIEW · ↑↓ SELECT · Ctrl-P PALETTE
