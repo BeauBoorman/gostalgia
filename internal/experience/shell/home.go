@@ -91,7 +91,7 @@ func (m *Model) renderHome(w, bodyHeight int) []string {
 			runningCount++
 			cursor := "  "
 			if itemIdx == m.homeSelected {
-				cursor = "› "
+				cursor = m.kit.Theme().Focus.Marker + " "
 			}
 			badge := m.kit.Badge(fmt.Sprintf("LIVE / PID %d", a.PID), theme.Success, 20)
 			if itemIdx == m.homeSelected {
@@ -115,7 +115,7 @@ func (m *Model) renderHome(w, bodyHeight int) []string {
 		for _, d := range m.homeData.Documents {
 			cursor := "  "
 			if itemIdx == m.homeSelected {
-				cursor = "› "
+				cursor = m.kit.Theme().Focus.Marker + " "
 			}
 			sizeStr := fmt.Sprintf("%d B", d.Size)
 			if itemIdx == m.homeSelected {

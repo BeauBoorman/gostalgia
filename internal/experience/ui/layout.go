@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
 )
@@ -11,6 +12,30 @@ import (
 // dimensions render nothing. Components never impose a minimum viewport.
 type Bounds struct {
 	Width, Height int
+}
+
+// GraphemeClusters decomposes s into its user-perceived Unicode grapheme clusters.
+// It keeps combining characters, zero-width joiners, flags, and multi-column runes intact.
+func GraphemeClusters(s string) []string {
+	var clusters []string
+	for len(s) > 0 {
+		cluster, _ := ansi.FirstGraphemeCluster(s, ansi.WcWidth)
+		if len(cluster) == 0 {
+			_, size := utf8.DecodeRuneInString(s)
+			if size <= 0 {
+				break
+			}
+			cluster = s[:size]
+		}
+		clusters = append(clusters, cluster)
+		s = s[len(cluster):]
+	}
+	return clusters
+}
+
+// GraphemeWidth returns the monospace terminal cell width of s using wcwidth.
+func GraphemeWidth(s string) int {
+	return ansi.StringWidth(s)
 }
 
 // Sanitize removes terminal sequences and controls from external text. Newlines

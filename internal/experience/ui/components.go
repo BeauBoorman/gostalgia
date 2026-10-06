@@ -132,13 +132,25 @@ func (k Kit) Tabs(tabs []Tab, active, width int) string {
 }
 
 // Badge uses an explicit symbol and label so state isn't communicated by color
-// alone. An empty label uses the state's named label.
+// alone. An empty label uses the state's named label. In monochrome and high-contrast
+// modes with bracketed text badges (e.g. [OK], [FAIL], [BUSY]), the text badge is used directly.
 func (k Kit) Badge(text string, state theme.State, width int) string {
 	s := k.theme.Status(state)
+	var content string
 	if text == "" {
-		text = s.Label
+		if strings.HasPrefix(s.Symbol, "[") && strings.HasSuffix(s.Symbol, "]") {
+			content = s.Symbol
+		} else {
+			content = s.Symbol + " " + label(s.Label)
+		}
+	} else {
+		if s.Symbol != "" {
+			content = s.Symbol + " " + label(text)
+		} else {
+			content = label(text)
+		}
 	}
-	return k.paint(Truncate(s.Symbol+" "+label(text), width), s.Text, s.Fill, true)
+	return k.paint(Truncate(content, width), s.Text, s.Fill, true)
 }
 
 type AppCard struct {
@@ -253,7 +265,11 @@ func (k Kit) Progress(progress Progress, width int) string {
 	filled := int(math.Round(value * float64(cells)))
 	bar := strings.Repeat(k.theme.Progress.Filled, filled) + strings.Repeat(k.theme.Progress.Track, cells-filled)
 	if progress.Indeterminate {
-		bar = k.theme.Status(theme.Busy).Symbol + strings.Repeat(k.theme.Progress.Track, cells-1)
+		if k.theme.ReducedMotion {
+			bar = strings.Repeat(k.theme.Progress.Track, cells)
+		} else {
+			bar = k.theme.Status(theme.Busy).Symbol + strings.Repeat(k.theme.Progress.Track, cells-1)
+		}
 	}
 	return k.StatusText(Fit(prefix+"["+bar+"]"+suffix, Bounds{width, 1}), progress.State)
 }

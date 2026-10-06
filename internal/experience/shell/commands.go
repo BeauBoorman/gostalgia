@@ -50,6 +50,10 @@ type resultMsg struct {
 	listReceipts bool
 	toggleDND    bool
 	setDND       *bool
+	setTheme     string
+	showTheme    bool
+	setMotion    *bool
+	toggleMotion bool
 }
 
 const helpText = `COMMAND CENTER
@@ -66,6 +70,8 @@ const helpText = `COMMAND CENTER
   receipt [PID]             view process crash receipts
   reap                      clean up terminated processes
   dnd [on|off]              toggle or set Do-Not-Disturb
+  theme [NAME]              switch theme (nostalgia, midnight, monochrome, high-contrast, high-contrast-light)
+  motion [on|off]           toggle or set reduced-motion mode
   ps · status               processes · system dashboard
   logs / log PID [TAIL]     view child process logs and diagnostics
   cls / clear               clear the transcript
@@ -152,6 +158,19 @@ func execute(ctx context.Context, c Caller, cwd, line string) resultMsg {
 		off := false
 		result.setDND = &off
 		result.text = ""
+	} else if strings.HasPrefix(result.text, "__SET_THEME__:") {
+		result.setTheme = strings.TrimPrefix(result.text, "__SET_THEME__:")
+		result.text = ""
+	} else if result.text == "__SHOW_THEME__" {
+		result.showTheme = true
+		result.text = ""
+	} else if strings.HasPrefix(result.text, "__SET_MOTION__:") {
+		val := strings.TrimPrefix(result.text, "__SET_MOTION__:") == "on"
+		result.setMotion = &val
+		result.text = ""
+	} else if result.text == "__TOGGLE_MOTION__" {
+		result.toggleMotion = true
+		result.text = ""
 	}
 	if !quit {
 		var apps []appStatus
@@ -229,7 +248,7 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 		if err != nil {
 			return fail(err)
 		}
-		return ok(string(pretty))
+		return ok(safe(string(pretty)))
 	}
 	args, err := words(line)
 	if err != nil {
@@ -269,7 +288,7 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 			if a.Running {
 				state = fmt.Sprintf("LIVE · PID %d", a.PID)
 			}
-			rows = append(rows, fmt.Sprintf("%s  %s v%s\n  %s · caps: %s", a.Manifest.ID, a.Manifest.Name, a.Manifest.Version, state, strings.Join(a.Manifest.Permissions, ", ")))
+			rows = append(rows, fmt.Sprintf("%s  %s v%s\n  %s · caps: %s", safe(a.Manifest.ID), safe(a.Manifest.Name), safe(a.Manifest.Version), state, strings.Join(a.Manifest.Permissions, ", ")))
 		}
 		return ok(strings.Join(rows, "\n"))
 	case "launch", "run", "stop":
@@ -285,7 +304,7 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 		if err := c.Call(ctx, method, map[string]string{"id": args[0]}, &out); err != nil {
 			return fail(err)
 		}
-		return ok(verb + " " + args[0])
+		return ok(verb + " " + safe(args[0]))
 	case "echo":
 		if len(args) == 0 {
 			return fail(fmt.Errorf("usage: echo MESSAGE"))
@@ -297,7 +316,7 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 		if err := c.Call(ctx, "app/com.gostalgia.echo/echo", map[string]string{"msg": strings.Join(args, " ")}, &out); err != nil {
 			return fail(err)
 		}
-		return ok(fmt.Sprintf("%s   [echo #%d]", out.Msg, out.Echoes))
+		return ok(fmt.Sprintf("%s   [echo #%d]", safe(out.Msg), out.Echoes))
 	case "ls", "dir", "cd":
 		if len(args) > 1 || (cmd == "cd" && len(args) != 1) {
 			return fail(fmt.Errorf("usage: %s PATH", cmd))
@@ -317,14 +336,14 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 			return fail(err)
 		}
 		if cmd == "cd" {
-			return "Directory: " + p, p, false, nil
+			return "Directory: " + safe(p), p, false, nil
 		}
-		rows := []string{"Directory of " + p}
+		rows := []string{"Directory of " + safe(p)}
 		for _, e := range out.Entries {
 			if e.IsDir {
-				rows = append(rows, "  <DIR>       "+e.Name)
+				rows = append(rows, "  <DIR>       "+safe(e.Name))
 			} else {
-				rows = append(rows, fmt.Sprintf("  %8d    %s", e.Size, e.Name))
+				rows = append(rows, fmt.Sprintf("  %8d    %s", e.Size, safe(e.Name)))
 			}
 		}
 		return ok(strings.Join(rows, "\n"))
@@ -342,7 +361,7 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 		if err != nil {
 			return fail(err)
 		}
-		return ok(string(data))
+		return ok(safe(string(data)))
 	case "ps":
 		if len(args) != 0 {
 			return fail(fmt.Errorf("usage: ps"))
@@ -499,6 +518,28 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 		default:
 			return fail(fmt.Errorf("usage: dnd [on|off]"))
 		}
+	case "theme":
+		if len(args) == 0 {
+			return ok("__SHOW_THEME__")
+		}
+		if len(args) != 1 {
+			return fail(fmt.Errorf("usage: theme [NAME]"))
+		}
+		return ok("__SET_THEME__:" + strings.ToLower(args[0]))
+	case "motion":
+		if len(args) == 0 {
+			return ok("__TOGGLE_MOTION__")
+		}
+		if len(args) != 1 {
+			return fail(fmt.Errorf("usage: motion [on|off|reduce|normal]"))
+		}
+		arg := strings.ToLower(args[0])
+		if arg == "on" || arg == "reduce" || arg == "reduced" {
+			return ok("__SET_MOTION__:on")
+		} else if arg == "off" || arg == "normal" || arg == "standard" {
+			return ok("__SET_MOTION__:off")
+		}
+		return fail(fmt.Errorf("usage: motion [on|off|reduce|normal]"))
 	case "status":
 		if len(args) != 0 {
 			return fail(fmt.Errorf("usage: status"))
@@ -511,7 +552,7 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 		if err != nil {
 			return fail(err)
 		}
-		return ok(string(b))
+		return ok(safe(string(b)))
 	case "shutdown":
 		if len(args) != 0 {
 			return fail(fmt.Errorf("usage: shutdown"))

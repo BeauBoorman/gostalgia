@@ -44,6 +44,32 @@ func TestComponentSnapshots(t *testing.T) {
 	snapshot(t, "components", strings.Join(views, "\n\n"))
 }
 
+func TestAccessibleComponentSnapshots(t *testing.T) {
+	for _, th := range []theme.Theme{theme.Monochrome(), theme.HighContrast()} {
+		t.Run(th.Name, func(t *testing.T) {
+			k := New(th, Plain)
+			var views []string
+			views = append(views,
+				"PANEL\n"+k.Panel(Panel{Title: "Welcome home", Body: "Cream, amber, and slate.\nA place to make things."}, Bounds{32, 6}),
+				"FOCUS\n"+k.Panel(Panel{Title: "Notes", Body: "A familiar workspace.", Focused: true}, Bounds{32, 5}),
+				"TABS\n"+k.Tabs([]Tab{{Label: "Home"}, {Label: "Apps"}, {Label: "Settings", Disabled: true}}, 1, 32),
+				"APP CARD\n"+k.AppCard(AppCard{Name: "Notes", ID: "com.gostalgia.notes", Version: "0.1.0",
+					Description: "Keep a thought close to home.", Status: "LIVE / PID 7", State: theme.Success, Focused: true}, Bounds{36, 7}),
+				"DIALOG\n"+k.Dialog(Dialog{Title: "Leave workspace?", Body: "Your apps will stop.",
+					Actions: []Action{{Label: "Cancel"}, {Label: "Leave"}, {Label: "Save", Disabled: true}}, Active: 0}, Bounds{40, 12}),
+				"PROGRESS\n"+k.Progress(Progress{Label: "Copy", Value: 0.5}, 32),
+				"BUSY PROGRESS (REDUCED MOTION)\n"+k.Progress(Progress{Label: "Discover", Indeterminate: true, State: theme.Busy}, 32),
+				"HELP\n"+k.HelpBar([]Binding{{Key: "Esc", Help: "back"}, {Key: "Enter", Help: "open"}, {Key: "F3", Help: "stop", Disabled: true}}, 40),
+			)
+			for _, state := range []theme.State{theme.Normal, theme.Disabled, theme.Busy, theme.Success, theme.Error, theme.Empty} {
+				views = append(views, strings.ToUpper(string(state))+"\n"+k.Badge("", state, 32)+"\n"+
+					k.Notice(Notice{State: state}, Bounds{36, 6}))
+			}
+			snapshot(t, "accessible-"+th.Name, strings.Join(views, "\n\n"))
+		})
+	}
+}
+
 func TestColorSnapshots(t *testing.T) {
 	var views []string
 	for _, th := range []theme.Theme{theme.Nostalgia(), theme.Midnight()} {

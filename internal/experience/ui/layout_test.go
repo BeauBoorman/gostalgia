@@ -84,6 +84,112 @@ func TestSanitizeExternalText(t *testing.T) {
 	}
 }
 
+func TestGraphemeClusters(t *testing.T) {
+	input := "e\u0301界👩‍💻🇺🇸"
+	clusters := GraphemeClusters(input)
+	want := []string{"e\u0301", "界", "👩‍💻", "🇺🇸"}
+	if len(clusters) != len(want) {
+		t.Fatalf("GraphemeClusters(%q) returned %d clusters, want %d: %v", input, len(clusters), len(want), clusters)
+	}
+	for i := range want {
+		if clusters[i] != want[i] {
+			t.Errorf("cluster[%d] = %q, want %q", i, clusters[i], want[i])
+		}
+	}
+	expectedWidths := []int{1, 2, 2, 2}
+	for i, c := range clusters {
+		if got := GraphemeWidth(c); got != expectedWidths[i] {
+			t.Errorf("GraphemeWidth(%q) = %d, want %d", c, got, expectedWidths[i])
+		}
+	}
+}
+
+func TestEscapeSequenceFiltering(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "CSI clear and cursor positioning",
+			input: "\x1b[2J\x1b[H\x1b[10;20Hmalicious text",
+			want:  "malicious text",
+		},
+		{
+			name:  "CSI private mode switches",
+			input: "\x1b[?1049h\x1b[?25l\x1b[?1000halt-screen-toggle\x1b[?1049l",
+			want:  "alt-screen-toggle",
+		},
+		{
+			name:  "CSI color and font formatting",
+			input: "\x1b[31;1;4mRed Bold Underline\x1b[0m",
+			want:  "Red Bold Underline",
+		},
+		{
+			name:  "OSC 52 clipboard injection with BEL",
+			input: "\x1b]52;c;Y29weXBhc3Rl\aSafe text",
+			want:  "Safe text",
+		},
+		{
+			name:  "OSC 52 clipboard injection with ST",
+			input: "\x1b]52;c;Y29weXBhc3Rl\x1b\\Safe text",
+			want:  "Safe text",
+		},
+		{
+			name:  "OSC 0 window title hijack",
+			input: "\x1b]0;Evil Title\x07Text",
+			want:  "Text",
+		},
+		{
+			name:  "OSC 8 hyperlink injection",
+			input: "\x1b]8;;http://attacker.example.com\x1b\\Click Here\x1b]8;;\x1b\\",
+			want:  "Click Here",
+		},
+		{
+			name:  "DCS device control sequence",
+			input: "\x1bP$q\"p\x1b\\DCS filtered",
+			want:  "DCS filtered",
+		},
+		{
+			name:  "APC and PM sequences",
+			input: "\x1b_apc_payload\x1b\\\x1b^pm_payload\x1b\\Clean",
+			want:  "Clean",
+		},
+		{
+			name:  "C1 UTF-8 control character U+009B",
+			input: "\xc2\x9b31mInjected\xc2\x9b0m",
+			want:  "31mInjected0m",
+		},
+		{
+			name:  "Low control characters",
+			input: "Hello\x00\x07\x08\x0b\x0c\x0e\x0f\x1aWorld\x7f",
+			want:  "HelloWorld",
+		},
+		{
+			name:  "Truncated and broken escape sequences",
+			input: "Prefix\x1b[2KClean\x1b",
+			want:  "PrefixClean",
+		},
+		{
+			name:  "Preserves newlines, spaces, tabs to spaces, combining runes",
+			input: "Line 1\tTabbed\r\nLine 2 with e\u0301 and 界 and 👩‍💻",
+			want:  "Line 1 Tabbed\nLine 2 with e\u0301 and 界 and 👩‍💻",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Sanitize(tc.input)
+			if got != tc.want {
+				t.Fatalf("Sanitize(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+			if strings.Contains(got, "\x1b") {
+				t.Fatalf("sanitized output contains raw ESC: %q", got)
+			}
+		})
+	}
+}
+
 func assertRectangle(t *testing.T, view string, bounds Bounds) {
 	t.Helper()
 	if bounds.Width <= 0 || bounds.Height <= 0 {

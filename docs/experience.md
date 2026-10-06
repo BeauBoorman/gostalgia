@@ -25,11 +25,20 @@ accent/header palette. `theme.Midnight()` is an explicitly selected slate
 alternative. Both use thick panel borders, double dialog borders, filled title
 rows, one-cell horizontal panel padding, and a visible focus marker.
 
+`theme.Monochrome()` provides an accessible no-color mode featuring pure ASCII
+borders (`+`, `-`, `|`), standard ASCII focus markers (`>`), and explicit bracketed
+text badges.
+
+`theme.HighContrast()` and `theme.HighContrastLight()` provide high-contrast
+dark (pure black canvas, pure white text, vivid yellow accents/focus) and light
+(pure white canvas, pure black text, deep navy accents/focus) token sets with
+bold borders, double dialog frames, and high-contrast cues.
+
 `Theme` contains values, not shared maps or mutable global styles. Customize a
 copy before constructing a kit. Colors, spacing (terminal cells), borders,
-typography weights, focus marker/colors, state symbol/label/message/colors, and
-progress fill/track glyphs are named tokens. Border and progress glyphs should
-occupy one cell; spacing should be nonnegative.
+typography weights, focus marker/colors, state symbol/label/message/colors,
+progress fill/track glyphs, and the `ReducedMotion` boolean toggle are named tokens.
+Border and progress glyphs occupy one cell; spacing is nonnegative.
 
 ```go
 import (
@@ -48,17 +57,48 @@ view := kit.Panel(ui.Panel{
 }, bounds)
 ```
 
-The caller chooses `ui.Plain`, `ui.ANSI256`, or `ui.TrueColor`. A kit owns an
+The caller chooses `ui.Plain`, `ui.ANSI16`, `ui.ANSI256`, or `ui.TrueColor`. A kit owns an
 isolated renderer with an explicit profile and background setting, backed by
 `io.Discard`. It does not inspect terminal state, select adaptive colors, consult
 `NO_COLOR`/`COLORFGBG`, or modify Lip Gloss's global renderer. Plain output contains
-no ANSI styling, but retains Unicode borders and state/focus symbols. A future
-capability/settings layer can choose a mode; there is no terminal autodetection
-or theme settings UI in this issue.
+no ANSI styling, but retains borders and state/focus symbols.
 
 `shell.New` selects Nostalgia and ANSI256. `shell.NewWithTheme` accepts the theme
-and mode explicitly for alternate views and deterministic testing. The shell's
-existing command and keyboard behavior is unchanged.
+and mode explicitly for alternate views and deterministic testing. Shell users
+can dynamically switch themes with `theme [NAME]` or toggle reduced motion with
+`motion [on|off]`, as well as select them directly from the Command Palette (`Ctrl-P`).
+
+## Accessible terminal modes
+
+Gostalgia guarantees full visual accessibility without relying on terminal
+autodetection or host environment heuristics:
+
+- **Monochrome & limited-color mode**:
+  - `theme.Monochrome()` combined with `ui.Plain` emits zero ANSI color escapes.
+  - All panel and card borders switch to clean standard ASCII characters (`+`, `-`, `|`)
+    via `theme.ASCIIBorder()`, preventing terminal box-drawing glitches on legacy or
+    limited-font terminals.
+  - The focus cursor uses standard ASCII `> ` instead of Unicode symbols.
+  - Unread indicators use `* ` instead of colored dots.
+- **High-contrast tokens**:
+  - `theme.HighContrast()`: pure black `#000000` canvas with pure white `#FFFFFF`
+    primary text and high-visibility `#FFFF00` yellow accents and focus highlights.
+  - `theme.HighContrastLight()`: pure white `#FFFFFF` canvas with deep black `#000000`
+    primary text and high-visibility `#000080` navy accents.
+  - Prominent focus markers (`» `) and thick/double borders ensure immediate visual
+    clarity.
+- **Never rely on color alone**:
+  - All status indications provide explicit bracketed text cues: `[OK]`, `[FAIL]`,
+    `[BUSY]`, `[READY]`, `[DISABLED]`, and `[EMPTY]`.
+  - Process tables, crash receipts, notifications, app cards, and notice panels
+    display text labels and bracketed glyphs alongside color cues.
+- **Reduced motion**:
+  - Configurable via `theme.WithReducedMotion(bool)` or the `motion [on|off]` command,
+    and enabled by default in `Monochrome`, `HighContrast`, and `HighContrastLight`.
+  - Suppresses indeterminate progress animations and moving ticker symbols:
+    `ui.Progress` renders static bracketed progress tracks and explicit `BUSY` / `WORKING`
+    text rather than animated spinners or moving markers.
+  - The experience layer runs zero background animation loops or unrequested frame redraws.
 
 ## Components
 
@@ -227,28 +267,56 @@ helpers for grapheme-aware truncation, wrapping, and styled-string width. CJK,
 combining accents, flags, and joined emoji remain whole. Oversized graphemes
 that cannot fit a viewport are omitted rather than split.
 
+- `GraphemeClusters`: breaks text into user-perceived grapheme clusters using `ansi.FirstGraphemeCluster`.
+- `GraphemeWidth`: computes display cell width accounting for double-width CJK, zero-width joiners, and combining runes.
 - `Truncate`: one line with an ellipsis if needed.
 - `Tail`: rightmost whole graphemes, useful for a long DOS path or prompt input.
 - `Wrap`: hard-wrap text by cells.
 - `Fit`: clip and pad to an exact rectangle without wrapping.
 
-Rectangular components occupy exactly their supplied positive outer bounds.
-Nonpositive bounds produce an empty string; tiny panels fall back to compact
-text rather than drawing an overflowing frame. Tabs, progress, and help bars
-occupy one row; badges are inline and may be shorter than their limit.
+### Prompt editing and cluster atomicity
 
-80×24 is the recommended shell viewport. Components are tested through 240×80
-and at tiny/zero sizes. The shell keeps its existing 30×10 minimum for interaction
-and displays a bounded resize message below it. Terminal emulators may differ
-on unusual emoji widths; the rendering contract uses the pinned grapheme-width
-implementation, not a live terminal width query.
+Prompt line navigation and editing in `internal/experience/shell` operate at grapheme cluster boundaries:
+- Cursor left/right navigation advances or retreats across whole clusters (`prevClusterRune`, `nextClusterRune`).
+- Backspace deletes the preceding grapheme cluster as an atomic unit, preventing orphaned combining marks or broken modifier sequences.
+- Delete removes the cluster at the cursor atomically.
+- Pasted or typed multiline text has newlines converted to spaces, maintaining a predictable single-line prompt.
 
-`Sanitize` removes terminal escapes (including OSC/DCS) and controls from external
-file/app/IPC text. It preserves newlines, replaces tabs with spaces, and repairs
-invalid UTF-8. Component labels, card descriptions, notice messages, and dialog
-messages are sanitized internally. `Panel.Body`, text styling helpers, and
-layout helpers accept **trusted text or composed ANSI output**; sanitize external
-data before handing it to them. Do not sanitize component output again.
+### Viewport resilience and small-screen degradation
+
+- Rectangular components occupy exactly their supplied positive outer bounds.
+- Nonpositive bounds produce an empty string; tiny panels fall back to compact text rather than drawing an overflowing frame.
+- 80×24 is the recommended standard shell viewport. Components and shell views are tested from tiny bounds through 240×80.
+- When viewport dimensions fall between 80×24 and 30×10, views remain fully usable with compact layouts and bounded text truncation.
+- Below 30×10, the shell gracefully degrades to a clean, bounded notice (`GOSTALGIA / Resize to 30×10 or larger. / Ctrl-C exits.`) without crashing, clipping errors, or outer border overflow.
+
+## Terminal control injection defense and restoration
+
+### Escape sequence filtering
+
+External files, app standard output, IPC data, and notification messages are untrusted.
+`ui.Sanitize` strips:
+- CSI escape sequences: cursor movement, clear screen, display modes, font styling (`\x1b[...m`, `\x1b[?25h`, etc.).
+- OSC escape sequences: window title changes (`\x1b]0;...\a`), OSC 52 clipboard hijacking (`\x1b]52;...\a` or ST), and OSC 8 hyperlinks.
+- DCS (Device Control Strings), APC (Application Program Commands), PM (Privacy Messages).
+- C1 8-bit controls (`\x9b`) and low ASCII control characters (BEL, BS, VT, FF).
+- Preserves newlines (`\n`), spaces, tab expansion, and valid UTF-8 combining sequences.
+
+All CLI commands (`cat`, `type`, `dir`, `ls`, `echo`, `call`), task manager log tails, and crash receipt excerpts pass through `safe()` sanitization before rendering into the shell transcript or presentation cards.
+
+### Deterministic terminal restoration
+
+On normal or abnormal termination (including panics, interrupts, or signal terminations),
+terminals must not be left in alternate screens, mouse tracking modes, or hidden cursor states.
+
+`shell.RestoreTerminal()` writes explicit recovery sequences to standard output:
+- `\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l`: disables standard, button, any-event, and SGR mouse tracking.
+- `\x1b[?2004l`: disables bracketed paste mode.
+- `\x1b[?25h`: restores cursor visibility.
+- `\x1b[0m`: resets all SGR attributes (colors, bold, underline, reverse).
+- `\x1b[?1049l`: exits the alternate screen buffer and returns to the normal screen.
+
+`shell.Run` installs a deferred call to `RestoreTerminal()`, ensuring restoration runs on normal Bubble Tea program exit and error returns. `shell.Restore(io.Writer)` enables isolated, deterministic testing of recovery sequences without side effects.
 
 ## Dependencies and boundary
 
@@ -277,22 +345,25 @@ GOOS=darwin go build ./...
 ```
 
 Checked-in goldens cover the component vocabulary, focus and all named states,
-custom tokens, both palettes, and all three explicit color modes. ANSI snapshots
+custom tokens, both standard palettes, accessible themes (`accessible-monochrome.golden`,
+`accessible-high-contrast.golden`), and all explicit color modes. ANSI snapshots
 spell escapes as `\x1b` for readable diffs. `.gitattributes` preserves LF endings
 in golden fixtures, including Windows checkouts with `core.autocrlf=true`.
-Shell goldens cover home, populated shelf, empty shelf, busy/error, and app
-presentation ready/loading/error/disabled views.
+Shell goldens cover home, populated shelf, empty shelf, busy/error, app
+presentation views, and accessible views (`monochrome-prompt.golden`,
+`monochrome-home.golden`, `high-contrast-prompt.golden`).
 Snapshot comparisons ignore trailing spaces; separate unit tests check exact
 rectangular cell dimensions.
 
 Other tests cover clipping/wrapping, combining/CJK/emoji text, narrow action/tab
-visibility, progress clamping, control filtering, host-environment independence,
-theme-copy isolation, and concurrent rendering. The existing actual Bubble Tea
-program test drives app lifecycle and VFS commands over authenticated IPC.
+visibility, progress clamping, control filtering (CSI, OSC, DCS, C1 controls),
+host-environment independence, theme-copy isolation, and concurrent rendering.
+The actual Bubble Tea program test drives app lifecycle and VFS commands over
+authenticated IPC.
 
 Regenerate goldens deliberately, then inspect their diff:
 
 ```sh
-go test ./internal/experience/ui -run 'Test(Component|Color)Snapshots' -update
-go test ./internal/experience/shell -run TestShellVisualSnapshots -update-visual
+go test ./internal/experience/ui -run 'Test.*Snapshots' -update
+go test ./internal/experience/shell -run 'TestShell.*Snapshots' -update-visual
 ```

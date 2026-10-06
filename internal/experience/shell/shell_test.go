@@ -3,6 +3,7 @@ package shell
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"gostalgia/internal/experience/ui"
 	"gostalgia/internal/ipc"
 	"gostalgia/internal/runtime"
 	"gostalgia/platform"
@@ -282,5 +284,301 @@ func TestCharmBaselineVersions(t *testing.T) {
 	}
 	if CharmBubblesVersion != "v1.0.0" {
 		t.Errorf("Bubbles version = %s, want v1.0.0", CharmBubblesVersion)
+	}
+}
+
+func TestGraphemeClusterEditing(t *testing.T) {
+	m := New(context.Background(), noopCaller{}, nil)
+	// Test combining character cluster e + acute accent (e\u0301)
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e\u0301clair")})
+	if string(m.input) != "e\u0301clair" {
+		t.Fatalf("input = %s, want e\\u0301clair", string(m.input))
+	}
+	// Move left 5 clusters (past r, i, a, l, c)
+	for i := 0; i < 5; i++ {
+		m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	}
+	// Cursor should now be right after the 2-rune cluster "e\u0301" (index 2)
+	if m.cursor != 2 {
+		t.Fatalf("cursor after 5 left steps = %d, want 2", m.cursor)
+	}
+	// Move left once more; cursor should leap over the whole grapheme cluster to 0
+	m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if m.cursor != 0 {
+		t.Fatalf("cursor at start = %d, want 0", m.cursor)
+	}
+	// Move right once; cursor should land at 2 (not 1 in the middle of combining cluster)
+	m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if m.cursor != 2 {
+		t.Fatalf("cursor after right = %d, want 2", m.cursor)
+	}
+	// Backspace deletes the entire "e\u0301" cluster
+	m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	if string(m.input) != "clair" || m.cursor != 0 {
+		t.Fatalf("after backspace cluster: input=%s, cursor=%d", string(m.input), m.cursor)
+	}
+
+	// Test ZWJ sequence (woman technologist: 👩 + ZWJ + 💻 = 3 runes)
+	m.input = nil
+	m.cursor = 0
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("👩\u200d💻!")})
+	if len(m.input) != 4 { // 3 runes for emoji + 1 rune for '!'
+		t.Fatalf("input runes count = %d, want 4", len(m.input))
+	}
+	// Cursor is at 4. Move left: cursor is at 3 (before '!').
+	m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if m.cursor != 3 {
+		t.Fatalf("cursor before ! = %d, want 3", m.cursor)
+	}
+	// Move left again: leaps over 👩\u200d💻 to index 0.
+	m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if m.cursor != 0 {
+		t.Fatalf("cursor before ZWJ = %d, want 0", m.cursor)
+	}
+	// Delete key on cluster at index 0 deletes the entire 3-rune emoji
+	m.Update(tea.KeyMsg{Type: tea.KeyDelete})
+	if string(m.input) != "!" || m.cursor != 0 {
+		t.Fatalf("after delete on emoji: input=%s, cursor=%d", string(m.input), m.cursor)
+	}
+}
+
+func TestThemeAndMotionCommands(t *testing.T) {
+	ctx := context.Background()
+	m := New(ctx, noopCaller{}, nil)
+
+	// Test theme command with no args shows active theme
+	res := execute(ctx, m.client, m.cwd, "theme")
+	if !res.showTheme {
+		t.Fatalf("expected showTheme true")
+	}
+	m.Update(res)
+	foundActive := false
+	for _, entry := range m.transcript {
+		if strings.Contains(entry.text, "Active theme: nostalgia") {
+			foundActive = true
+			break
+		}
+	}
+	if !foundActive {
+		t.Fatalf("transcript after theme command missing active theme: %v", m.transcript)
+	}
+
+	// Test switching theme to monochrome
+	res = execute(ctx, m.client, m.cwd, "theme monochrome")
+	if res.setTheme != "monochrome" {
+		t.Fatalf("setTheme = %s, want monochrome", res.setTheme)
+	}
+	m.Update(res)
+	if m.Theme().Name != "monochrome" || !m.Theme().ReducedMotion {
+		t.Fatalf("theme name = %s, motion = %v", m.Theme().Name, m.Theme().ReducedMotion)
+	}
+
+	// Test switching to high-contrast
+	res = execute(ctx, m.client, m.cwd, "theme high-contrast")
+	if res.setTheme != "high-contrast" {
+		t.Fatalf("setTheme = %s, want high-contrast", res.setTheme)
+	}
+	m.Update(res)
+	if m.Theme().Name != "high-contrast" {
+		t.Fatalf("theme name = %s", m.Theme().Name)
+	}
+
+	// Test switching to high-contrast-light
+	m.SetThemeByName("high-contrast-light")
+	if m.Theme().Name != "high-contrast-light" {
+		t.Fatalf("theme name = %s", m.Theme().Name)
+	}
+
+	// Test switching back to nostalgia
+	m.SetThemeByName("nostalgia")
+	if m.Theme().Name != "nostalgia" {
+		t.Fatalf("theme name = %s", m.Theme().Name)
+	}
+
+	// Test invalid theme
+	res = execute(ctx, m.client, m.cwd, "theme nonexistent")
+	if res.setTheme != "nonexistent" {
+		t.Fatalf("expected setTheme nonexistent, got %s", res.setTheme)
+	}
+	m.Update(res)
+	foundErr := false
+	for _, entry := range m.transcript {
+		if strings.Contains(strings.ToLower(entry.text), `unknown theme "nonexistent"`) {
+			foundErr = true
+			break
+		}
+	}
+	if !foundErr {
+		t.Fatalf("expected unknown theme error in transcript, got: %v", m.transcript)
+	}
+
+	// Test motion toggling
+	m.SetReducedMotion(false)
+	res = execute(ctx, m.client, m.cwd, "motion")
+	if !res.toggleMotion {
+		t.Fatalf("expected toggleMotion true")
+	}
+	m.Update(res)
+	if !m.Theme().ReducedMotion {
+		t.Fatalf("expected reduced motion true after toggle")
+	}
+
+	// Test motion off
+	res = execute(ctx, m.client, m.cwd, "motion off")
+	if res.setMotion == nil || *res.setMotion {
+		t.Fatalf("expected setMotion false")
+	}
+	m.Update(res)
+	if m.Theme().ReducedMotion {
+		t.Fatalf("expected reduced motion false")
+	}
+
+	// Test motion on
+	res = execute(ctx, m.client, m.cwd, "motion on")
+	if res.setMotion == nil || !*res.setMotion {
+		t.Fatalf("expected setMotion true")
+	}
+	m.Update(res)
+	if !m.Theme().ReducedMotion {
+		t.Fatalf("expected reduced motion true")
+	}
+
+	// Test tab completion for theme and motion
+	m.input = []rune("theme mono")
+	m.cursor = len(m.input)
+	m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if string(m.input) != "theme monochrome" {
+		t.Fatalf("completed theme = %s", string(m.input))
+	}
+
+	m.input = []rune("motion of")
+	m.cursor = len(m.input)
+	m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if string(m.input) != "motion off" {
+		t.Fatalf("completed motion = %s", string(m.input))
+	}
+}
+
+func TestTerminalRestoration(t *testing.T) {
+	var buf bytes.Buffer
+	Restore(&buf)
+	got := buf.String()
+	// Check for mouse disable, bracketed paste disable, cursor show, SGR reset, alt screen exit
+	for _, expected := range []string{
+		"\x1b[?1000l",
+		"\x1b[?1002l",
+		"\x1b[?1003l",
+		"\x1b[?1006l",
+		"\x1b[?2004l",
+		"\x1b[?25h",
+		"\x1b[0m",
+		"\x1b[?1049l",
+	} {
+		if !strings.Contains(got, expected) {
+			t.Errorf("Restore missing sequence %q in %q", expected, got)
+		}
+	}
+
+	// Restore(nil) must not panic
+	Restore(nil)
+}
+
+func TestSmallViewportDegradation(t *testing.T) {
+	m := New(context.Background(), noopCaller{}, nil)
+	// Fill transcript with content
+	m.append(entry{"line 1", "output"})
+	m.append(entry{"line 2", "output"})
+	m.append(entry{"line 3", "output"})
+
+	for _, mode := range []viewMode{modeHome, modeLauncher, modePrompt} {
+		m.setMode(mode)
+		for _, size := range []ui.Bounds{
+			{Width: 80, Height: 24},
+			{Width: 60, Height: 18},
+			{Width: 40, Height: 12},
+			{Width: 30, Height: 10},
+			{Width: 20, Height: 8},
+			{Width: 10, Height: 5},
+			{Width: 5, Height: 2},
+			{Width: 0, Height: 0},
+		} {
+			m.Update(tea.WindowSizeMsg{Width: size.Width, Height: size.Height})
+			view := m.View()
+			if size.Width == 0 || size.Height == 0 {
+				if view != "" {
+					t.Fatalf("expected empty for %dx%d", size.Width, size.Height)
+				}
+				continue
+			}
+			w := lipgloss.Width(view)
+			h := lipgloss.Height(view)
+			if w > size.Width || h > size.Height {
+				t.Fatalf("mode %d at %dx%d rendered %dx%d (exceeds bounds)", mode, size.Width, size.Height, w, h)
+			}
+		}
+	}
+}
+
+type fakeFSCaller struct {
+	noopCaller
+	data map[string]string
+}
+
+func (f fakeFSCaller) Call(ctx context.Context, method string, in, out any) error {
+	if method == "fs/read" {
+		inMap, _ := in.(map[string]string)
+		content, ok := f.data[inMap["path"]]
+		if !ok {
+			return fmt.Errorf("file not found: %s", inMap["path"])
+		}
+		outStruct, _ := out.(*struct {
+			Data string `json:"data_base64"`
+		})
+		if outStruct != nil {
+			outStruct.Data = base64.StdEncoding.EncodeToString([]byte(content))
+		}
+		return nil
+	}
+	if method == "app/com.gostalgia.echo/echo" {
+		inMap, _ := in.(map[string]string)
+		msg := inMap["msg"]
+		outStruct, _ := out.(*struct {
+			Msg    string `json:"msg"`
+			Echoes int64  `json:"echoes"`
+		})
+		if outStruct != nil {
+			outStruct.Msg = msg
+			outStruct.Echoes = 1
+		}
+		return nil
+	}
+	return f.noopCaller.Call(ctx, method, in, out)
+}
+
+func TestExternalDataSanitizationInShell(t *testing.T) {
+	evilPayload := "Safe text\x1b[2J\x1b[H\x1b]52;c;evil\aMore text\x1b[?1049h"
+	client := fakeFSCaller{
+		data: map[string]string{
+			"/users/guest/evil.txt": evilPayload,
+		},
+	}
+	m := New(context.Background(), client, nil)
+
+	// Execute cat on evil.txt
+	res := execute(context.Background(), m.client, m.cwd, `cat evil.txt`)
+	if strings.Contains(res.text, "\x1b") || strings.Contains(res.text, "\a") {
+		t.Fatalf("cat output contained escape sequences: %q", res.text)
+	}
+	if !strings.Contains(res.text, "Safe text") || !strings.Contains(res.text, "More text") {
+		t.Fatalf("cat output lost safe content: %q", res.text)
+	}
+
+	// Test echo with escape sequences
+	res = execute(context.Background(), m.client, m.cwd, "echo \x1b]0;Title\aHello \x1b[31mWorld\x1b[0m")
+	if strings.Contains(res.text, "\x1b") || strings.Contains(res.text, "\a") {
+		t.Fatalf("echo output contained escape sequences: %q", res.text)
+	}
+	if !strings.Contains(res.text, "Hello") || !strings.Contains(res.text, "World") {
+		t.Fatalf("echo output lost words: %q", res.text)
 	}
 }

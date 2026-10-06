@@ -126,6 +126,42 @@ func (m *Model) paletteItems() []paletteItem {
 			Detail: "Leave the shell",
 			Action: func(m *Model) tea.Cmd { return tea.Quit },
 		},
+		paletteItem{
+			Tag:    "THEME",
+			Title:  "theme monochrome",
+			Detail: "Monochrome / high-contrast ASCII mode (accessible)",
+			Action: func(m *Model) tea.Cmd { return m.submit("theme monochrome") },
+		},
+		paletteItem{
+			Tag:    "THEME",
+			Title:  "theme high-contrast",
+			Detail: "High-contrast dark theme with explicit text cues",
+			Action: func(m *Model) tea.Cmd { return m.submit("theme high-contrast") },
+		},
+		paletteItem{
+			Tag:    "THEME",
+			Title:  "theme high-contrast-light",
+			Detail: "High-contrast light theme with explicit text cues",
+			Action: func(m *Model) tea.Cmd { return m.submit("theme high-contrast-light") },
+		},
+		paletteItem{
+			Tag:    "THEME",
+			Title:  "theme nostalgia",
+			Detail: "Default warm cream, amber, and slate palette",
+			Action: func(m *Model) tea.Cmd { return m.submit("theme nostalgia") },
+		},
+		paletteItem{
+			Tag:    "THEME",
+			Title:  "theme midnight",
+			Detail: "Cool slate and amber palette",
+			Action: func(m *Model) tea.Cmd { return m.submit("theme midnight") },
+		},
+		paletteItem{
+			Tag:    "THEME",
+			Title:  "motion toggle",
+			Detail: "Toggle reduced-motion mode (disable ticks/animations)",
+			Action: func(m *Model) tea.Cmd { return m.submit("motion") },
+		},
 	)
 
 	// Documents
@@ -200,7 +236,7 @@ func (m *Model) renderPalette(w, bodyHeight int) []string {
 			it := filtered[i]
 			cursor := "  "
 			if i == m.paletteSelected {
-				cursor = "› "
+				cursor = m.kit.Theme().Focus.Marker + " "
 			}
 			tagBadge := "[" + it.Tag + "] "
 			detailText := "  " + it.Detail

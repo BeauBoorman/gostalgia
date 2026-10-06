@@ -5,6 +5,8 @@ package shell
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -556,6 +558,36 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.append(entry{fmt.Sprintf("No crash receipt recorded for PID %d", msg.receiptPID), "error"})
 			}
 		}
+		if msg.setTheme != "" {
+			if m.SetThemeByName(msg.setTheme) {
+				m.append(entry{fmt.Sprintf("Theme changed to %s", m.kit.Theme().Name), "accent"})
+			} else {
+				m.append(entry{fmt.Sprintf("Unknown theme %q. Available: nostalgia, midnight, monochrome, high-contrast, high-contrast-light", msg.setTheme), "error"})
+			}
+		} else if msg.showTheme {
+			rm := "disabled"
+			if m.kit.Theme().ReducedMotion {
+				rm = "enabled"
+			}
+			m.append(entry{fmt.Sprintf("Active theme: %s · Mode: %v · Reduced motion: %s", m.kit.Theme().Name, m.kit.Mode(), rm), "accent"})
+			m.append(entry{"Available themes: nostalgia, midnight, monochrome, high-contrast, high-contrast-light", "muted"})
+		}
+		if msg.toggleMotion {
+			newMotion := !m.kit.Theme().ReducedMotion
+			m.SetReducedMotion(newMotion)
+			state := "disabled"
+			if newMotion {
+				state = "enabled"
+			}
+			m.append(entry{fmt.Sprintf("Reduced motion is now %s", state), "accent"})
+		} else if msg.setMotion != nil {
+			m.SetReducedMotion(*msg.setMotion)
+			state := "disabled"
+			if *msg.setMotion {
+				state = "enabled"
+			}
+			m.append(entry{fmt.Sprintf("Reduced motion is now %s", state), "accent"})
+		}
 		if msg.text != "" {
 			m.append(entry{msg.text, "output"})
 		}
@@ -802,17 +834,19 @@ func (m *Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.submit(line)
 	case tea.KeyBackspace, tea.KeyCtrlH:
 		if m.cursor > 0 {
-			m.input = append(m.input[:m.cursor-1], m.input[m.cursor:]...)
-			m.cursor--
+			prev := prevClusterRune(m.input, m.cursor)
+			m.input = append(m.input[:prev], m.input[m.cursor:]...)
+			m.cursor = prev
 		}
 	case tea.KeyDelete:
 		if m.cursor < len(m.input) {
-			m.input = append(m.input[:m.cursor], m.input[m.cursor+1:]...)
+			next := nextClusterRune(m.input, m.cursor)
+			m.input = append(m.input[:m.cursor], m.input[next:]...)
 		}
 	case tea.KeyLeft:
-		m.cursor = max(0, m.cursor-1)
+		m.cursor = prevClusterRune(m.input, m.cursor)
 	case tea.KeyRight:
-		m.cursor = min(len(m.input), m.cursor+1)
+		m.cursor = nextClusterRune(m.input, m.cursor)
 	case tea.KeyHome, tea.KeyCtrlA:
 		m.cursor = 0
 	case tea.KeyEnd, tea.KeyCtrlE:
@@ -861,15 +895,21 @@ func (m *Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) complete() {
 	prefix := string(m.input)
-	choices := []string{"help", "apps", "launch", "run", "stop", "echo", "call", "dir", "ls", "cd", "type", "cat", "ps", "logs", "log", "status", "cls", "exit", "shutdown", "home", "palette", "tasks", "taskmanager", "notifications", "alerts", "receipt", "reap", "dnd"}
+	choices := []string{"help", "apps", "launch", "run", "stop", "echo", "call", "dir", "ls", "cd", "type", "cat", "ps", "logs", "log", "status", "cls", "exit", "shutdown", "home", "palette", "tasks", "taskmanager", "notifications", "alerts", "receipt", "reap", "dnd", "theme", "motion"}
 	if verb, partial, ok := strings.Cut(prefix, " "); ok {
-		if verb != "launch" && verb != "run" && verb != "stop" {
+		if verb != "launch" && verb != "run" && verb != "stop" && verb != "theme" && verb != "motion" {
 			return
 		}
-		choices = nil
-		for _, a := range m.apps {
-			if strings.HasPrefix(a.Manifest.ID, partial) {
-				choices = append(choices, verb+" "+a.Manifest.ID)
+		if verb == "theme" {
+			choices = []string{"theme nostalgia", "theme midnight", "theme monochrome", "theme high-contrast", "theme high-contrast-light"}
+		} else if verb == "motion" {
+			choices = []string{"motion on", "motion off"}
+		} else {
+			choices = nil
+			for _, a := range m.apps {
+				if strings.HasPrefix(a.Manifest.ID, partial) {
+					choices = append(choices, verb+" "+a.Manifest.ID)
+				}
 			}
 		}
 	}
@@ -883,6 +923,91 @@ func (m *Model) complete() {
 	if len(matches) == 1 {
 		m.input = []rune(matches[0])
 		m.cursor = len(m.input)
+	}
+}
+
+func clusterRuneOffsets(input []rune) []int {
+	if len(input) == 0 {
+		return []int{0}
+	}
+	s := string(input)
+	clusters := ui.GraphemeClusters(s)
+	offsets := make([]int, 0, len(clusters)+1)
+	runeIdx := 0
+	offsets = append(offsets, runeIdx)
+	for _, c := range clusters {
+		runeIdx += len([]rune(c))
+		offsets = append(offsets, runeIdx)
+	}
+	return offsets
+}
+
+func prevClusterRune(input []rune, cursor int) int {
+	if cursor <= 0 {
+		return 0
+	}
+	offsets := clusterRuneOffsets(input)
+	prev := 0
+	for _, off := range offsets {
+		if off >= cursor {
+			break
+		}
+		prev = off
+	}
+	return prev
+}
+
+func nextClusterRune(input []rune, cursor int) int {
+	if cursor >= len(input) {
+		return len(input)
+	}
+	offsets := clusterRuneOffsets(input)
+	for _, off := range offsets {
+		if off > cursor {
+			return off
+		}
+	}
+	return len(input)
+}
+
+// Theme returns the shell's active theme tokens.
+func (m *Model) Theme() theme.Theme {
+	return m.kit.Theme()
+}
+
+// SetTheme updates the shell's active theme and color capability mode.
+func (m *Model) SetTheme(t theme.Theme, mode ui.ColorMode) {
+	m.kit = ui.New(t, mode)
+}
+
+// SetReducedMotion updates the reduced motion preference of the active theme.
+func (m *Model) SetReducedMotion(enabled bool) {
+	th := m.kit.Theme().WithReducedMotion(enabled)
+	m.kit = ui.New(th, m.kit.Mode())
+}
+
+// SetThemeByName switches the active theme by case-insensitive name.
+// Supported names: nostalgia, midnight, monochrome (or mono), high-contrast (or hc),
+// high-contrast-light (or hcl). Returns true if the theme was recognized.
+func (m *Model) SetThemeByName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "nostalgia", "default":
+		m.SetTheme(theme.Nostalgia(), ui.ANSI256)
+		return true
+	case "midnight", "dark":
+		m.SetTheme(theme.Midnight(), ui.ANSI256)
+		return true
+	case "monochrome", "mono", "plain":
+		m.SetTheme(theme.Monochrome(), ui.Plain)
+		return true
+	case "high-contrast", "highcontrast", "hc":
+		m.SetTheme(theme.HighContrast(), ui.ANSI256)
+		return true
+	case "high-contrast-light", "highcontrastlight", "hcl":
+		m.SetTheme(theme.HighContrastLight(), ui.ANSI256)
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1119,18 +1244,36 @@ func (m *Model) View() string {
 		panelBounds) + "\n" + m.kit.HelpBar(bindings, m.width)
 }
 
+// RestoreTerminal writes explicit control sequences to stdout to restore standard
+// terminal state (show cursor, exit alternate screen, reset styles, disable mouse
+// tracking, disable bracketed paste) on normal and abnormal exits.
+func RestoreTerminal() {
+	Restore(os.Stdout)
+}
+
+// Restore writes reset and recovery sequences to the given writer.
+func Restore(w io.Writer) {
+	if w == nil {
+		return
+	}
+	_, _ = io.WriteString(w, "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[0m\x1b[?1049l")
+}
+
 // Run takes over the terminal, restoring it on every exit. Passing options is
 // useful for tests; production runs in the alternate screen with bracketed paste.
-func Run(ctx context.Context, c Caller, closed <-chan struct{}, options ...tea.ProgramOption) error {
+func Run(ctx context.Context, c Caller, closed <-chan struct{}, options ...tea.ProgramOption) (err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithContext(ctx)}
 	opts = append(opts, options...)
 	model := New(ctx, c, closed)
-	_, err := tea.NewProgram(model, opts...).Run()
-	if cleanup := model.dismissView(); cleanup != nil {
-		cleanup()
-	}
+	defer func() {
+		if cleanup := model.dismissView(); cleanup != nil {
+			cleanup()
+		}
+		RestoreTerminal()
+	}()
+	_, err = tea.NewProgram(model, opts...).Run()
 	return err
 }
 

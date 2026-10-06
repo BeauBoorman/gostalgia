@@ -415,7 +415,11 @@ func (m *Manager) RenderPanel(kit ui.Kit, bounds ui.Bounds) string {
 		timeStr := n.Timestamp.Format("15:04:05")
 		seenMarker := "  "
 		if !n.Seen {
-			seenMarker = kit.StatusText("● ", theme.Success)
+			sym := "● "
+			if kit.Theme().Name == "monochrome" || kit.Mode() == ui.Plain {
+				sym = "* "
+			}
+			seenMarker = kit.StatusText(sym, theme.Success)
 		}
 
 		badge := kit.Badge(badgeLabel, badgeState, w)
@@ -426,7 +430,7 @@ func (m *Manager) RenderPanel(kit ui.Kit, bounds ui.Bounds) string {
 
 		prefix := "  "
 		if focused {
-			prefix = "› "
+			prefix = kit.Theme().Focus.Marker + " "
 		}
 
 		headerLine := fmt.Sprintf("%s%s%s [%s] %s", prefix, seenMarker, badge, timeStr, titleText)
