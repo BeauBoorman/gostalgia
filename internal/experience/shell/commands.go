@@ -28,12 +28,23 @@ type appStatus struct {
 	PID     int32 `json:"pid"`
 }
 
+type sysStatusData struct {
+	UptimeSeconds float64
+	User          string
+	ProcessCount  int
+	ServicesCount int
+}
+
 type resultMsg struct {
-	text string
-	err  error
-	cwd  string
-	apps []appStatus
-	quit bool
+	text      string
+	err       error
+	cwd       string
+	apps      []appStatus
+	status    sysStatusData
+	documents []docShortcut
+	hasStatus bool
+	hasDocs   bool
+	quit      bool
 }
 
 const helpText = `COMMAND CENTER
@@ -51,8 +62,8 @@ const helpText = `COMMAND CENTER
   exit                      leave shell (owned boot shuts down)
   shutdown                  shut down the environment
 
-F2 app shelf · F3 stop selected · F4 open selected view · Tab complete · ↑↓ history
-Paths accept /users/guest or C:\users\guest. Quote paths with spaces.`
+F1 home dashboard · F2 app shelf · Ctrl+P / / command palette · F3 stop · F4 view
+Tab complete · ↑↓ history · Paths accept /users/guest or C:\users\guest.`
 
 // words handles quoted paths and messages. Backslashes remain literal for DOS
 // paths. Raw call JSON is parsed separately so JSON escaping is unchanged.
@@ -117,6 +128,44 @@ func execute(ctx context.Context, c Caller, cwd, line string) resultMsg {
 			}
 		} else {
 			result.apps = apps
+		}
+
+		var status struct {
+			UptimeSeconds float64 `json:"uptime_seconds"`
+			User          string  `json:"user"`
+			Processes     []any   `json:"processes"`
+			Services      []any   `json:"services"`
+		}
+		if err := c.Call(ctx, "sys/status", nil, &status); err == nil {
+			result.status = sysStatusData{
+				UptimeSeconds: status.UptimeSeconds,
+				User:          status.User,
+				ProcessCount:  len(status.Processes),
+				ServicesCount: len(status.Services),
+			}
+			result.hasStatus = true
+		}
+
+		var dir struct {
+			Entries []struct {
+				Name  string `json:"name"`
+				IsDir bool   `json:"is_dir"`
+				Size  int64  `json:"size"`
+			} `json:"entries"`
+		}
+		if err := c.Call(ctx, "fs/list", map[string]string{"path": "/users/guest/documents"}, &dir); err == nil {
+			var docs []docShortcut
+			for _, e := range dir.Entries {
+				if !e.IsDir {
+					docs = append(docs, docShortcut{
+						Name: e.Name,
+						Path: "/users/guest/documents/" + e.Name,
+						Size: e.Size,
+					})
+				}
+			}
+			result.documents = docs
+			result.hasDocs = true
 		}
 	}
 	return result
