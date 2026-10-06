@@ -2,10 +2,12 @@ package vfs
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"io/fs"
 	"path"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -14,8 +16,10 @@ import (
 // double for filesystem-backed subsystems. It follows the io/fs name
 // contract strictly (fs-form names, no dot segments).
 type MemFS struct {
-	mu    sync.RWMutex
-	nodes map[string]*memNode // fs-style path -> node; "." is the root
+	mu             sync.RWMutex
+	nodes          map[string]*memNode // fs-style path -> node; "." is the root
+	saveStageHook  func(stageName string) error
+	saveRenameHook func(stageName, targetName string) error
 }
 
 type memNode struct {
@@ -179,6 +183,189 @@ func (m *MemFS) Remove(name string) error {
 	}
 	delete(m.nodes, name)
 	return nil
+}
+
+func (m *MemFS) Rename(oldName, newName string) error {
+	if err := validFSName("rename", oldName); err != nil {
+		return err
+	}
+	if err := validFSName("rename", newName); err != nil {
+		return err
+	}
+	if oldName == "." || newName == "." {
+		return m.fail("rename", oldName, fs.ErrInvalid)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	oldNode, ok := m.nodes[oldName]
+	if !ok {
+		return m.fail("rename", oldName, fs.ErrNotExist)
+	}
+
+	parent := m.parentOf(newName)
+	parentNode, ok := m.nodes[parent]
+	if !ok || !parentNode.dir() {
+		return m.fail("rename", newName, fs.ErrNotExist)
+	}
+
+	if oldName == newName {
+		return nil
+	}
+
+	if oldNode.dir() {
+		if strings.HasPrefix(newName, oldName+"/") {
+			return m.fail("rename", newName, fs.ErrInvalid)
+		}
+		if newNode, ok := m.nodes[newName]; ok {
+			if !newNode.dir() {
+				return m.fail("rename", newName, fs.ErrInvalid)
+			}
+			// Check if new directory is empty
+			for p := range m.nodes {
+				if p != newName && m.parentOf(p) == newName {
+					return m.fail("rename", newName, fs.ErrExist)
+				}
+			}
+		}
+		// Rename all descendants
+		prefix := oldName + "/"
+		var toMove []string
+		for p := range m.nodes {
+			if strings.HasPrefix(p, prefix) {
+				toMove = append(toMove, p)
+			}
+		}
+		for _, p := range toMove {
+			suffix := strings.TrimPrefix(p, prefix)
+			newChild := newName + "/" + suffix
+			node := m.nodes[p]
+			delete(m.nodes, p)
+			m.nodes[newChild] = node
+		}
+		oldNode.name = path.Base(newName)
+		m.nodes[newName] = oldNode
+		delete(m.nodes, oldName)
+		return nil
+	}
+
+	// Regular file
+	if newNode, ok := m.nodes[newName]; ok && newNode.dir() {
+		return m.fail("rename", newName, fs.ErrInvalid)
+	}
+	oldNode.name = path.Base(newName)
+	m.nodes[newName] = oldNode
+	delete(m.nodes, oldName)
+	return nil
+}
+
+func (m *MemFS) RemoveAll(name string) error {
+	if err := validFSName("removeall", name); err != nil {
+		return err
+	}
+	if name == "." {
+		return m.fail("removeall", name, fs.ErrInvalid)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, ok := m.nodes[name]; !ok {
+		return nil
+	}
+
+	prefix := name + "/"
+	for p := range m.nodes {
+		if strings.HasPrefix(p, prefix) {
+			delete(m.nodes, p)
+		}
+	}
+	delete(m.nodes, name)
+	return nil
+}
+
+func (m *MemFS) SaveAtomic(name string, data []byte, perm fs.FileMode) error {
+	if err := validFSName("save", name); err != nil {
+		return err
+	}
+	if name == "." {
+		return m.fail("save", name, fs.ErrInvalid)
+	}
+	if int64(len(data)) > MaxDocumentSize {
+		return &Error{
+			Op:      "save",
+			Path:    "/" + name,
+			Code:    ErrTooLarge,
+			Message: fmt.Sprintf("document size %d exceeds limit of %d bytes", len(data), MaxDocumentSize),
+		}
+	}
+	if perm == 0 {
+		perm = 0o644
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if n, ok := m.nodes[name]; ok && n.dir() {
+		recoverName := name + ".recover"
+		cp := append([]byte(nil), data...)
+		m.nodes[recoverName] = &memNode{
+			name:    path.Base(recoverName),
+			data:    cp,
+			mode:    perm,
+			modTime: time.Now(),
+		}
+		return &Error{
+			Op:          "save",
+			Path:        "/" + name,
+			RecoverPath: "/" + recoverName,
+			Code:        ErrIsDir,
+			Message:     "destination is a directory",
+		}
+	}
+
+	if m.saveStageHook != nil {
+		if hookErr := m.saveStageHook(name); hookErr != nil {
+			return hookErr
+		}
+	}
+
+	if m.saveRenameHook != nil {
+		if hookErr := m.saveRenameHook(name, name); hookErr != nil {
+			recoverName := name + ".recover"
+			cp := append([]byte(nil), data...)
+			m.nodes[recoverName] = &memNode{
+				name:    path.Base(recoverName),
+				data:    cp,
+				mode:    perm,
+				modTime: time.Now(),
+			}
+			return &Error{
+				Op:          "save",
+				Path:        "/" + name,
+				RecoverPath: "/" + recoverName,
+				Code:        ErrIO,
+				Err:         hookErr,
+				Message:     fmt.Sprintf("atomic replacement failed: %v", hookErr),
+			}
+		}
+	}
+
+	m.ensureDir(m.parentOf(name))
+	cp := append([]byte(nil), data...)
+	m.nodes[name] = &memNode{
+		name:    path.Base(name),
+		data:    cp,
+		mode:    perm,
+		modTime: time.Now(),
+	}
+	return nil
+}
+
+func (m *MemFS) SetSaveHooks(stageHook func(string) error, renameHook func(string, string) error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.saveStageHook = stageHook
+	m.saveRenameHook = renameHook
 }
 
 func (n *memNode) dir() bool { return n.mode&fs.ModeDir != 0 }

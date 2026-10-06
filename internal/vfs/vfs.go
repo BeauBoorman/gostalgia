@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"strings"
+	"time"
 )
 
 // FS is the environment filesystem interface: io/fs read semantics plus
@@ -27,6 +28,112 @@ type FS interface {
 	WriteFile(path string, data []byte, perm fs.FileMode) error
 	// Remove deletes a file or an empty directory.
 	Remove(path string) error
+	// Rename renames oldName to newName within the same filesystem.
+	Rename(oldName, newName string) error
+	// RemoveAll deletes path and any children it contains.
+	RemoveAll(path string) error
+	// SaveAtomic writes data to path safely and atomically, ensuring that
+	// interrupted or failed saves leave either the prior valid document or
+	// a recoverable artifact, never silent corruption or truncated files.
+	SaveAtomic(path string, data []byte, perm fs.FileMode) error
+}
+
+// DocumentFS defines higher-level document and trash operations supported by
+// the virtual filesystem.
+type DocumentFS interface {
+	FS
+
+	// Copy copies src to dst (file or directory).
+	Copy(src, dst string, overwrite bool) error
+	// Move moves src to dst, atomically within the same mount or safely across mounts.
+	Move(src, dst string, overwrite bool) error
+	// Trash moves path into the environment trash with metadata.
+	Trash(path string) (*TrashEntry, error)
+	// Restore restores an item from trash to its original path or dst.
+	Restore(trashID, dst string, overwrite bool) (string, error)
+	// ListTrash lists all items currently in the trash.
+	ListTrash() ([]TrashEntry, error)
+	// EmptyTrash deletes all items in the trash.
+	EmptyTrash() (int, error)
+	// PurgeTrash permanently removes a single item from trash.
+	PurgeTrash(trashID string) error
+}
+
+// MaxDocumentSize bounds single-document reads/writes in the VFS layer (16 MiB).
+const MaxDocumentSize = 16 << 20
+
+// MaxIPCReadLimit bounds default read sizes over IPC (4 MiB).
+const MaxIPCReadLimit = 4 << 20
+
+// MaxIPCWriteLimit bounds maximum payload sizes over IPC (4 MiB).
+const MaxIPCWriteLimit = 4 << 20
+
+// ErrorCode categorizes filesystem errors for dialogs and caller handling.
+type ErrorCode string
+
+const (
+	ErrNotFound   ErrorCode = "not_found"
+	ErrExist      ErrorCode = "already_exists"
+	ErrIsDir      ErrorCode = "is_directory"
+	ErrNotDir     ErrorCode = "not_directory"
+	ErrCrossMount ErrorCode = "cross_mount"
+	ErrEscape     ErrorCode = "path_escape"
+	ErrReadOnly   ErrorCode = "read_only"
+	ErrTooLarge   ErrorCode = "too_large"
+	ErrInvalid    ErrorCode = "invalid"
+	ErrIO         ErrorCode = "io"
+)
+
+// Error represents a structured filesystem error suitable for dialogs.
+type Error struct {
+	Op          string    `json:"op"`
+	Path        string    `json:"path"`
+	Dest        string    `json:"dest,omitempty"`
+	RecoverPath string    `json:"recover_path,omitempty"`
+	Code        ErrorCode `json:"code"`
+	Err         error     `json:"-"`
+	Message     string    `json:"message"`
+}
+
+func (e *Error) Error() string {
+	var target string
+	if e.Dest != "" {
+		target = fmt.Sprintf(" -> %s", e.Dest)
+	}
+	var rec string
+	if e.RecoverPath != "" {
+		rec = fmt.Sprintf(" (recoverable artifact preserved at %s)", e.RecoverPath)
+	}
+	return fmt.Sprintf("vfs: %s %s%s: %s%s", e.Op, e.Path, target, e.Message, rec)
+}
+
+func (e *Error) Unwrap() error {
+	if e.Err != nil {
+		return e.Err
+	}
+	switch e.Code {
+	case ErrNotFound:
+		return fs.ErrNotExist
+	case ErrExist:
+		return fs.ErrExist
+	case ErrReadOnly:
+		return fs.ErrPermission
+	case ErrInvalid, ErrEscape, ErrCrossMount, ErrIsDir, ErrNotDir:
+		return fs.ErrInvalid
+	default:
+		return nil
+	}
+}
+
+// TrashEntry records an item in the environment trash and its restore metadata.
+type TrashEntry struct {
+	ID           string    `json:"id"`
+	OriginalPath string    `json:"original_path"`
+	TrashPath    string    `json:"trash_path"`
+	Name         string    `json:"name"`
+	IsDir        bool      `json:"is_dir"`
+	Size         int64     `json:"size"`
+	TrashedAt    time.Time `json:"trashed_at"`
 }
 
 // Normalize converts an environment path ("/users/guest") to io/fs form
@@ -66,3 +173,6 @@ func Normalize(path string) (string, error) {
 
 // IsNotExist reports whether err is a not-exist error from any FS.
 func IsNotExist(err error) bool { return errors.Is(err, fs.ErrNotExist) }
+
+// IsExist reports whether err is an already-exists error from any FS.
+func IsExist(err error) bool { return errors.Is(err, fs.ErrExist) }
