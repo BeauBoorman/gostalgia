@@ -56,6 +56,7 @@ For an external application:
 | `executable` | external: yes | Host executable binary path or command name. Required for external mode; forbidden for in-proc mode. |
 | `args` | no | Array of string arguments passed to the executable when launched. Forbidden for in-proc mode. |
 | `permissions` | no | Array of distinct capability strings; omitted/empty means no grants. Unknown, duplicate, and `admin` permissions are rejected. |
+| `path_grants` | no | Package-managed scoped VFS requests (`path`, `access`, `recursive`), see [packages](packages.md). |
 | `description` | no | App shelf description. |
 
 `sdk.ParseManifest([]byte)` decodes and validates; `Manifest.Validate()` checks
@@ -143,7 +144,8 @@ registration. Registry loading validates the whole manifest directory before
 adding anything. Builtin definitions win over disk copies: editing the seeded
 JSON does **not** change a compiled builtin's permissions. Change the source
 manifest and rebuild. For loaded, non-builtin manifests, an entrypoint must
-already have a compiled factory or launch fails; dynamic install is deferred.
+already have a compiled factory or launch fails. External applications can be
+distributed and installed through the [package manager](packages.md).
 
 ## 4. Lifecycle — exact contract
 

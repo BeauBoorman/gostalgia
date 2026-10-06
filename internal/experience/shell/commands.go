@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"gostalgia/internal/pkg"
 )
 
 // Caller is the single environment API used by the experience layer.
@@ -66,6 +68,7 @@ type resultMsg struct {
 
 const helpText = `COMMAND CENTER
   apps                     installed apps and their grants
+  pkg / package            list, inspect, install, update, uninstall, rollback
   launch / run APP-ID       start a manifest-declared app
   stop APP-ID               stop, clean up, retract routes
   echo MESSAGE              talk to the Echo demo
@@ -280,6 +283,23 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 	}
 	cmd, args := strings.ToLower(args[0]), args[1:]
 	switch cmd {
+	case "pkg", "package":
+		method, params, err := pkg.ParseCommand(args)
+		if err != nil {
+			return fail(err)
+		}
+		if params.Path != "" {
+			params.Path = envPath(cwd, params.Path)
+		}
+		var out json.RawMessage
+		if err := c.Call(ctx, method, params, &out); err != nil {
+			return fail(err)
+		}
+		pretty, err := json.MarshalIndent(out, "", "  ")
+		if err != nil {
+			return fail(err)
+		}
+		return ok(safe(string(pretty)))
 	case "help", "?":
 		if len(args) != 0 {
 			return fail(fmt.Errorf("usage: help"))

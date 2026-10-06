@@ -66,6 +66,9 @@ func NewRegistry() *Registry {
 
 func cloneManifest(m Manifest) Manifest {
 	m.Permissions = append([]string(nil), m.Permissions...)
+	m.PathGrants = append([]sdk.PathGrant(nil), m.PathGrants...)
+	m.Args = append([]string(nil), m.Args...)
+	m.DocumentTypes = append([]string(nil), m.DocumentTypes...)
 	return m
 }
 
@@ -75,6 +78,9 @@ func (r *Registry) RegisterBuiltin(m Manifest, f Factory) error {
 	}
 	if f == nil {
 		return fmt.Errorf("app: %s: factory is required", m.ID)
+	}
+	if m.Mode != "" && m.Mode != sdk.ModeInProc {
+		return fmt.Errorf("app: compiled-in factories require inproc mode")
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -97,6 +103,9 @@ func (r *Registry) RegisterExternal(m Manifest) error {
 	if err := m.Validate(); err != nil {
 		return err
 	}
+	if m.Mode != sdk.ModeExternal {
+		return fmt.Errorf("app: external registration requires external mode")
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, dup := r.manifests[m.ID]; dup {
@@ -104,6 +113,32 @@ func (r *Registry) RegisterExternal(m Manifest) error {
 	}
 	r.manifests[m.ID] = cloneManifest(m)
 	return nil
+}
+
+// ReplaceExternal changes only an external app, never a compiled-in factory.
+func (r *Registry) ReplaceExternal(m Manifest) error {
+	if err := m.Validate(); err != nil {
+		return err
+	}
+	if m.Mode != sdk.ModeExternal {
+		return fmt.Errorf("app: replacement requires external mode")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	old, ok := r.manifests[m.ID]
+	if !ok || old.Mode != sdk.ModeExternal {
+		return fmt.Errorf("app: %s is not a registered external application", m.ID)
+	}
+	r.manifests[m.ID] = cloneManifest(m)
+	return nil
+}
+
+func (r *Registry) RemoveExternal(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if m, ok := r.manifests[id]; ok && m.Mode == sdk.ModeExternal {
+		delete(r.manifests, id)
+	}
 }
 
 // LoadManifests validates the entire directory before adding any documents.
@@ -167,16 +202,17 @@ func (r *Registry) factory(entrypoint string) (Factory, bool) {
 // Manager reserves the app id before invoking user code. No manager lock is
 // held across application callbacks or synchronous bus publications.
 type Manager struct {
-	reg     *Registry
-	procs   *process.Manager
-	router  *ipc.Router
-	bus     *events.Bus
-	tokens  *security.TokenStore
-	grants  *vfs.GrantStore
-	policy  *security.PolicyStore
-	log     *slog.Logger
-	mu      sync.Mutex
-	running map[string]*runningApp
+	reg         *Registry
+	procs       *process.Manager
+	router      *ipc.Router
+	bus         *events.Bus
+	tokens      *security.TokenStore
+	grants      *vfs.GrantStore
+	policy      *security.PolicyStore
+	log         *slog.Logger
+	mu          sync.Mutex
+	running     map[string]*runningApp
+	maintenance map[string]bool
 }
 
 type runningApp struct {
@@ -188,13 +224,14 @@ type runningApp struct {
 
 func NewManager(reg *Registry, procs *process.Manager, router *ipc.Router, bus *events.Bus, log *slog.Logger) *Manager {
 	return &Manager{
-		reg:     reg,
-		procs:   procs,
-		router:  router,
-		bus:     bus,
-		tokens:  security.NewTokenStore(),
-		log:     log,
-		running: map[string]*runningApp{},
+		reg:         reg,
+		procs:       procs,
+		router:      router,
+		bus:         bus,
+		tokens:      security.NewTokenStore(),
+		log:         log,
+		running:     map[string]*runningApp{},
+		maintenance: map[string]bool{},
 	}
 }
 
@@ -269,35 +306,47 @@ func invoke(phase string, fn func() error) (err error) {
 // Launch runs Factory -> Init -> Run -> Stop. ctx owns the instance lifetime.
 // IPC launchers must supply a runtime-lifetime context, not a request deadline.
 func (m *Manager) Launch(ctx context.Context, id string) (*process.Process, error) {
-	man, ok := m.reg.Manifest(id)
-	if !ok {
-		return nil, fmt.Errorf("app: unknown application %q", id)
-	}
-	switch man.Mode {
-	case "", sdk.ModeInProc:
-		return m.launchInProc(ctx, man)
-	case sdk.ModeExternal:
-		return m.launchExternal(ctx, man)
-	default:
-		return nil, fmt.Errorf("app: unsupported mode %q", man.Mode)
-	}
-}
-
-func (m *Manager) launchInProc(ctx context.Context, man Manifest) (*process.Process, error) {
-	id := man.ID
-	factory, ok := m.reg.factory(man.Entrypoint)
-	if !ok {
-		return nil, fmt.Errorf("app: no factory for entrypoint %q", man.Entrypoint)
-	}
-	ra := &runningApp{done: make(chan struct{})}
+	// Reserve before reading the registry, so maintenance cannot race a stale launch.
 	m.mu.Lock()
+	if m.maintenance[id] {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("app: %s is undergoing package maintenance", id)
+	}
 	if existing, dup := m.running[id]; dup {
 		pid := existing.pid
 		m.mu.Unlock()
 		return nil, fmt.Errorf("app: %s is already running or initializing (pid %d)", id, pid)
 	}
+	man, ok := m.reg.Manifest(id)
+	if !ok {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("app: unknown application %q", id)
+	}
+	ra := &runningApp{done: make(chan struct{})}
 	m.running[id] = ra
 	m.mu.Unlock()
+	switch man.Mode {
+	case "", sdk.ModeInProc:
+		return m.launchInProc(ctx, man, ra)
+	case sdk.ModeExternal:
+		return m.launchExternal(ctx, man, ra)
+	default:
+		m.mu.Lock()
+		delete(m.running, id)
+		m.mu.Unlock()
+		return nil, fmt.Errorf("app: unsupported mode %q", man.Mode)
+	}
+}
+
+func (m *Manager) launchInProc(ctx context.Context, man Manifest, ra *runningApp) (*process.Process, error) {
+	id := man.ID
+	factory, ok := m.reg.factory(man.Entrypoint)
+	if !ok {
+		m.mu.Lock()
+		delete(m.running, id)
+		m.mu.Unlock()
+		return nil, fmt.Errorf("app: no factory for entrypoint %q", man.Entrypoint)
+	}
 	forget := func() {
 		m.mu.Lock()
 		delete(m.running, id)
@@ -323,7 +372,9 @@ func (m *Manager) launchInProc(ctx context.Context, man Manifest) (*process.Proc
 			forget()
 			return nil, fmt.Errorf("app: issue token for %s: %w", id, tokErr)
 		}
+		m.mu.Lock()
 		ra.token = appToken
+		m.mu.Unlock()
 	}
 
 	life, cancel := context.WithCancel(ctx)
@@ -509,20 +560,7 @@ func writeWireMessage(conn io.Writer, mu *sync.Mutex, msg rpcWireMessage) error 
 	return err
 }
 
-func (m *Manager) launchExternal(ctx context.Context, man Manifest) (*process.Process, error) {
-	if man.ProtocolVersion != 0 && man.ProtocolVersion != sdk.ProtocolVersion {
-		return nil, fmt.Errorf("app: %s: unsupported protocol version %d", man.ID, man.ProtocolVersion)
-	}
-
-	ra := &runningApp{done: make(chan struct{})}
-	m.mu.Lock()
-	if existing, dup := m.running[man.ID]; dup {
-		pid := existing.pid
-		m.mu.Unlock()
-		return nil, fmt.Errorf("app: %s is already running or initializing (pid %d)", man.ID, pid)
-	}
-	m.running[man.ID] = ra
-	m.mu.Unlock()
+func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningApp) (*process.Process, error) {
 	forget := func() {
 		m.mu.Lock()
 		delete(m.running, man.ID)
@@ -538,7 +576,9 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest) (*process.Pr
 			forget()
 			return nil, fmt.Errorf("app: issue token for %s: %w", man.ID, tokErr)
 		}
+		m.mu.Lock()
 		ra.token = appToken
+		m.mu.Unlock()
 	}
 
 	ln, endpoint, err := platform.ListenChildIPC(man.ID)
@@ -1041,10 +1081,49 @@ func (m *Manager) Stop(id string, timeout time.Duration) error {
 	select {
 	case <-ra.done:
 	case <-time.After(timeout):
+		return fmt.Errorf("app: %s cleanup timed out", id)
 	}
 	return ra.cleanupErr
 }
 
+// BeginMaintenance blocks new launches until release is called. Initializing
+// instances fail closed; running instances lose credentials before being stopped.
+func (m *Manager) BeginMaintenance(id string, timeout time.Duration) (release func(), err error) {
+	m.mu.Lock()
+	if m.maintenance[id] {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("app: %s is already undergoing maintenance", id)
+	}
+	ra, running := m.running[id]
+	if running && ra.pid == 0 {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("app: %s is still initializing", id)
+	}
+	m.maintenance[id] = true
+	tokens := m.tokens
+	m.mu.Unlock()
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			m.mu.Lock()
+			delete(m.maintenance, id)
+			m.mu.Unlock()
+		})
+	}
+	if tokens != nil {
+		tokens.RevokeApp(id)
+	}
+	if running {
+		if err := m.Stop(id, timeout); err != nil {
+			// A concurrent natural exit is already safe.
+			if m.IsRunning(id) {
+				release()
+				return nil, err
+			}
+		}
+	}
+	return release, nil
+}
 func (m *Manager) IsRunning(id string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
