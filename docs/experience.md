@@ -6,7 +6,14 @@ per-screen style globals. It lives entirely under `internal/experience/`:
 - `theme`: explicit, copyable palette, spacing, border, typography, focus, status,
   and progress tokens.
 - `ui`: stateless Lip Gloss components and Unicode cell-aware layout helpers.
-- `shell`: Bubble Tea interaction and authenticated IPC, using the shared kit.
+- `taskmanager`: Bubble Tea model and table component for live process inspection,
+  resource usage metrics, interactive process control, and log tailing.
+- `notifications`: notification history panel, ephemeral toast popups, flood bounding,
+  unseen tracking, and Do-Not-Disturb (DND) mode.
+- `receipts`: structured post-mortem crash receipts with bounded, sanitized log excerpts
+  and thread-safe bounded storage.
+- `shell`: Bubble Tea interaction and authenticated IPC, orchestrating all experience
+  subsystems using the shared kit.
 
 The runtime, process manager, SDK, apps, and `gctl` do not import the kit or Charm.
 Apps still expose environment contracts, not terminal views.
@@ -159,6 +166,59 @@ rejection gracefully: the error is recorded in the transcript, focus safely
 transitions to the prompt to display the diagnostic message, and the terminal
 state remains intact. Stopping an application via `F3` or `stop <app-id>`
 issues a graceful IPC stop request.
+
+## Task Manager, Notifications, and Crash Receipts
+
+The experience layer integrates process observability and diagnostic inspection
+directly into the shell via dedicated tabs, commands, and overlay notifications:
+
+### Live Task Manager (`internal/experience/taskmanager`)
+
+The live Task Manager displays real-time supervised process state and metrics in a
+scrollable table:
+- **Columns**: Selection pointer, `PID`, `NAME`, `STATE`, `CPU` (user/system usage),
+  `RAM` (resident memory), `RESTARTS`, and `EXIT` code / runtime duration.
+- **Navigation & Controls**:
+  - `↑` / `↓` / `k` / `j`: Navigate through processes.
+  - `l` or `Enter`: Open child log tail viewer modal (`proc/logs`).
+  - `c` or `Enter`: Inspect post-mortem crash receipt for failed processes.
+  - `x`: Terminate selected process (`proc/stop`).
+  - `r`: Prune terminated processes (`proc/reap`).
+  - `Esc`: Return to process table or exit Task Manager view.
+- **Access**: Press `F5` or execute `tasks`, `taskmanager`, or `top` from the prompt.
+
+### Notification Center & Toast Overlays (`internal/experience/notifications`)
+
+- **Toast Overlays**: Transient popups render directly above the command prompt
+  for process lifecycle milestones (clean exits, backoff restart warnings, and crashes).
+  Toasts count down ticks and expire automatically without stealing prompt focus.
+- **Notification Center**: Dedicated full-screen panel listing complete event history,
+  timestamps, severities (`INFO`, `WARN`, `ERROR`), and associated PIDs.
+  - Unseen vs. Seen distinction: events arrive unread until inspected.
+  - `↑` / `↓`: Select notifications.
+  - `Enter`: Mark seen and drill down to crash receipts.
+  - `d`: Dismiss selected notification.
+  - `c`: Clear all notification history.
+  - `n`: Toggle Do-Not-Disturb mode.
+- **Do-Not-Disturb (DND)**: When toggled via `n` or shell command `dnd [on|off]`,
+  transient toasts are suppressed to prevent interruption while event history
+  continues recording silently.
+- **Flood Bounding**: Active toasts and stored notification entries are capped to
+  fixed bounds to ensure zero runaway memory growth.
+- **Access**: Press `F6` or execute `notifications` or `alerts` from the prompt.
+
+### Crash Receipts (`internal/experience/receipts`)
+
+Crash receipts provide immediate post-mortem diagnostics for abnormal exits:
+- **Captured Data**: Process ID, name, exit code, state, failure reason/error,
+  restart count, timestamp, and bounded log excerpts.
+- **Safe Bounding & Sanitization**: Log excerpts are bounded to 25 lines and 4 KB,
+  and stripped of dangerous ANSI escape sequences, DCS/OSC strings, and non-printable
+  control characters using `ui.Sanitize`.
+- **Bounded In-Memory Store**: A thread-safe ring buffer retains recent crash
+  receipts (default capacity 50), evicting oldest receipts when full.
+- **Inspection**: Drill down from the Task Manager table, press `Enter` on a crash
+  notification in the Notification Center, or run `receipt [PID]` from the prompt.
 
 ## Layout and external text
 

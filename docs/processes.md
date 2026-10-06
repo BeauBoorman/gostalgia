@@ -135,6 +135,9 @@ Exit codes, timings, and logs are integrated across developer and interactive to
 - `gctl logs <pid> [tail]`: displays process diagnostics, stream byte metrics, drop counters, and captured output with terminal control-character sanitization.
 - Charm shell `ps`: displays process names, states with exit codes, run durations, and capability grants.
 - Charm shell `logs <pid> [tail]`: displays process diagnostics, byte counts, and sanitized stdout/stderr output.
+- Live Task Manager (`F5` or `tasks`/`taskmanager`/`top`): full-screen interactive process table with real-time resource usage, log inspection modal, termination (`x`), and inactive process reaping (`r`).
+- Crash Receipts (`receipt [pid]`): post-mortem exit snapshots for failed processes containing exit codes, failure causes, and bounded, sanitized log excerpts.
+- Notification Center (`F6` or `notifications`/`alerts`): captures process crash, backoff, and completion events with transient toast overlays above the prompt and Do-Not-Disturb (`dnd`) toggle.
 
 ## Events
 

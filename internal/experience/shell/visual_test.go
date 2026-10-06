@@ -19,11 +19,17 @@ import (
 var updateVisual = flag.Bool("update-visual", false, "update shell visual golden snapshots")
 
 func TestShellVisualSnapshots(t *testing.T) {
-	for _, view := range []string{"home", "shelf", "empty", "busy", "error", "app", "app-loading", "app-error", "app-disabled"} {
+	for _, view := range []string{"home", "shelf", "empty", "busy", "error", "tasks", "notifications", "app", "app-loading", "app-error", "app-disabled"} {
 		t.Run(view, func(t *testing.T) {
 			m := NewWithTheme(context.Background(), noopCaller{}, nil, theme.Nostalgia(), ui.Plain)
 			if view == "shelf" || view == "empty" {
 				m.shelf = true
+			}
+			if view == "tasks" {
+				m.taskView = true
+			}
+			if view == "notifications" {
+				m.notifView = true
 			}
 			if view == "shelf" {
 				var app appStatus
