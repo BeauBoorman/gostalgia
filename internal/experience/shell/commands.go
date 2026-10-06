@@ -72,13 +72,14 @@ const helpText = `COMMAND CENTER
   dnd [on|off]              toggle or set Do-Not-Disturb
   theme [NAME]              switch theme (nostalgia, midnight, monochrome, high-contrast, high-contrast-light)
   motion [on|off]           toggle or set reduced-motion mode
+  settings / preferences    interactive system preferences and themes
   ps · status               processes · system dashboard
   logs / log PID [TAIL]     view child process logs and diagnostics
   cls / clear               clear the transcript
   exit                      leave shell (owned boot shuts down)
   shutdown                  shut down the environment
 
-F1 home · F2 apps · F5 tasks · F6 alerts · Ctrl+P / / palette · F3 stop · F4 view
+F1 home · F2 apps · F5 tasks · F6 alerts · F7 settings · Ctrl+P / / palette · F3 stop · F4 view
 Tab complete · ↑↓ history · Paths accept /users/guest or C:\users\guest.`
 
 // words handles quoted paths and messages. Backslashes remain literal for DOS
@@ -480,6 +481,11 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 			return fail(fmt.Errorf("usage: %s", cmd))
 		}
 		return ok("__SWITCH_VIEW__:notifications")
+	case "settings", "preferences", "pref":
+		if len(args) != 0 {
+			return fail(fmt.Errorf("usage: %s", cmd))
+		}
+		return ok("__SWITCH_VIEW__:settings")
 	case "reap":
 		if len(args) != 0 {
 			return fail(fmt.Errorf("usage: reap"))

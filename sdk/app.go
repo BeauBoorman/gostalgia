@@ -15,14 +15,16 @@ import (
 
 // Capability names understood by the runtime. There is no implicit grant.
 const (
-	CapIPC       = "ipc"
-	CapFileRead  = "fs.read"
-	CapFileWrite = "fs.write"
-	CapProcList  = "proc.list"
-	CapProcStop  = "proc.stop"
-	CapAppList   = "app.list"
-	CapAppLaunch = "app.launch"
-	CapShutdown  = "shutdown"
+	CapIPC         = "ipc"
+	CapFileRead    = "fs.read"
+	CapFileWrite   = "fs.write"
+	CapProcList    = "proc.list"
+	CapProcStop    = "proc.stop"
+	CapAppList     = "app.list"
+	CapAppLaunch   = "app.launch"
+	CapShutdown    = "shutdown"
+	CapConfigRead  = "config.read"
+	CapConfigWrite = "config.write"
 
 	ModeInProc   = "inproc"
 	ModeExternal = "external"
@@ -103,7 +105,7 @@ func (m Manifest) Validate() error {
 	seen := make(map[string]bool)
 	for _, cap := range m.Permissions {
 		switch cap {
-		case CapIPC, CapFileRead, CapFileWrite, CapProcList, CapProcStop, CapAppList, CapAppLaunch, CapShutdown:
+		case CapIPC, CapFileRead, CapFileWrite, CapProcList, CapProcStop, CapAppList, CapAppLaunch, CapShutdown, CapConfigRead, CapConfigWrite:
 		default:
 			return fmt.Errorf("app: manifest %s: unknown or reserved permission %q", m.ID, cap)
 		}

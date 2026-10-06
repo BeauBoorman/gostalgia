@@ -4,6 +4,7 @@ package shell
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -96,6 +97,19 @@ type receiptLogsMsg struct {
 	logs      string
 }
 
+type openAppMsg struct {
+	app appStatus
+}
+
+type configUpdateMsg struct {
+	theme         string
+	colorMode     string
+	reducedMotion *bool
+	startupView   string
+	dnd           *bool
+	shortcuts     map[string]string
+}
+
 // Model owns UI state; tea.Cmd does IO off the event-loop goroutine.
 type Model struct {
 	ctx             context.Context
@@ -132,6 +146,9 @@ type Model struct {
 	notifs    *notifications.Manager
 	receipts  *receipts.Store
 	lastProcs map[int32]procTracking
+
+	shortcuts           map[string]string
+	initialConfigLoaded bool
 }
 
 func (m *Model) currentMode() viewMode {
@@ -271,6 +288,138 @@ func (m *Model) reapProcessesCmd() tea.Cmd {
 	}
 }
 
+func (m *Model) fetchConfigCmd() tea.Cmd {
+	client := m.client
+	ctx := m.ctx
+	return func() tea.Msg {
+		c, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		var out struct {
+			Effective map[string]any `json:"effective"`
+		}
+		if err := client.Call(c, "config/list", nil, &out); err != nil {
+			return nil
+		}
+		return m.parseConfigMsg(out.Effective)
+	}
+}
+
+func (m *Model) parseConfigMsg(eff map[string]any) configUpdateMsg {
+	msg := configUpdateMsg{
+		shortcuts: make(map[string]string),
+	}
+	if eff == nil {
+		return msg
+	}
+	if t, ok := eff["theme"].(string); ok {
+		msg.theme = t
+	}
+	if acc, ok := eff["accessibility"].(map[string]any); ok {
+		if cm, ok := acc["color_mode"].(string); ok {
+			msg.colorMode = cm
+		}
+		if rm, ok := acc["reduced_motion"].(bool); ok {
+			msg.reducedMotion = &rm
+		}
+	}
+	if st, ok := eff["startup"].(map[string]any); ok {
+		if sv, ok := st["view"].(string); ok {
+			msg.startupView = sv
+		}
+	}
+	if notif, ok := eff["notifications"].(map[string]any); ok {
+		if d, ok := notif["dnd"].(bool); ok {
+			msg.dnd = &d
+		}
+	}
+	if sc, ok := eff["shortcuts"].(map[string]any); ok {
+		for k, v := range sc {
+			if str, ok := v.(string); ok {
+				msg.shortcuts[k] = str
+			}
+		}
+	}
+	return msg
+}
+
+func (m *Model) openAppByID(id string) tea.Cmd {
+	m.closePalette()
+	m.taskView = false
+	m.notifView = false
+	m.shelf = false
+	for _, a := range m.apps {
+		if a.Manifest.ID == id {
+			if a.Running {
+				return m.openView(a)
+			}
+			ctx := m.ctx
+			client := m.client
+			return func() tea.Msg {
+				c, cancel := context.WithTimeout(ctx, 5*time.Second)
+				defer cancel()
+				var out json.RawMessage
+				if err := client.Call(c, "app/launch", map[string]string{"id": id}, &out); err != nil {
+					return resultMsg{err: err}
+				}
+				var apps []appStatus
+				_ = client.Call(c, "app/list", nil, &apps)
+				for _, launched := range apps {
+					if launched.Manifest.ID == id {
+						return openAppMsg{app: launched}
+					}
+				}
+				return resultMsg{text: "Launched " + id}
+			}
+		}
+	}
+	return func() tea.Msg {
+		return resultMsg{err: fmt.Errorf("app %s not found", id)}
+	}
+}
+
+func (m *Model) isShortcut(action, key string) bool {
+	target, ok := m.shortcuts[action]
+	if !ok || target == "" {
+		switch action {
+		case "home":
+			target = "f1"
+		case "launcher":
+			target = "f2"
+		case "stop":
+			target = "f3"
+		case "view":
+			target = "f4"
+		case "tasks":
+			target = "f5"
+		case "notifications":
+			target = "f6"
+		case "settings":
+			target = "f7"
+		case "palette":
+			target = "ctrl+p"
+		}
+	}
+	return strings.EqualFold(key, target)
+}
+
+func (m *Model) SetColorModeByName(name string) bool {
+	var mode ui.ColorMode
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "plain", "none", "mono":
+		mode = ui.Plain
+	case "ansi256", "256":
+		mode = ui.ANSI256
+	case "truecolor", "24bit", "rgb":
+		mode = ui.TrueColor
+	case "ansi16", "16", "ansi":
+		mode = ui.ANSI16
+	default:
+		return false
+	}
+	m.kit = ui.New(m.kit.Theme(), mode)
+	return true
+}
+
 func (m *Model) handleProcessUpdates(procs []taskmanager.ProcessRow) tea.Cmd {
 	m.tasks.SetProcesses(procs)
 	var cmds []tea.Cmd
@@ -394,7 +543,7 @@ func (m *Model) Init() tea.Cmd {
 		}
 		return closedMsg{}
 	}
-	return tea.Batch(refresh, watch, tickCmd(), m.pollProcessesCmd())
+	return tea.Batch(refresh, watch, tickCmd(), m.pollProcessesCmd(), m.fetchConfigCmd())
 }
 
 func (m *Model) submit(line string) tea.Cmd {
@@ -446,8 +595,45 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, tickCmd())
 		if !m.busy {
 			cmds = append(cmds, m.pollProcessesCmd())
+			if time.Time(msg).Second()%5 == 0 {
+				cmds = append(cmds, m.fetchConfigCmd())
+			}
 		}
 		return m, tea.Batch(cmds...)
+	case openAppMsg:
+		return m, m.openView(msg.app)
+	case configUpdateMsg:
+		if msg.theme != "" {
+			m.SetThemeByName(msg.theme)
+		}
+		if msg.colorMode != "" {
+			m.SetColorModeByName(msg.colorMode)
+		}
+		if msg.reducedMotion != nil {
+			m.SetReducedMotion(*msg.reducedMotion)
+		}
+		if msg.dnd != nil && m.notifs != nil {
+			m.notifs.SetDND(*msg.dnd)
+		}
+		if len(msg.shortcuts) > 0 {
+			if m.shortcuts == nil {
+				m.shortcuts = make(map[string]string)
+			}
+			for k, v := range msg.shortcuts {
+				m.shortcuts[k] = v
+			}
+		}
+		if !m.initialConfigLoaded {
+			m.initialConfigLoaded = true
+			if msg.startupView == "launcher" || msg.startupView == "shelf" {
+				m.setMode(modeLauncher)
+			} else if msg.startupView == "prompt" {
+				m.setMode(modePrompt)
+			} else if msg.startupView == "home" {
+				m.setMode(modeHome)
+			}
+		}
+		return m, nil
 	case procUpdateMsg:
 		m.initExperience()
 		if msg.err == nil && msg.procs != nil {
@@ -519,6 +705,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setMode(modeLauncher)
 			m.taskView = false
 			m.notifView = false
+		} else if msg.switchView == "settings" {
+			return m, m.openAppByID("com.gostalgia.settings")
 		}
 		if msg.toggleDND {
 			val := m.notifs.ToggleDND()
@@ -598,17 +786,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 	case tea.KeyMsg:
-		switch msg.String() {
+		keyStr := msg.String()
+		switch keyStr {
 		case "ctrl+c", "ctrl+d":
 			return m, tea.Quit
-		case "ctrl+p":
+		}
+
+		if m.isShortcut("palette", keyStr) {
 			if m.paletteOpen {
 				m.closePalette()
 			} else {
 				m.openPalette()
 			}
 			return m, nil
-		case "f1":
+		}
+		if m.isShortcut("home", keyStr) {
 			if m.paletteOpen {
 				m.closePalette()
 			}
@@ -622,7 +814,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.scroll = 0
 			return m, cancel
-		case "f2":
+		}
+		if m.isShortcut("launcher", keyStr) {
 			if m.paletteOpen {
 				m.closePalette()
 			}
@@ -636,7 +829,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.scroll = 0
 			return m, cancel
-		case "f5":
+		}
+		if m.isShortcut("tasks", keyStr) {
 			if m.paletteOpen {
 				m.closePalette()
 			}
@@ -649,7 +843,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.scroll = 0
 			return m, cancel
-		case "f6":
+		}
+		if m.isShortcut("notifications", keyStr) {
 			if m.paletteOpen {
 				m.closePalette()
 			}
@@ -662,11 +857,30 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.scroll = 0
 			return m, cancel
-		case "f4":
+		}
+		if m.isShortcut("settings", keyStr) {
+			if m.paletteOpen {
+				m.closePalette()
+			}
+			if m.presentation != nil && m.presentation.id == "com.gostalgia.settings" {
+				cancel := m.dismissView()
+				return m, cancel
+			}
+			cancel := m.dismissView()
+			cmd := m.openAppByID("com.gostalgia.settings")
+			if cancel != nil {
+				return m, tea.Batch(cancel, cmd)
+			}
+			return m, cmd
+		}
+		if m.isShortcut("view", keyStr) {
 			if m.presentation == nil {
 				return m, m.selectedView()
 			}
 			return m, nil
+		}
+
+		switch keyStr {
 		case "esc":
 			if m.paletteOpen {
 				m.closePalette()
@@ -895,7 +1109,7 @@ func (m *Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) complete() {
 	prefix := string(m.input)
-	choices := []string{"help", "apps", "launch", "run", "stop", "echo", "call", "dir", "ls", "cd", "type", "cat", "ps", "logs", "log", "status", "cls", "exit", "shutdown", "home", "palette", "tasks", "taskmanager", "notifications", "alerts", "receipt", "reap", "dnd", "theme", "motion"}
+	choices := []string{"help", "apps", "launch", "run", "stop", "echo", "call", "dir", "ls", "cd", "type", "cat", "ps", "logs", "log", "status", "cls", "exit", "shutdown", "home", "palette", "tasks", "taskmanager", "notifications", "alerts", "receipt", "reap", "dnd", "theme", "motion", "settings", "preferences"}
 	if verb, partial, ok := strings.Cut(prefix, " "); ok {
 		if verb != "launch" && verb != "run" && verb != "stop" && verb != "theme" && verb != "motion" {
 			return

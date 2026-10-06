@@ -92,6 +92,12 @@ func (m *Model) paletteItems() []paletteItem {
 		},
 		paletteItem{
 			Tag:    "CMD",
+			Title:  "settings",
+			Detail: "Interactive settings, themes, shortcuts, and startup views (F7)",
+			Action: func(m *Model) tea.Cmd { return m.submit("settings") },
+		},
+		paletteItem{
+			Tag:    "CMD",
 			Title:  "status",
 			Detail: "Full system status and services",
 			Action: func(m *Model) tea.Cmd { return m.submit("status") },
