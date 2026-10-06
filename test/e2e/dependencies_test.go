@@ -26,7 +26,7 @@ func TestCoreDependencyBoundary(t *testing.T) {
 	}
 }
 
-func TestCharmRestrictedToExperienceShell(t *testing.T) {
+func TestCharmRestrictedToExperience(t *testing.T) {
 	cmd := exec.Command("go", "list", "-f", "{{.ImportPath}}|{{join .Imports \",\"}}", "gostalgia/...")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -46,9 +46,12 @@ func TestCharmRestrictedToExperienceShell(t *testing.T) {
 		for _, imp := range imports {
 			imp = strings.TrimSpace(imp)
 			if strings.Contains(imp, "charmbracelet") || strings.Contains(imp, "charm.land") {
-				if pkgPath != "gostalgia/internal/experience/shell" {
-					t.Errorf("package %s imports Charm library %s (restricted to internal/experience/shell)", pkgPath, imp)
+				if !strings.HasPrefix(pkgPath, "gostalgia/internal/experience/") {
+					t.Errorf("package %s imports Charm library %s (restricted to internal/experience/)", pkgPath, imp)
 				}
+			}
+			if imp == "github.com/muesli/termenv" && !strings.HasPrefix(pkgPath, "gostalgia/internal/experience/") {
+				t.Errorf("package %s imports terminal styling helper %s outside experience", pkgPath, imp)
 			}
 		}
 	}
@@ -90,6 +93,8 @@ func TestApprovedCharmBaseline(t *testing.T) {
 		"github.com/charmbracelet/bubbles":   "v1.0.0",
 		"github.com/charmbracelet/bubbletea": "v1.3.10",
 		"github.com/charmbracelet/lipgloss":  "v1.1.0",
+		"github.com/charmbracelet/x/ansi":    "v0.11.6",
+		"github.com/muesli/termenv":          "v0.16.0",
 	}
 
 	for _, line := range strings.Split(string(out), "\n") {

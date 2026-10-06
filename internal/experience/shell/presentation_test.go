@@ -10,6 +10,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+	"gostalgia/internal/experience/theme"
+	"gostalgia/internal/experience/ui"
 	"gostalgia/sdk"
 )
 
@@ -222,5 +225,42 @@ func TestPresentationRefreshPreservesSemanticFocusAndVisibleSelection(t *testing
 	m.Update(viewCheckMsg{epoch: v.epoch, apps: []appStatus{screenStatus()}, viewErr: errors.New("temporary snapshot failure")})
 	if m.presentation == nil || !strings.Contains(m.View(), "temporary snapshot failure") {
 		t.Fatal("recoverable snapshot failure did not keep an error banner")
+	}
+}
+
+func TestPresentationUsesExplicitThemeAndFocusTokens(t *testing.T) {
+	tokens := theme.Nostalgia()
+	tokens.Focus.Marker = "*"
+	custom := NewWithTheme(context.Background(), noopCaller{}, nil, tokens, ui.Plain)
+	data := screenData()
+	data.Actions[0].Disabled = true
+	custom.presentation = &appView{
+		data: data, instance: data.Instance, focus: 1,
+		values: map[string]string{"text": "e\u0301👩‍💻界"},
+	}
+	view := custom.View()
+	if strings.Contains(view, "\x1b") || !strings.Contains(view, "* One") ||
+		!strings.Contains(view, "[Send] (disabled)") || strings.Contains(view, "* [Send]") ||
+		!strings.Contains(view, "(Enter) ACTION") {
+		t.Fatalf("app view ignored plain mode, focus marker, or disabled state:\n%s", view)
+	}
+	var rendered []string
+	for _, tokens := range []theme.Theme{theme.Nostalgia(), theme.Midnight()} {
+		m := NewWithTheme(context.Background(), noopCaller{}, nil, tokens, ui.TrueColor)
+		m.presentation = &appView{
+			data: data, instance: data.Instance, values: map[string]string{"text": "e\u0301👩‍💻界"},
+		}
+		rendered = append(rendered, m.View())
+		for _, size := range []tea.WindowSizeMsg{
+			{Width: 30, Height: 10}, {Width: 80, Height: 24}, {Width: 120, Height: 40}, {Width: 240, Height: 80},
+		} {
+			m.Update(size)
+			if view := m.View(); lipgloss.Width(view) != size.Width || lipgloss.Height(view) != size.Height {
+				t.Fatalf("app view escaped %dx%d bounds", size.Width, size.Height)
+			}
+		}
+	}
+	if rendered[0] == rendered[1] || ansi.Strip(rendered[0]) != ansi.Strip(rendered[1]) {
+		t.Fatal("app palettes must differ without changing layout")
 	}
 }

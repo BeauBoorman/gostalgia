@@ -1,0 +1,110 @@
+PANEL
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Welcome home                 ┃
+┃ Cream, amber, and slate.     ┃
+┃ A place to make things.      ┃
+┃                              ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+FOCUS
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ › Notes                      ┃
+┃ A familiar workspace.        ┃
+┃                              ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+TABS
+ Home  [Apps] (Settings)
+
+APP CARD
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ › Notes                          ┃
+┃ ✓ LIVE / PID 7                   ┃
+┃ com.gostalgia.notes  v0.1.0      ┃
+┃ Keep a thought close to home.    ┃
+┃                                  ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+DIALOG
+
+
+
+╔══════════════════════════════════════╗
+║ › Leave workspace?                   ║
+║ Your apps will stop.                 ║
+║                                      ║
+║ [Cancel]  Leave  (Save)              ║
+╚══════════════════════════════════════╝
+
+
+
+
+PROGRESS
+Copy [━━━━━━━━━━··········]  50%
+
+BUSY PROGRESS
+Discover […············] WORKING
+
+HELP
+Esc back · Enter open · (F3) stop
+
+NORMAL
+○ READY
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ ○ READY                          ┃
+┃ Ready when you are.              ┃
+┃                                  ┃
+┃                                  ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+DISABLED
+– DISABLED
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ – DISABLED                       ┃
+┃ This action is unavailable.      ┃
+┃                                  ┃
+┃                                  ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+BUSY
+… WORKING
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ … WORKING                        ┃
+┃ Working on your request…         ┃
+┃                                  ┃
+┃                                  ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+SUCCESS
+✓ DONE
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ ✓ DONE                           ┃
+┃ All set.                         ┃
+┃                                  ┃
+┃                                  ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+ERROR
+! ERROR
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ ! ERROR                          ┃
+┃ Something went wrong. Try again. ┃
+┃                                  ┃
+┃                                  ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+EMPTY
+◇ EMPTY
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ ◇ EMPTY                          ┃
+┃ Nothing here yet.                ┃
+┃                                  ┃
+┃                                  ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+CUSTOM TOKENS
+╭──────────────────────────────╮
+│ * Custom                     │
+│No horizontal padding.        │
+│                              │
+╰──────────────────────────────╯
