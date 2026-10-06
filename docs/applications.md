@@ -767,4 +767,33 @@ Settings is the interactive preferences hub for Gostalgia. It manages themes, ac
    - `revert`: Cancels in-memory preview overrides and restores prior configuration.
    - `reset`: Restores system default preferences.
 
+---
+
+## 11. Documents: Search, Recents, Favorites, and Open-With Handoff
+
+The document subsystem provides unified document workflows across Gostalgia:
+
+### Document Type Associations
+Applications declare supported document extensions or types in `manifest.json` under `document_types` (e.g. `[".txt", ".md", ".json"]` for Notes, or `["directory"]` for Files). The document association registry maps file extensions and types to default and alternative application IDs.
+
+### Versioned Open-With Handoff (`doc/handoff`)
+When an application (such as Files) or operator hands off a document to another application:
+1. Validates the versioned contract (`sdk.DocumentHandoffVersion = 1`).
+2. Checks that the caller has permission to access the document path.
+3. Resolves the target application via document associations or caller request.
+4. Issues a scoped, non-recursive VFS grant (`recursive: false`) conferring **only** the selected document and mode (`read` or `read-write`) to the target application. This strictly prevents conferring directory-level access or sibling document access.
+5. Launches the target application if not already running (using the runtime-wide lifetime context).
+6. Dispatches `app/<app_id>/open` with document path, mode, and `grant_id`.
+7. Automatically records the document access into persistent recents.
+
+### Persistent Recents and Favorites Stores
+- Recents and favorites are persisted to user private state: `/users/guest/config/recents.json` and `/users/guest/config/favorites.json`.
+- Both stores are bounded (up to 100 entries) and use atomic VFS writes.
+- Recents records application ID, access mode, access count, and timestamp. Missing or stale paths are pruned or marked during verification.
+- Favorites supports ordering, ranking, and custom user-provided labels.
+- Both stores filter returned entries by caller permissions so applications cannot discover files outside their granted directory trees.
+
+### Permission-Aware Search and Lookup
+- `doc/search` performs recursive directory traversal bounded by depth (max 16) and result count (max 100), respecting directory boundaries and caller permissions.
+- In-memory index provides fast exact name and extension lookups, verifying existence and checking caller permissions at query time.
 

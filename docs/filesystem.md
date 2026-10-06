@@ -205,6 +205,28 @@ The filesystem is exposed to applications and shell commands over IPC:
 | `fs/grant/revoke` | `admin` | Revokes an issued grant by ID. |
 | `fs/grant/list` | Caller app or `admin` | Lists active grants for an application or across the system. |
 
+## Document Operations Surface (`doc/*`)
+
+The document subsystem provides permission-aware search, indexed lookup, persistent recents and favorites, registered associations, and scoped open-with handoff over IPC:
+
+| Method | Capability Required | Description |
+|---|---|---|
+| `doc/search` | `fs.read` (or granted) | Bounded permission-aware recursive VFS search filtered to caller directory grants. |
+| `doc/lookup` | `fs.read` (or granted) | Exact name and extension document lookup with stale path pruning. |
+| `doc/recents` | Caller app or `admin` | Lists recent documents filtered by caller permissions, with optional existence checks. |
+| `doc/recents/add` | Caller app or `admin` | Records a document access into persistent recents (`/users/guest/config/recents.json`). |
+| `doc/recents/remove` | Caller app or `admin` | Removes an entry from recents. |
+| `doc/recents/clear` | Caller app or `admin` | Clears caller or all recents. |
+| `doc/favorites` | Caller app or `admin` | Lists pinned favorite documents (`/users/guest/config/favorites.json`). |
+| `doc/favorites/add` | Caller app or `admin` | Adds or updates a pinned favorite with rank and optional custom label. |
+| `doc/favorites/remove` | Caller app or `admin` | Removes a pinned favorite. |
+| `doc/favorites/reorder`| Caller app or `admin` | Reorders favorite documents by ordered paths. |
+| `doc/favorites/clear` | Caller app or `admin` | Clears pinned favorites. |
+| `doc/associations` | `ipc` | Lists all registered document type associations. |
+| `doc/associations/resolve` | `ipc` | Resolves target application for a document path or extension. |
+| `doc/associations/register`| `admin` | Registers a custom document type association. |
+| `doc/handoff` | Caller app or `admin` | Versioned open-with contract. Issues a scoped single-document grant without broader directory access, launches target app if needed, and dispatches open. |
+
 ## Testing
 
 Both backends pass `testing/fstest.TestFS`. Dedicated suites verify:

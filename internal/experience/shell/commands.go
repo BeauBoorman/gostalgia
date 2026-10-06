@@ -65,6 +65,9 @@ const helpText = `COMMAND CENTER
   dir / ls [PATH]           browse the environment drive
   cd PATH                   change directory (C: is the VFS)
   type / cat PATH           read a file
+  open PATH [APP-ID]        open document with associated app (handoff)
+  search QUERY [PATH]       search documents in environment drive
+  recents · favorites       list recent or pinned documents
   tasks / taskmanager       live Task Manager process dashboard
   notifications / alerts    notification center and alert history
   receipt [PID]             view process crash receipts
@@ -363,6 +366,111 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 			return fail(err)
 		}
 		return ok(safe(string(data)))
+	case "open":
+		if len(args) < 1 {
+			return fail(fmt.Errorf("usage: open PATH [APP-ID]"))
+		}
+		target := envPath(cwd, args[0])
+		appID := ""
+		if len(args) >= 2 {
+			appID = args[1]
+		}
+		var res struct {
+			Success bool   `json:"success"`
+			AppID   string `json:"app_id"`
+			Message string `json:"message"`
+		}
+		if err := c.Call(ctx, "doc/handoff", map[string]any{
+			"version": 1,
+			"path":    target,
+			"app_id":  appID,
+			"mode":    "read-write",
+		}, &res); err != nil {
+			return fail(fmt.Errorf("open: %w", err))
+		}
+		if res.Success && res.AppID != "" {
+			return ok(fmt.Sprintf("__SWITCH_VIEW__:%s", res.AppID))
+		}
+		return ok(res.Message)
+	case "search", "find":
+		if len(args) < 1 {
+			return fail(fmt.Errorf("usage: search QUERY [PATH]"))
+		}
+		q := args[0]
+		searchPath := ""
+		if len(args) >= 2 {
+			searchPath = envPath(cwd, args[1])
+		}
+		var res struct {
+			Results []struct {
+				Path string `json:"path"`
+				Size int64  `json:"size"`
+			} `json:"results"`
+			Total int `json:"total"`
+		}
+		if err := c.Call(ctx, "doc/search", map[string]any{
+			"query": q,
+			"path":  searchPath,
+		}, &res); err != nil {
+			return fail(fmt.Errorf("search: %w", err))
+		}
+		if res.Total == 0 {
+			return ok(fmt.Sprintf("No documents found matching %q", q))
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "Found %d document(s):\n", res.Total)
+		for _, r := range res.Results {
+			fmt.Fprintf(&b, "  %-40s %8d B\n", r.Path, r.Size)
+		}
+		return ok(strings.TrimRight(b.String(), "\n"))
+	case "recents":
+		if len(args) != 0 {
+			return fail(fmt.Errorf("usage: recents"))
+		}
+		var res struct {
+			Entries []struct {
+				Path   string `json:"path"`
+				Exists bool   `json:"exists"`
+			} `json:"entries"`
+		}
+		if err := c.Call(ctx, "doc/recents", map[string]bool{"verify_exists": true}, &res); err != nil {
+			return fail(fmt.Errorf("recents: %w", err))
+		}
+		if len(res.Entries) == 0 {
+			return ok("No recent documents")
+		}
+		var b strings.Builder
+		b.WriteString("RECENT DOCUMENTS\n")
+		for _, e := range res.Entries {
+			st := ""
+			if !e.Exists {
+				st = " (missing)"
+			}
+			fmt.Fprintf(&b, "  %s%s\n", e.Path, st)
+		}
+		return ok(strings.TrimRight(b.String(), "\n"))
+	case "favorites":
+		if len(args) != 0 {
+			return fail(fmt.Errorf("usage: favorites"))
+		}
+		var res struct {
+			Entries []struct {
+				Path  string `json:"path"`
+				Label string `json:"label"`
+			} `json:"entries"`
+		}
+		if err := c.Call(ctx, "doc/favorites", nil, &res); err != nil {
+			return fail(fmt.Errorf("favorites: %w", err))
+		}
+		if len(res.Entries) == 0 {
+			return ok("No favorite documents")
+		}
+		var b strings.Builder
+		b.WriteString("FAVORITE DOCUMENTS\n")
+		for _, e := range res.Entries {
+			fmt.Fprintf(&b, "  %-20s %s\n", e.Label, e.Path)
+		}
+		return ok(strings.TrimRight(b.String(), "\n"))
 	case "ps":
 		if len(args) != 0 {
 			return fail(fmt.Errorf("usage: ps"))

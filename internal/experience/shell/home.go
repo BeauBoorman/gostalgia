@@ -149,7 +149,7 @@ func (m *Model) handleHomeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if it.kind == homeItemApp {
 				return m, m.openView(it.app)
 			}
-			return m, m.submit("type " + it.doc.Path)
+			return m, m.submit("open " + it.doc.Path)
 		}
 		return m, nil
 	case "f4":

@@ -323,6 +323,7 @@ func (n *Notes) openLocked(ctx context.Context, targetPath string, force bool) e
 	n.prompt = PromptNone
 	n.lastError = ""
 	n.lastStatus = fmt.Sprintf("Opened %s (%d bytes)", targetPath, len(data))
+	_ = n.app.Call(ctx, "doc/recents/add", map[string]string{"path": targetPath}, nil)
 	return nil
 }
 
@@ -393,6 +394,7 @@ func (n *Notes) saveLocked(ctx context.Context, targetPath string, content strin
 	n.lastError = ""
 	n.lastStatus = fmt.Sprintf("Saved %s (%d bytes)", targetPath, len(n.content))
 	_ = n.clearRecoveryLocked(ctx)
+	_ = n.app.Call(ctx, "doc/recents/add", map[string]string{"path": targetPath}, nil)
 	return nil
 }
 

@@ -4,5 +4,6 @@
   "version": "0.1.0",
   "entrypoint": "files",
   "permissions": ["ipc", "fs.read", "fs.write", "app.launch", "app.list"],
+  "document_types": ["directory"],
   "description": "VFS file manager and document browser."
 }

@@ -216,6 +216,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		services.NewSys(),
 		services.NewProc(),
 		services.NewFS(),
+		services.NewDocument(),
 		services.NewIPC(),
 		services.NewConfig(),
 		services.NewClipboard(),
