@@ -11,6 +11,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"gostalgia/internal/experience/notifications"
+	"gostalgia/internal/experience/receipts"
+	"gostalgia/internal/experience/taskmanager"
 	"gostalgia/internal/experience/theme"
 	"gostalgia/internal/experience/ui"
 	"gostalgia/sdk"
@@ -40,6 +43,8 @@ const (
 	FocusLauncher
 	FocusApp
 	FocusPalette
+	FocusTasks
+	FocusNotifications
 )
 
 func (f FocusState) String() string {
@@ -52,33 +57,64 @@ func (f FocusState) String() string {
 		return "app"
 	case FocusPalette:
 		return "palette"
+	case FocusTasks:
+		return "tasks"
+	case FocusNotifications:
+		return "notifications"
 	default:
 		return "prompt"
 	}
 }
 
+type procTracking struct {
+	state        string
+	exitCode     int
+	restartCount int
+	crashLoop    bool
+}
+
+type tickMsg time.Time
+type procUpdateMsg struct {
+	procs []taskmanager.ProcessRow
+	err   error
+}
+type procActionMsg struct {
+	status string
+	err    error
+}
+type procLogsMsg struct {
+	pid     int32
+	name    string
+	content string
+	err     error
+}
+type receiptLogsMsg struct {
+	pid       int32
+	receiptID string
+	logs      string
+}
+
 // Model owns UI state; tea.Cmd does IO off the event-loop goroutine.
 type Model struct {
-	ctx           context.Context
-	client        Caller
-	closed        <-chan struct{}
-	width, height int
-	cwd           string
-	input         []rune
-	cursor        int
-	transcript    []entry
-	history       []string
-	historyPos    int
-	draft         string
-	apps          []appStatus
-	selected      int
-	shelf         bool
-	busy          bool
-	scroll        int
-	kit           ui.Kit
-	presentation  *appView
-	viewEpoch     uint64
-
+	ctx             context.Context
+	client          Caller
+	closed          <-chan struct{}
+	width, height   int
+	cwd             string
+	input           []rune
+	cursor          int
+	transcript      []entry
+	history         []string
+	historyPos      int
+	draft           string
+	apps            []appStatus
+	selected        int
+	shelf           bool
+	busy            bool
+	scroll          int
+	kit             ui.Kit
+	presentation    *appView
+	viewEpoch       uint64
 	mode            viewMode
 	homeData        homeData
 	homeSelected    int
@@ -87,6 +123,13 @@ type Model struct {
 	paletteQuery    string
 	paletteSelected int
 	previousMode    viewMode
+
+	taskView  bool
+	notifView bool
+	tasks     *taskmanager.Model
+	notifs    *notifications.Manager
+	receipts  *receipts.Store
+	lastProcs map[int32]procTracking
 }
 
 func (m *Model) currentMode() viewMode {
@@ -108,6 +151,12 @@ func (m *Model) Focus() FocusState {
 	if m.presentation != nil {
 		return FocusApp
 	}
+	if m.taskView {
+		return FocusTasks
+	}
+	if m.notifView {
+		return FocusNotifications
+	}
 	switch m.currentMode() {
 	case modeHome:
 		return FocusHome
@@ -115,6 +164,21 @@ func (m *Model) Focus() FocusState {
 		return FocusLauncher
 	default:
 		return FocusPrompt
+	}
+}
+
+func (m *Model) initExperience() {
+	if m.tasks == nil {
+		m.tasks = taskmanager.New()
+	}
+	if m.notifs == nil {
+		m.notifs = notifications.NewManager(100, 3, 8)
+	}
+	if m.receipts == nil {
+		m.receipts = receipts.NewStore(50)
+	}
+	if m.lastProcs == nil {
+		m.lastProcs = make(map[int32]procTracking)
 	}
 }
 
@@ -132,10 +196,146 @@ func NewWithTheme(ctx context.Context, c Caller, closed <-chan struct{}, t theme
 			{"Welcome home. A familiar prompt. A whole new environment.", "accent"},
 			{"Type help to explore, or F2 to open your app shelf.", "muted"},
 		},
+		tasks:     taskmanager.New(),
+		notifs:    notifications.NewManager(100, 3, 8),
+		receipts:  receipts.NewStore(50),
+		lastProcs: make(map[int32]procTracking),
 	}
 }
 
+func tickCmd() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
+
+func (m *Model) pollProcessesCmd() tea.Cmd {
+	client := m.client
+	ctx := m.ctx
+	return func() tea.Msg {
+		c, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		rows, err := taskmanager.FetchProcesses(c, client)
+		return procUpdateMsg{procs: rows, err: err}
+	}
+}
+
+func (m *Model) fetchLogsCmd(pid int32, name string) tea.Cmd {
+	client := m.client
+	ctx := m.ctx
+	return func() tea.Msg {
+		c, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		logs, err := taskmanager.FetchLogs(c, client, pid, 100)
+		return procLogsMsg{pid: pid, name: name, content: logs, err: err}
+	}
+}
+
+func (m *Model) fetchLogsForReceiptCmd(pid int32, receiptID string) tea.Cmd {
+	client := m.client
+	ctx := m.ctx
+	return func() tea.Msg {
+		c, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		logs, err := taskmanager.FetchLogs(c, client, pid, 30)
+		if err != nil {
+			logs = fmt.Sprintf("(failed to retrieve child logs: %v)", err)
+		}
+		return receiptLogsMsg{pid: pid, receiptID: receiptID, logs: logs}
+	}
+}
+
+func (m *Model) stopProcessCmd(pid int32) tea.Cmd {
+	client := m.client
+	ctx := m.ctx
+	return func() tea.Msg {
+		c, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		err := taskmanager.StopProcess(c, client, pid)
+		status := fmt.Sprintf("Stopped process %d", pid)
+		return procActionMsg{status: status, err: err}
+	}
+}
+
+func (m *Model) reapProcessesCmd() tea.Cmd {
+	client := m.client
+	ctx := m.ctx
+	return func() tea.Msg {
+		c, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		n, err := taskmanager.ReapProcesses(c, client)
+		status := fmt.Sprintf("Reaped %d dead processes", n)
+		return procActionMsg{status: status, err: err}
+	}
+}
+
+func (m *Model) handleProcessUpdates(procs []taskmanager.ProcessRow) tea.Cmd {
+	m.tasks.SetProcesses(procs)
+	var cmds []tea.Cmd
+
+	for _, p := range procs {
+		prev, existed := m.lastProcs[p.ID]
+		m.lastProcs[p.ID] = procTracking{
+			state:        p.State,
+			exitCode:     p.ExitCode,
+			restartCount: p.RestartCount,
+			crashLoop:    p.CrashLoop,
+		}
+
+		if !existed {
+			continue
+		}
+
+		crashed := (p.State == "failed" || (p.State == "stopped" && p.ExitCode != 0) || p.CrashLoop)
+		wasCrashed := (prev.state == "failed" || (prev.state == "stopped" && prev.exitCode != 0) || prev.crashLoop)
+
+		if crashed && (!wasCrashed || p.RestartCount > prev.restartCount) {
+			reason := p.Error
+			if reason == "" {
+				reason = fmt.Sprintf("Process exited with code %d", p.ExitCode)
+			}
+			receipt := receipts.New(p.ID, p.Name, p.State, p.ExitCode, reason, p.RestartCount, "")
+			m.receipts.Add(receipt)
+
+			m.notifs.Record(notifications.Notification{
+				Title:     fmt.Sprintf("%s Crashed", p.Name),
+				Message:   fmt.Sprintf("PID %d exit %d (%s)", p.ID, p.ExitCode, p.State),
+				Level:     notifications.LevelError,
+				Source:    "process",
+				PID:       p.ID,
+				Receipt:   &receipt,
+				Timestamp: time.Now(),
+			})
+			cmds = append(cmds, m.fetchLogsForReceiptCmd(p.ID, receipt.ID))
+		} else if p.State == "restarting" && prev.state != "restarting" {
+			m.notifs.Record(notifications.Notification{
+				Title:     fmt.Sprintf("%s Backoff", p.Name),
+				Message:   fmt.Sprintf("PID %d backoff restart %d", p.ID, p.RestartCount),
+				Level:     notifications.LevelWarning,
+				Source:    "process",
+				PID:       p.ID,
+				Timestamp: time.Now(),
+			})
+		} else if p.State == "stopped" && p.ExitCode == 0 && prev.state != "stopped" && prev.state != "" {
+			m.notifs.Record(notifications.Notification{
+				Title:     fmt.Sprintf("%s Finished", p.Name),
+				Message:   fmt.Sprintf("PID %d completed cleanly", p.ID),
+				Level:     notifications.LevelInfo,
+				Source:    "process",
+				PID:       p.ID,
+				Timestamp: time.Now(),
+			})
+		}
+	}
+
+	if len(cmds) > 0 {
+		return tea.Batch(cmds...)
+	}
+	return nil
+}
+
 func (m *Model) Init() tea.Cmd {
+	m.initExperience()
 	m.busy = true // Initial discovery must finish before accepting a command.
 	cwd := m.cwd
 	refresh := func() tea.Msg {
@@ -192,7 +392,7 @@ func (m *Model) Init() tea.Cmd {
 		}
 		return closedMsg{}
 	}
-	return tea.Batch(refresh, watch)
+	return tea.Batch(refresh, watch, tickCmd(), m.pollProcessesCmd())
 }
 
 func (m *Model) submit(line string) tea.Cmd {
@@ -237,6 +437,45 @@ func (m *Model) append(e entry) {
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tickMsg:
+		m.initExperience()
+		m.notifs.Tick()
+		var cmds []tea.Cmd
+		cmds = append(cmds, tickCmd())
+		if !m.busy {
+			cmds = append(cmds, m.pollProcessesCmd())
+		}
+		return m, tea.Batch(cmds...)
+	case procUpdateMsg:
+		m.initExperience()
+		if msg.err == nil && msg.procs != nil {
+			cmd := m.handleProcessUpdates(msg.procs)
+			return m, cmd
+		}
+		return m, nil
+	case procLogsMsg:
+		m.initExperience()
+		if msg.err != nil {
+			m.tasks.SetError(msg.err.Error())
+		} else {
+			m.tasks.ShowLogs(msg.pid, msg.name, msg.content)
+		}
+		return m, nil
+	case procActionMsg:
+		m.initExperience()
+		if msg.err != nil {
+			m.tasks.SetError(msg.err.Error())
+		} else {
+			m.tasks.SetStatus(msg.status)
+		}
+		return m, m.pollProcessesCmd()
+	case receiptLogsMsg:
+		m.initExperience()
+		m.receipts.UpdateExcerpt(msg.receiptID, msg.logs)
+		if r, ok := m.receipts.Get(msg.receiptID); ok {
+			m.tasks.UpdateReceipt(&r)
+		}
+		return m, nil
 	case viewMsg, viewTickMsg, viewCheckMsg, viewCancelMsg:
 		return m, m.updatePresentation(msg)
 	case closedMsg:
@@ -249,6 +488,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 	case resultMsg:
 		m.busy = false
+		m.initExperience()
 		if msg.cwd != "" {
 			m.cwd = msg.cwd
 		}
@@ -264,6 +504,57 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.hasDocs {
 			m.homeData.Documents = msg.documents
+		}
+		if msg.switchView == "tasks" {
+			m.taskView = true
+			m.shelf = false
+			m.notifView = false
+		} else if msg.switchView == "notifications" {
+			m.notifView = true
+			m.shelf = false
+			m.taskView = false
+		} else if msg.switchView == "shelf" || msg.switchView == "launcher" {
+			m.setMode(modeLauncher)
+			m.taskView = false
+			m.notifView = false
+		}
+		if msg.toggleDND {
+			val := m.notifs.ToggleDND()
+			stateStr := "OFF"
+			if val {
+				stateStr = "ON (toasts suppressed)"
+			}
+			m.append(entry{fmt.Sprintf("Do-Not-Disturb is now %s", stateStr), "accent"})
+		} else if msg.setDND != nil {
+			m.notifs.SetDND(*msg.setDND)
+			stateStr := "OFF"
+			if *msg.setDND {
+				stateStr = "ON (toasts suppressed)"
+			}
+			m.append(entry{fmt.Sprintf("Do-Not-Disturb is now %s", stateStr), "accent"})
+		}
+		if msg.listReceipts {
+			list := m.receipts.List()
+			if len(list) == 0 {
+				m.append(entry{"No crash receipts recorded.", "muted"})
+			} else {
+				m.append(entry{fmt.Sprintf("CRASH RECEIPTS (%d total):", len(list)), "accent"})
+				for _, r := range list {
+					m.append(entry{fmt.Sprintf("  #%-6s PID %-5d %-16s exit %-3d (%s) at %s",
+						r.ID, r.PID, r.Name, r.ExitCode, r.State, r.Timestamp.Format("15:04:05")), "output"})
+				}
+				m.append(entry{"Type 'receipt PID' to inspect full receipt with logs.", "muted"})
+			}
+		} else if msg.receiptPID > 0 {
+			r, ok := m.receipts.GetByPID(msg.receiptPID)
+			if ok {
+				m.taskView = true
+				m.shelf = false
+				m.notifView = false
+				m.tasks.ShowReceipt(&r)
+			} else {
+				m.append(entry{fmt.Sprintf("No crash receipt recorded for PID %d", msg.receiptPID), "error"})
+			}
 		}
 		if msg.text != "" {
 			m.append(entry{msg.text, "output"})
@@ -290,6 +581,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.closePalette()
 			}
 			cancel := m.dismissView()
+			m.taskView = false
+			m.notifView = false
 			if m.currentMode() == modeHome {
 				m.setMode(modePrompt)
 			} else {
@@ -302,10 +595,38 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.closePalette()
 			}
 			cancel := m.dismissView()
+			m.taskView = false
+			m.notifView = false
 			if m.currentMode() == modeLauncher {
 				m.setMode(modePrompt)
 			} else {
 				m.setMode(modeLauncher)
+			}
+			m.scroll = 0
+			return m, cancel
+		case "f5":
+			if m.paletteOpen {
+				m.closePalette()
+			}
+			cancel := m.dismissView()
+			m.taskView = !m.taskView
+			if m.taskView {
+				m.shelf = false
+				m.notifView = false
+				m.setMode(modePrompt)
+			}
+			m.scroll = 0
+			return m, cancel
+		case "f6":
+			if m.paletteOpen {
+				m.closePalette()
+			}
+			cancel := m.dismissView()
+			m.notifView = !m.notifView
+			if m.notifView {
+				m.shelf = false
+				m.taskView = false
+				m.setMode(modePrompt)
 			}
 			m.scroll = 0
 			return m, cancel
@@ -322,10 +643,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.presentation != nil {
 				return m, m.viewKey(msg)
 			}
+			if m.taskView {
+				if m.tasks != nil && m.tasks.Mode() != taskmanager.ModeTable {
+					m.tasks.CloseModal()
+				} else {
+					m.taskView = false
+				}
+				return m, nil
+			}
+			if m.notifView {
+				m.notifView = false
+				return m, nil
+			}
 			if m.currentMode() == modeLauncher {
 				return m.handleLauncherKey(msg)
 			}
 			m.setMode(modePrompt)
+			m.shelf = false
 			return m, nil
 		case "pgup":
 			m.scroll += max(1, m.height/2)
@@ -343,6 +677,82 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.presentation != nil {
 			return m, m.viewKey(msg)
 		}
+		if m.taskView {
+			switch msg.String() {
+			case "up", "k":
+				m.tasks.SelectPrev()
+			case "down", "j":
+				m.tasks.SelectNext()
+			case "enter":
+				if m.tasks.Mode() != taskmanager.ModeTable {
+					m.tasks.CloseModal()
+				} else if sel := m.tasks.SelectedProcess(); sel != nil {
+					if r, ok := m.receipts.GetByPID(sel.ID); ok {
+						m.tasks.ShowReceipt(&r)
+					} else {
+						return m, m.fetchLogsCmd(sel.ID, sel.Name)
+					}
+				}
+			case "l":
+				if m.tasks.Mode() == taskmanager.ModeTable {
+					if sel := m.tasks.SelectedProcess(); sel != nil {
+						return m, m.fetchLogsCmd(sel.ID, sel.Name)
+					}
+				}
+			case "c":
+				if m.tasks.Mode() == taskmanager.ModeTable {
+					if sel := m.tasks.SelectedProcess(); sel != nil {
+						if r, ok := m.receipts.GetByPID(sel.ID); ok {
+							m.tasks.ShowReceipt(&r)
+						} else {
+							m.tasks.SetError(fmt.Sprintf("No crash receipt recorded for PID %d", sel.ID))
+						}
+					}
+				}
+			case "x":
+				if m.tasks.Mode() == taskmanager.ModeTable {
+					if sel := m.tasks.SelectedProcess(); sel != nil {
+						return m, m.stopProcessCmd(sel.ID)
+					}
+				}
+			case "r":
+				if m.tasks.Mode() == taskmanager.ModeTable {
+					return m, m.reapProcessesCmd()
+				}
+			}
+			return m, nil
+		}
+		if m.notifView {
+			switch msg.String() {
+			case "up", "k":
+				m.notifs.SelectPrev()
+			case "down", "j":
+				m.notifs.SelectNext()
+			case "enter":
+				if sel := m.notifs.Selected(); sel != nil {
+					m.notifs.MarkSeen(sel.ID)
+					if sel.Receipt != nil {
+						m.taskView = true
+						m.notifView = false
+						m.tasks.ShowReceipt(sel.Receipt)
+					}
+				}
+			case "d":
+				m.notifs.DismissSelected()
+			case "c":
+				m.notifs.Clear()
+			case "n":
+				dnd := m.notifs.ToggleDND()
+				if dnd {
+					m.append(entry{"Do-Not-Disturb is now ON (toasts suppressed)", "accent"})
+				} else {
+					m.append(entry{"Do-Not-Disturb is now OFF", "accent"})
+				}
+			case "a":
+				m.notifs.MarkAllSeen()
+			}
+			return m, nil
+		}
 		if m.currentMode() == modeLauncher {
 			return m.handleLauncherKey(msg)
 		}
@@ -359,6 +769,9 @@ func (m *Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnter:
 		line := strings.TrimSpace(string(m.input))
 		if line == "" {
+			m.append(entry{dosPath(m.cwd) + ">", "command"})
+			m.input = nil
+			m.cursor = 0
 			return m, nil
 		}
 		if strings.EqualFold(line, "cls") || strings.EqualFold(line, "clear") {
@@ -448,7 +861,7 @@ func (m *Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) complete() {
 	prefix := string(m.input)
-	choices := []string{"help", "apps", "launch", "run", "stop", "echo", "call", "dir", "ls", "cd", "type", "cat", "ps", "logs", "log", "status", "cls", "exit", "shutdown", "home", "palette"}
+	choices := []string{"help", "apps", "launch", "run", "stop", "echo", "call", "dir", "ls", "cd", "type", "cat", "ps", "logs", "log", "status", "cls", "exit", "shutdown", "home", "palette", "tasks", "taskmanager", "notifications", "alerts", "receipt", "reap", "dnd"}
 	if verb, partial, ok := strings.Cut(prefix, " "); ok {
 		if verb != "launch" && verb != "run" && verb != "stop" {
 			return
@@ -478,6 +891,7 @@ func safe(s string) string { return ui.Sanitize(s) }
 func dosPath(p string) string { return "C:" + strings.ReplaceAll(p, "/", `\`) }
 
 func (m *Model) View() string {
+	m.initExperience()
 	if m.width <= 0 || m.height <= 0 {
 		return ""
 	}
@@ -497,18 +911,50 @@ func (m *Model) View() string {
 	case modePrompt:
 		active = 2
 	}
-	tabItems := []ui.Tab{{Label: "Home"}, {Label: "Apps"}, {Label: "Prompt"}}
+	if m.taskView {
+		active = 3
+	} else if m.notifView {
+		active = 4
+	}
+
+	notifLabel := "Notifications"
+	if m.notifs != nil && m.notifs.UnseenCount() > 0 {
+		notifLabel = fmt.Sprintf("Notifications (%d)", m.notifs.UnseenCount())
+	}
+	tabItems := []ui.Tab{
+		{Label: "Home"},
+		{Label: "Apps"},
+		{Label: "Prompt"},
+		{Label: "Tasks"},
+		{Label: notifLabel},
+	}
 	if m.presentation != nil {
 		tabItems = append(tabItems, ui.Tab{Label: viewText(m.presentation.data.Title)})
-		active = 3
+		active = len(tabItems) - 1
 	}
 	tabs := m.kit.Tabs(tabItems, active, w)
 	badge := m.kit.Badge("ONLINE", theme.Success, w) + m.kit.Muted("   guest · C: environment drive")
-	bodyHeight := max(1, m.height-9)
+
+	toastView := ""
+	toastLines := 0
+	if m.notifs != nil && !m.notifView {
+		toastView = m.notifs.RenderToasts(m.kit, w)
+		if toastView != "" {
+			toastLines = strings.Count(toastView, "\n") + 1
+		}
+	}
+
+	bodyHeight := max(1, m.height-9-toastLines)
 	var lines []string
 
 	if m.paletteOpen {
 		lines = m.renderPalette(w, bodyHeight)
+	} else if m.taskView && m.tasks != nil {
+		panelStr := m.tasks.Render(m.kit, ui.Bounds{Width: w, Height: bodyHeight})
+		lines = strings.Split(panelStr, "\n")
+	} else if m.notifView && m.notifs != nil {
+		panelStr := m.notifs.RenderPanel(m.kit, ui.Bounds{Width: w, Height: bodyHeight})
+		lines = strings.Split(panelStr, "\n")
 	} else if m.presentation != nil {
 		lines = m.viewLines(bodyHeight)
 		for i, line := range lines {
@@ -540,7 +986,7 @@ func (m *Model) View() string {
 		}
 	}
 
-	if m.paletteOpen || m.currentMode() == modeLauncher || m.currentMode() == modeHome || m.presentation != nil {
+	if m.paletteOpen || m.currentMode() == modeLauncher || m.currentMode() == modeHome || m.presentation != nil || m.taskView || m.notifView {
 		if len(lines) > bodyHeight {
 			lines = lines[:bodyHeight]
 		}
@@ -550,6 +996,9 @@ func (m *Model) View() string {
 		lines = lines[start:end]
 	}
 	body := ui.Fit(strings.Join(lines, "\n"), ui.Bounds{Width: w, Height: bodyHeight})
+	if toastView != "" {
+		body = body + "\n" + toastView
+	}
 
 	promptPath := safe(dosPath(m.cwd))
 	if lipgloss.Width(promptPath) > w/2 {
@@ -560,6 +1009,10 @@ func (m *Model) View() string {
 		prompt = m.kit.Heading("PALETTE> ") + m.kit.Muted("Type to filter · ↑↓ navigate · Enter execute · Esc close")
 	} else if m.presentation != nil {
 		prompt += m.kit.Muted("App view owns focus. Esc returns to prompt.")
+	} else if m.taskView {
+		prompt += m.kit.Muted("Task Manager owns focus. Esc returns to prompt.")
+	} else if m.notifView {
+		prompt += m.kit.Muted("Notification Center owns focus. Esc returns to prompt.")
 	} else if m.busy {
 		prompt += m.kit.Badge("", theme.Busy, max(0, w-lipgloss.Width(prompt)))
 	} else if m.currentMode() == modeLauncher {
@@ -581,6 +1034,7 @@ func (m *Model) View() string {
 		after := ui.Fit(string(m.input[m.cursor:]), ui.Bounds{Width: room - lipgloss.Width(before), Height: 1})
 		prompt += m.kit.Text(before) + m.kit.Selection(" ") + m.kit.Text(after)
 	}
+
 	var bindings []ui.Binding
 	if m.paletteOpen {
 		items := m.filteredPaletteItems()
@@ -588,6 +1042,30 @@ func (m *Model) View() string {
 			{Key: "Esc", Help: "CLOSE"},
 			{Key: "Enter", Help: "EXECUTE", Disabled: len(items) == 0},
 			{Key: "↑↓", Help: "NAVIGATE", Disabled: len(items) == 0},
+			{Key: "Ctrl-C", Help: "EXIT"},
+		}
+	} else if m.taskView && m.tasks != nil {
+		if m.tasks.Mode() == taskmanager.ModeLogs {
+			bindings = []ui.Binding{
+				{Key: "Esc", Help: "BACK"}, {Key: "↑↓", Help: "SCROLL"}, {Key: "Ctrl-C", Help: "EXIT"},
+			}
+		} else if m.tasks.Mode() == taskmanager.ModeReceipt {
+			bindings = []ui.Binding{
+				{Key: "Esc", Help: "BACK"}, {Key: "Ctrl-C", Help: "EXIT"},
+			}
+		} else {
+			bindings = []ui.Binding{
+				{Key: "Esc", Help: "PROMPT"}, {Key: "Enter", Help: "VIEW"},
+				{Key: "l", Help: "LOGS"}, {Key: "c", Help: "RECEIPT"},
+				{Key: "x", Help: "STOP"}, {Key: "r", Help: "REAP"},
+				{Key: "↑↓", Help: "SELECT"}, {Key: "Ctrl-C", Help: "EXIT"},
+			}
+		}
+	} else if m.notifView {
+		bindings = []ui.Binding{
+			{Key: "Esc", Help: "PROMPT"}, {Key: "Enter", Help: "VIEW"},
+			{Key: "d", Help: "DISMISS"}, {Key: "c", Help: "CLEAR"},
+			{Key: "n", Help: "DND"}, {Key: "↑↓", Help: "SELECT"},
 			{Key: "Ctrl-C", Help: "EXIT"},
 		}
 	} else if m.presentation != nil {
@@ -607,6 +1085,7 @@ func (m *Model) View() string {
 			{Key: "Enter", Help: "RUN", Disabled: m.busy || len(filtered) == 0},
 			{Key: "F3", Help: "STOP", Disabled: m.busy || len(filtered) == 0},
 			{Key: "F4", Help: "VIEW", Disabled: m.busy || len(filtered) == 0},
+			{Key: "F5", Help: "TASKS"},
 			{Key: "↑↓", Help: "SELECT", Disabled: m.busy || len(filtered) == 0},
 			{Key: "Ctrl-P", Help: "PALETTE"},
 		}
@@ -615,6 +1094,8 @@ func (m *Model) View() string {
 		bindings = []ui.Binding{
 			{Key: "F1", Help: "PROMPT"},
 			{Key: "F2", Help: "APPS"},
+			{Key: "F5", Help: "TASKS"},
+			{Key: "F6", Help: "ALERTS"},
 			{Key: "Ctrl-P", Help: "PALETTE"},
 			{Key: "↑↓", Help: "SELECT", Disabled: len(items) == 0},
 			{Key: "Enter", Help: "OPEN", Disabled: len(items) == 0},
@@ -625,6 +1106,8 @@ func (m *Model) View() string {
 			{Key: "Ctrl-C", Help: "EXIT"},
 			{Key: "F1", Help: "HOME"},
 			{Key: "F2", Help: "APPS"},
+			{Key: "F5", Help: "TASKS"},
+			{Key: "F6", Help: "ALERTS"},
 			{Key: "Tab", Help: "COMPLETE", Disabled: m.busy},
 			{Key: "↑↓", Help: "HISTORY", Disabled: m.busy},
 			{Key: "Ctrl-P", Help: "PALETTE"},

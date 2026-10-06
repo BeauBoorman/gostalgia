@@ -36,15 +36,20 @@ type sysStatusData struct {
 }
 
 type resultMsg struct {
-	text      string
-	err       error
-	cwd       string
-	apps      []appStatus
-	status    sysStatusData
-	documents []docShortcut
-	hasStatus bool
-	hasDocs   bool
-	quit      bool
+	text         string
+	err          error
+	cwd          string
+	apps         []appStatus
+	status       sysStatusData
+	documents    []docShortcut
+	hasStatus    bool
+	hasDocs      bool
+	quit         bool
+	switchView   string
+	receiptPID   int32
+	listReceipts bool
+	toggleDND    bool
+	setDND       *bool
 }
 
 const helpText = `COMMAND CENTER
@@ -56,13 +61,18 @@ const helpText = `COMMAND CENTER
   dir / ls [PATH]           browse the environment drive
   cd PATH                   change directory (C: is the VFS)
   type / cat PATH           read a file
+  tasks / taskmanager       live Task Manager process dashboard
+  notifications / alerts    notification center and alert history
+  receipt [PID]             view process crash receipts
+  reap                      clean up terminated processes
+  dnd [on|off]              toggle or set Do-Not-Disturb
   ps · status               processes · system dashboard
   logs / log PID [TAIL]     view child process logs and diagnostics
   cls / clear               clear the transcript
   exit                      leave shell (owned boot shuts down)
   shutdown                  shut down the environment
 
-F1 home dashboard · F2 app shelf · Ctrl+P / / command palette · F3 stop · F4 view
+F1 home · F2 apps · F5 tasks · F6 alerts · Ctrl+P / / palette · F3 stop · F4 view
 Tab complete · ↑↓ history · Paths accept /users/guest or C:\users\guest.`
 
 // words handles quoted paths and messages. Backslashes remain literal for DOS
@@ -120,6 +130,29 @@ func execute(ctx context.Context, c Caller, cwd, line string) resultMsg {
 	result := resultMsg{cwd: cwd}
 	text, next, quit, err := command(ctx, c, cwd, line)
 	result.text, result.cwd, result.quit, result.err = text, next, quit, err
+	if strings.HasPrefix(result.text, "__SWITCH_VIEW__:") {
+		result.switchView = strings.TrimPrefix(result.text, "__SWITCH_VIEW__:")
+		result.text = ""
+	} else if strings.HasPrefix(result.text, "__SHOW_RECEIPT__:") {
+		var pid int32
+		fmt.Sscan(strings.TrimPrefix(result.text, "__SHOW_RECEIPT__:"), &pid)
+		result.receiptPID = pid
+		result.text = ""
+	} else if result.text == "__LIST_RECEIPTS__" {
+		result.listReceipts = true
+		result.text = ""
+	} else if result.text == "__TOGGLE_DND__" {
+		result.toggleDND = true
+		result.text = ""
+	} else if result.text == "__SET_DND_ON__" {
+		on := true
+		result.setDND = &on
+		result.text = ""
+	} else if result.text == "__SET_DND_OFF__" {
+		off := false
+		result.setDND = &off
+		result.text = ""
+	}
 	if !quit {
 		var apps []appStatus
 		if refreshErr := c.Call(ctx, "app/list", nil, &apps); refreshErr != nil {
@@ -418,6 +451,54 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 			out = append(out, "(no output recorded)")
 		}
 		return ok(strings.Join(out, "\n"))
+	case "tasks", "taskmanager", "top":
+		if len(args) != 0 {
+			return fail(fmt.Errorf("usage: %s", cmd))
+		}
+		return ok("__SWITCH_VIEW__:tasks")
+	case "notifications", "alerts":
+		if len(args) != 0 {
+			return fail(fmt.Errorf("usage: %s", cmd))
+		}
+		return ok("__SWITCH_VIEW__:notifications")
+	case "reap":
+		if len(args) != 0 {
+			return fail(fmt.Errorf("usage: reap"))
+		}
+		var resp struct {
+			Reaped int `json:"reaped"`
+		}
+		if err := c.Call(ctx, "proc/reap", map[string]any{}, &resp); err != nil {
+			return fail(err)
+		}
+		return ok(fmt.Sprintf("Reaped %d terminated processes", resp.Reaped))
+	case "receipt", "receipts":
+		if len(args) > 1 {
+			return fail(fmt.Errorf("usage: receipt [PID]"))
+		}
+		if len(args) == 0 {
+			return ok("__LIST_RECEIPTS__")
+		}
+		var pid int32
+		if _, err := fmt.Sscan(args[0], &pid); err != nil || pid <= 0 {
+			return fail(fmt.Errorf("invalid pid: %s", args[0]))
+		}
+		return ok(fmt.Sprintf("__SHOW_RECEIPT__:%d", pid))
+	case "dnd":
+		if len(args) > 1 {
+			return fail(fmt.Errorf("usage: dnd [on|off]"))
+		}
+		if len(args) == 0 {
+			return ok("__TOGGLE_DND__")
+		}
+		switch strings.ToLower(args[0]) {
+		case "on", "enable", "true", "1":
+			return ok("__SET_DND_ON__")
+		case "off", "disable", "false", "0":
+			return ok("__SET_DND_OFF__")
+		default:
+			return fail(fmt.Errorf("usage: dnd [on|off]"))
+		}
 	case "status":
 		if len(args) != 0 {
 			return fail(fmt.Errorf("usage: status"))
