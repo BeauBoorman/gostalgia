@@ -48,7 +48,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	t.Cleanup(func() { hostFS.Close() })
 	env := vfs.New(hostFS)
 	must(t, env.Mount("/tmp", vfs.NewMem()))
-	for _, dir := range []string{"/users/guest/documents", "/apps/manifests"} {
+	for _, dir := range []string{"/users/guest/documents", "/apps/manifests", "/apps/data"} {
 		must(t, env.MkdirAll(dir))
 	}
 
@@ -102,6 +102,23 @@ func (e *testEnv) call(ctx context.Context, caps *security.Capabilities, method 
 	if caps != nil {
 		ctx = ipc.WithCapabilities(ctx, caps)
 	}
+	return e.router.Dispatch(ctx, ipc.Request{ID: 1, Method: method, Params: raw})
+}
+
+func (e *testEnv) callAs(ctx context.Context, principal security.Principal, caps *security.Capabilities, method string, params any) ipc.Response {
+	e.t.Helper()
+	var raw json.RawMessage
+	if params != nil {
+		b, err := json.Marshal(params)
+		if err != nil {
+			e.t.Fatal(err)
+		}
+		raw = b
+	}
+	if caps != nil {
+		ctx = ipc.WithCapabilities(ctx, caps)
+	}
+	ctx = ipc.WithPrincipal(ctx, principal)
 	return e.router.Dispatch(ctx, ipc.Request{ID: 1, Method: method, Params: raw})
 }
 

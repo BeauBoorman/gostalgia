@@ -18,6 +18,7 @@ import (
 	"gostalgia/internal/ipc"
 	"gostalgia/internal/process"
 	"gostalgia/internal/security"
+	"gostalgia/internal/vfs"
 	"gostalgia/sdk"
 )
 
@@ -144,6 +145,7 @@ type Manager struct {
 	router  *ipc.Router
 	bus     *events.Bus
 	tokens  *security.TokenStore
+	grants  *vfs.GrantStore
 	log     *slog.Logger
 	mu      sync.Mutex
 	running map[string]*runningApp
@@ -165,6 +167,20 @@ func NewManager(reg *Registry, procs *process.Manager, router *ipc.Router, bus *
 		log:     log,
 		running: map[string]*runningApp{},
 	}
+}
+
+// SetGrantStore configures the grant store used for scoped filesystem authorizations.
+func (m *Manager) SetGrantStore(grants *vfs.GrantStore) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.grants = grants
+}
+
+// GrantStore returns the configured grant store.
+func (m *Manager) GrantStore() *vfs.GrantStore {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.grants
 }
 
 // SetTokenStore configures the token store used for application credentials.

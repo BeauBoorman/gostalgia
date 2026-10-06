@@ -201,3 +201,139 @@ func TestConfusedDeputyViaEchoIdentity(t *testing.T) {
 		t.Errorf("appIdentity.Caps = %v, want [ipc]", appIdentity.Caps)
 	}
 }
+
+func TestAppPrivateStorageAndScopedGrantsE2E(t *testing.T) {
+	root := t.TempDir()
+	rt, err := runtime.Boot(context.Background(), runtime.Options{Root: root, Verbose: true})
+	if err != nil {
+		t.Fatalf("boot: %v", err)
+	}
+	defer rt.Shutdown("test end")
+
+	data, err := os.ReadFile(filepath.Join(root, "runtime.json"))
+	if err != nil {
+		t.Fatalf("read runtime.json: %v", err)
+	}
+	var rInfo struct {
+		Endpoint string `json:"endpoint"`
+		Token    string `json:"token"`
+	}
+	if err := json.Unmarshal(data, &rInfo); err != nil {
+		t.Fatal(err)
+	}
+
+	appToken, ok := rt.Apps.AppToken("com.gostalgia.echo")
+	if !ok || appToken == "" {
+		t.Fatalf("expected app token for echo app")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Connect operator
+	opConn, err := platform.DialIPC(rInfo.Endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opClient, err := ipc.NewClient(opConn, rInfo.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opClient.Close()
+
+	// Seed shared document as operator
+	if err := opClient.Call(ctx, "fs/save", map[string]any{
+		"path":        "/users/guest/documents/shared.txt",
+		"data_base64": "c2hhcmVkIGRvY3VtZW50", // "shared document"
+	}, nil); err != nil {
+		t.Fatalf("seed shared doc: %v", err)
+	}
+
+	// Connect app client
+	appConn, err := platform.DialIPC(rInfo.Endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appClient, err := ipc.NewClient(appConn, appToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer appClient.Close()
+
+	// 1. App accesses its private storage (inherently permitted)
+	testPayload := "cHJpdmF0ZSBhcHAgZGF0YQ==" // "private app data"
+	if err := appClient.Call(ctx, "fs/write", map[string]any{
+		"path":        "/apps/data/com.gostalgia.echo/test.txt",
+		"data_base64": testPayload,
+	}, nil); err != nil {
+		t.Fatalf("app write to private storage failed: %v", err)
+	}
+
+	var readResp struct {
+		DataBase64 string `json:"data_base64"`
+	}
+	if err := appClient.Call(ctx, "fs/read", map[string]any{
+		"path": "/apps/data/com.gostalgia.echo/test.txt",
+	}, &readResp); err != nil {
+		t.Fatalf("app read from private storage failed: %v", err)
+	}
+	if readResp.DataBase64 != testPayload {
+		t.Fatalf("read payload = %q, want %q", readResp.DataBase64, testPayload)
+	}
+
+	// 2. App denied access to other app private storage and ungranted paths
+	if err := appClient.Call(ctx, "fs/read", map[string]any{
+		"path": "/apps/data/com.other.app/secret.txt",
+	}, nil); err == nil {
+		t.Fatal("app read of other app private storage should have failed")
+	}
+	if err := appClient.Call(ctx, "fs/read", map[string]any{
+		"path": "/users/guest/documents/shared.txt",
+	}, nil); err == nil {
+		t.Fatal("app read of shared doc before grant should have failed")
+	}
+
+	// 3. Operator issues grant to echo app
+	var grantResp struct {
+		Grant struct {
+			ID string `json:"id"`
+		} `json:"grant"`
+	}
+	if err := opClient.Call(ctx, "fs/grant", map[string]any{
+		"app_id": "com.gostalgia.echo",
+		"path":   "/users/guest/documents/shared.txt",
+		"access": "read",
+	}, &grantResp); err != nil {
+		t.Fatalf("operator issue grant: %v", err)
+	}
+	grantID := grantResp.Grant.ID
+
+	// 4. App reads shared document successfully
+	if err := appClient.Call(ctx, "fs/read", map[string]any{
+		"path": "/users/guest/documents/shared.txt",
+	}, &readResp); err != nil {
+		t.Fatalf("app read granted doc failed: %v", err)
+	}
+
+	// 5. App cannot write to read-only grant
+	if err := appClient.Call(ctx, "fs/write", map[string]any{
+		"path":        "/users/guest/documents/shared.txt",
+		"data_base64": testPayload,
+	}, nil); err == nil {
+		t.Fatal("app write to read-only grant should have failed")
+	}
+
+	// 6. Operator revokes grant
+	if err := opClient.Call(ctx, "fs/grant/revoke", map[string]string{
+		"id": grantID,
+	}, nil); err != nil {
+		t.Fatalf("operator revoke grant: %v", err)
+	}
+
+	// 7. App immediate failure on revoked grant
+	if err := appClient.Call(ctx, "fs/read", map[string]any{
+		"path": "/users/guest/documents/shared.txt",
+	}, nil); err == nil {
+		t.Fatal("app read after grant revocation should have failed")
+	}
+}
