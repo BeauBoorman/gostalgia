@@ -5,7 +5,7 @@ honestly missing, and the itemized milestone list. This is the **canonical
 tracker** — `docs/architecture.md` §5 summarizes the milestone arc and points
 here.
 
-- **Current position:** Milestone 1 in progress (Charm experience + capability-scoped app SDK merged); Milestone 3 IPC subscriptions, bounded event history, and concurrent calls implemented for [#32](https://github.com/drawmeanelephant/gostalgia/issues/32). Foundation unblocks Milestones 1–5.
+- **Current position:** Milestone 1 in progress (Charm baseline pinned: Bubble Tea v1.3.10, Lip Gloss v1.1.0, Bubbles v1.0.0; automated dependency fences enforced; active item: [#22](https://github.com/drawmeanelephant/gostalgia/issues/22) reusable visual language and component kit); Milestone 3 IPC subscriptions, bounded event history, and concurrent calls implemented for [#32](https://github.com/drawmeanelephant/gostalgia/issues/32). Foundation unblocks Milestones 1–5.
 - **Last verified:** 2026-10-05 (`gofmt -l .` clean; `go build ./...`, `go vet ./...`, `go test -race ./...`, and `CGO_ENABLED=0 go build ./...` pass locally on macOS; repeated IPC/event race stress and real-runtime subscription/history tests pass. Earlier Charm PTY and platform CI evidence is recorded below; this change does not claim new Windows/Linux behavioral or VirelaiOS verification.)
 
 Rules for touching this file:
@@ -32,9 +32,11 @@ Rules for touching this file:
 | VFS: env paths, host backend confined via `os.Root`, memfs `/tmp`, mounts | ✅ working | `testing/fstest` + escape/mount tests |
 | App SDK: embedded JSON manifest, Init/Run/Stop, scoped calls/routes, launch/stop | ✅ working | `sdk`, `internal/app`, services + shell socket lifecycle tests |
 | Charm shell: DOS-style prompt, app shelf, history/completion, VFS/process commands | ✅ working | `internal/experience/shell` (real Bubble Tea + authenticated IPC) |
+| Charm baseline & dependency fences: Bubble Tea v1.3.10, Lip Gloss v1.1.0, Bubbles v1.0.0 | ✅ working | `test/e2e` dependency fences (`TestCoreDependencyBoundary`, `TestCharmRestrictedToExperienceShell`, `TestApprovedCharmBaseline`, `TestNoStandaloneHostExecutables`) |
 | Event bus (typed synchronous handlers + bounded nonblocking metadata subscriptions/history) | ✅ working | `internal/events` tests, including ordered concurrent delivery, drop-oldest queues and 256-record retention |
 | Config store (dotted paths, atomic persist) | ✅ working | `internal/config` tests |
 | Capability scoping: app Call/Handle adapters enforce manifest grants | ✅ working | SDK adapters replace caller grants; IPC methods reject unauthorized app calls; admin tokens remain trusted operator clients — see `docs/security.md` |
+| App identity & scoped grants: distinct per-app tokens, manifest capability grants, lifecycle revocation | ✅ working | `internal/security`, `internal/ipc`, `internal/app` unit + socket integration + `test/e2e` |
 | Cross-platform compile (darwin/linux/windows) | ✅ compiles | `GOOS=` builds in CI matrix |
 | Cross-platform behavior: CI runs the full test suite on ubuntu, macOS, and Windows runners | ✅ CI-green (Windows: full fstest skipped — see `docs/filesystem.md` metadata caveat; structural checks run everywhere) | `.github/workflows/ci.yml` |
 
@@ -51,12 +53,14 @@ go run ./cmd/gctl --root /tmp/gs status      # terminal 2
 
 ## Known gaps (honest list)
 
-- **No OS sandbox.** SDK calls and routes enforce manifest capability scoping
-  and prevent borrowing caller permissions, but apps still run in-process;
-  malicious Go code could bypass in-process checks. The socket token provides
-  local operator authentication, not an isolation boundary. Arbitrary external
-  apps remain trusted-only until platform sandboxing is implemented (Milestone 4,
-  issues [#35](https://github.com/drawmeanelephant/gostalgia/issues/35)–[#39](https://github.com/drawmeanelephant/gostalgia/issues/39)).
+- **No OS sandbox.** While distinct authenticated app identities, scoped
+  manifest capability grants, and lifecycle revocation are implemented at the
+  IPC transport layer ([#35](https://github.com/drawmeanelephant/gostalgia/issues/35)),
+  apps still run in-process; malicious Go code could bypass in-process checks.
+  The socket token provides local operator authentication, not an isolation
+  boundary. Arbitrary external apps remain trusted-only until platform
+  sandboxing is implemented (Milestone 4, issues
+  [#36](https://github.com/drawmeanelephant/gostalgia/issues/36)–[#39](https://github.com/drawmeanelephant/gostalgia/issues/39)).
 - **No process supervision or log capture yet:** `proc/list` returns
   `process.Info` snapshots (including `exit_code`, timing, and error state) over
   IPC, but `gctl ps` and shell `ps` do not yet render exit codes; exited
@@ -71,8 +75,8 @@ go run ./cmd/gctl --root /tmp/gs status      # terminal 2
 - **IPC observability is operator-only and metadata-only:** one subscription
   per connection; history retains 256 events in memory, not a durable security
   audit. Queue drops and runtime epochs explicitly signal resynchronization.
-  Live shell/Task Manager presentation remains scheduled for [#33](https://github.com/drawmeanelephant/gostalgia/issues/33);
-  distinct external-app identities remain [#35](https://github.com/drawmeanelephant/gostalgia/issues/35).
+  Live shell/Task Manager presentation remains scheduled for [#33](https://github.com/drawmeanelephant/gostalgia/issues/33).
+  Scoped app credentials do not grant access to the operator trail.
 - **Windows filesystem metadata:** directory mtimes are advisory on Windows
   (OS-level API inconsistency; see `docs/filesystem.md`). Deep platform
   behavior beyond the CI suite is scheduled for host integration ([#44](https://github.com/drawmeanelephant/gostalgia/issues/44)).
@@ -93,9 +97,9 @@ SDK are merged and verified (`test/e2e`, `internal/experience/shell`,
 
 ### Milestone 1: 01: A welcoming terminal workspace
 
-- [ ] **[#20 Docs: reconcile the roadmap and security claims with the current implementation](https://github.com/drawmeanelephant/gostalgia/issues/20)** (active) — reconcile status.md, security.md, processes.md, and guides against merged SDK and process services.
-- [ ] **[#21 Experience: establish a coordinated Charm version and dependency baseline](https://github.com/drawmeanelephant/gostalgia/issues/21)** — evaluate coordinated Bubble Tea/Lip Gloss/Bubbles baseline without cgo.
-- [ ] **[#22 Experience: build a reusable Gostalgia visual language and component kit](https://github.com/drawmeanelephant/gostalgia/issues/22)** — tokens, panel borders, headers, tabs, dialogs, badges.
+- [x] **[#20 Docs: reconcile the roadmap and security claims with the current implementation](https://github.com/drawmeanelephant/gostalgia/issues/20)** — reconcile status.md, security.md, processes.md, and guides against merged SDK and process services.
+- [x] **[#21 Experience: establish a coordinated Charm version and dependency baseline](https://github.com/drawmeanelephant/gostalgia/issues/21)** — evaluate coordinated Bubble Tea/Lip Gloss/Bubbles baseline without cgo; pinned v1.3.10/v1.1.0/v1.0.0 with automated dependency fences.
+- [ ] **[#22 Experience: build a reusable Gostalgia visual language and component kit](https://github.com/drawmeanelephant/gostalgia/issues/22)** (active) — tokens, panel borders, headers, tabs, dialogs, badges.
 - [ ] **[#23 Experience: add a home screen, searchable launcher, and command palette](https://github.com/drawmeanelephant/gostalgia/issues/23)** — home screen, searchable app cards, keyboard command palette.
 - [ ] **[#24 Experience: add accessible terminal modes and layout regression coverage](https://github.com/drawmeanelephant/gostalgia/issues/24)** — monochrome, high-contrast, reduced-motion, Unicode/layout regression tests.
 
@@ -117,7 +121,7 @@ SDK are merged and verified (`test/e2e`, `internal/experience/shell`,
 
 ### Milestone 4: 04: Application isolation and trust
 
-- [ ] **[#35 Security: give external apps distinct authenticated identities and scoped grants](https://github.com/drawmeanelephant/gostalgia/issues/35)** — separate operator authority from app principals; lifecycle-bound tokens.
+- [x] **[#35 Security: give external apps distinct authenticated identities and scoped grants](https://github.com/drawmeanelephant/gostalgia/issues/35)** — separate operator authority from app principals; lifecycle-bound tokens.
 - [ ] **[#36 Apps: launch external Go applications over the environment protocol](https://github.com/drawmeanelephant/gostalgia/issues/36)** — external Go app execution, protocol compatibility, process tracking.
 - [ ] **[#37 Security: add app-private storage and scoped VFS grants](https://github.com/drawmeanelephant/gostalgia/issues/37)** — per-app private storage roots, scoped file-selection grants.
 - [ ] **[#38 Security: enforce platform-specific app execution and resource policies](https://github.com/drawmeanelephant/gostalgia/issues/38)** — host enforcement on macOS and Linux; honest unsupported reporting.
@@ -137,6 +141,8 @@ SDK are merged and verified (`test/e2e`, `internal/experience/shell`,
 
 | Date | Check | Result |
 |---|---|---|
+| 2026-10-05 | Merge latest main into IPC #32: preserve Charm baseline/dependency fences and #35 scoped principals/revocation with concurrent replies and events; add scoped event-access, pending-response revocation and event-disconnect cleanup regressions | Full build/vet/gofmt/race/pure-Go gate passes on macOS; three repeated IPC/security/e2e race runs pass |
+| 2026-10-06 | Security: distinct authenticated app identities and scoped grants (#35): Principal/TokenStore, operator vs app tokens, per-request validation, revocation on app exit/stop, CleanEnv secret scrubbing, socket e2e tests | Full gate green (vet, gofmt, -race, e2e); denied undeclared methods, stale token replay rejected, confused-deputy protection verified |
 | 2026-10-05 | IPC subscriptions/history/concurrent calls (#32): five repeated focused race runs; real-runtime event + private-document history checks; deterministic blocked socket writer, floods, malformed frames, authorization, cursor replay/epoch and cleanup regressions | `gofmt -l .` clean; `go build ./...`, `go vet ./...`, `go test -race ./...`, `CGO_ENABLED=0 go build ./...` pass on macOS; no new dependencies; platform adapters/CI unchanged |
 | 2026-10-05 | Charm shell + public capability-scoped SDK; one embedded-manifest Echo demo; spec read against implementation | Build/vet/gofmt/race green; pure-Go and Windows/Linux builds OK; real Bubble Tea socket integration + compiled CLI PTY smoke (echo, scoped identity, stop/relaunch, F2 shelf, exit/terminal restoration/runtime cleanup); no second demo built |
 | 2026-10-05 | FIFO regression (#16): `HostFS.Stat`/`ReadDir` no longer `os.Root.Open` special files — Lstat fallback for FIFOs, sockets, devices, symlinks; regression tests for `Stat`, `ReadDir`, and `ipc.Server.Close` with a `fs/list` handler in flight over a real socket | repro tests fail unfixed, pass fixed; full gate green (`vet`, `gofmt`, `-race`) |

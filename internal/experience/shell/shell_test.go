@@ -238,3 +238,15 @@ func TestBubbleTeaSocketAppLifecycle(t *testing.T) {
 		t.Fatal("Bubble Tea did not render the styled shell")
 	}
 }
+
+func TestCharmBaselineVersions(t *testing.T) {
+	if CharmBubbleTeaVersion != "v1.3.10" {
+		t.Errorf("Bubble Tea version = %s, want v1.3.10", CharmBubbleTeaVersion)
+	}
+	if CharmLipGlossVersion != "v1.1.0" {
+		t.Errorf("Lip Gloss version = %s, want v1.1.0", CharmLipGlossVersion)
+	}
+	if CharmBubblesVersion != "v1.0.0" {
+		t.Errorf("Bubbles version = %s, want v1.0.0", CharmBubblesVersion)
+	}
+}

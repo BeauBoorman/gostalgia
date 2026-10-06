@@ -457,3 +457,138 @@ func TestClientCancelWithoutDeadlineAbortsCall(t *testing.T) {
 		t.Fatalf("call after cancellation = %v, want a routed response", err)
 	}
 }
+
+func TestServerWithTokenStoreOperatorAndApp(t *testing.T) {
+	ts := security.NewTokenStore()
+	user := security.User{ID: "u-guest", Name: "guest"}
+	must(t, ts.RegisterOperator("op-tok-1", user))
+
+	appTok, err := ts.IssueAppToken("com.example.editor", 42, "sess-1", user, security.CapIPC, security.CapFileRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := NewRouter()
+	must(t, r.Handle("sys/whoami", func(ctx context.Context, req Request) (any, error) {
+		p := CallerPrincipal(ctx)
+		caps := Capabilities(ctx)
+		capList := []string{}
+		if caps != nil {
+			capList = caps.List()
+		}
+		return map[string]any{
+			"principal":    p.Kind,
+			"app_id":       p.AppID,
+			"process_id":   p.ProcessID,
+			"capabilities": capList,
+		}, nil
+	}))
+	must(t, r.Handle("sys/shutdown", func(ctx context.Context, req Request) (any, error) {
+		if err := RequireCap(ctx, security.CapShutdown); err != nil {
+			return nil, err
+		}
+		return map[string]bool{"shutdown": true}, nil
+	}))
+	must(t, r.Handle("fs/read", func(ctx context.Context, req Request) (any, error) {
+		if err := RequireCap(ctx, security.CapFileRead); err != nil {
+			return nil, err
+		}
+		return map[string]string{"content": "hello"}, nil
+	}))
+
+	srv := NewServer(ln, r, ts, slog.New(slog.NewTextHandler(discard{}, nil)))
+	defer srv.Close()
+	go srv.Serve()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// 1. Operator client has full authority.
+	opConn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	opClient, err := NewClient(opConn, "op-tok-1")
+	if err != nil {
+		t.Fatalf("operator auth failed: %v", err)
+	}
+	defer opClient.Close()
+
+	var opWhoami struct {
+		Principal string   `json:"principal"`
+		Caps      []string `json:"capabilities"`
+	}
+	if err := opClient.Call(ctx, "sys/whoami", nil, &opWhoami); err != nil {
+		t.Fatalf("operator whoami: %v", err)
+	}
+	if opWhoami.Principal != string(security.PrincipalKindOperator) {
+		t.Errorf("operator principal = %q, want operator", opWhoami.Principal)
+	}
+	var shutOut map[string]bool
+	if err := opClient.Call(ctx, "sys/shutdown", nil, &shutOut); err != nil {
+		t.Errorf("operator shutdown denied: %v", err)
+	}
+
+	// 2. App client has scoped grants and app identity.
+	appConn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	appClient, err := NewClient(appConn, appTok)
+	if err != nil {
+		t.Fatalf("app auth failed: %v", err)
+	}
+	defer appClient.Close()
+
+	var appWhoami struct {
+		Principal string   `json:"principal"`
+		AppID     string   `json:"app_id"`
+		ProcessID int32    `json:"process_id"`
+		Caps      []string `json:"capabilities"`
+	}
+	if err := appClient.Call(ctx, "sys/whoami", nil, &appWhoami); err != nil {
+		t.Fatalf("app whoami: %v", err)
+	}
+	if appWhoami.Principal != string(security.PrincipalKindApp) {
+		t.Errorf("app principal = %q, want app", appWhoami.Principal)
+	}
+	if appWhoami.AppID != "com.example.editor" || appWhoami.ProcessID != 42 {
+		t.Errorf("app identity = %s / %d", appWhoami.AppID, appWhoami.ProcessID)
+	}
+
+	// App can call fs/read (granted).
+	var fsOut map[string]string
+	if err := appClient.Call(ctx, "fs/read", nil, &fsOut); err != nil {
+		t.Fatalf("app fs/read denied: %v", err)
+	}
+	if fsOut["content"] != "hello" {
+		t.Errorf("fsOut content = %q", fsOut["content"])
+	}
+
+	// App CANNOT call sys/shutdown (denied, not in manifest/grants).
+	if err := appClient.Call(ctx, "sys/shutdown", nil, nil); err == nil {
+		t.Fatal("app call to sys/shutdown succeeded, want permission denied")
+	}
+
+	// 3. Stale credential revocation on app exit/stop.
+	ts.RevokeProcess(42)
+
+	// In-flight or subsequent call on the existing connection must fail as revoked.
+	if err := appClient.Call(ctx, "fs/read", nil, nil); err == nil {
+		t.Fatal("call on revoked credential succeeded, want error")
+	}
+
+	// New connection handshake with the revoked token must fail auth.
+	staleConn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer staleConn.Close()
+	if _, err := NewClient(staleConn, appTok); err == nil {
+		t.Fatal("handshake with revoked token succeeded, want error")
+	}
+}

@@ -48,15 +48,36 @@ synchronously retract its own route.
 
 ## Authentication
 
-The first request on every connection must be `auth` with the environment
-token (`{"id":1,"method":"auth","params":{"token":"..."}}`). The token lives in
-`runtime.json` (mode 0600 on unix; on Windows the mode does not map to an
-ACL — the file inherits the environment directory's permissions) under the
-environment root. Authenticated connections receive the admin capability set.
+The first request on every connection must be `auth` with either the operator
+environment token or a scoped application token
+(`{"id":1,"method":"auth","params":{"token":"..."}}`).
 The handshake and each socket write have a five-second timeout.
 
-This protects against accidental cross-user access only. It is local trust,
-not a security boundary — see security.md.
+- **Operator connections:** The operator token lives in `runtime.json` (mode
+  0600 on unix; on Windows the mode does not map to an ACL — the file inherits
+  the environment directory's permissions) under the environment root.
+  Authenticated operator connections receive the `admin` capability set and
+  operator principal identity.
+- **Application connections:** When an application is launched, the runtime
+  generates a distinct, cryptographically random token bound to the application
+  identity, process ID, session ID, and declared manifest capability grants.
+  App tokens are never written to `runtime.json`, leaked to process listings,
+  or exposed in child environments.
+- **Continuous validation & lifecycle revocation:** The IPC server validates
+  connection credentials against the token store before dispatching each request
+  and before writing each response or event notification. When
+  an application stops or exits, its credentials are immediately revoked.
+  Subsequent requests on existing connections are rejected with
+  `unauthorized: credential revoked` and the connection is closed. Responses
+  still pending at revocation are rejected too, but already-dispatched handler
+  side effects cannot be rolled back. Event delivery with an invalid credential
+  closes the connection and removes its subscription. New
+  connection attempts with stale tokens fail handshake with `unauthorized: token
+  revoked`.
+
+This protects against accidental cross-user access and enforces least-privilege
+grants between applications. Arbitrary external code remains untrusted until OS
+sandbox enforcement is implemented — see security.md.
 
 ## Method namespaces
 
@@ -214,6 +235,9 @@ concurrent publish/cancel, subscription limits, and structural redaction.
 `internal/ipc` tests exercise simultaneous slow/fast calls and events, event
 floods with slow consumers, disconnect/replay/epoch changes, malformed frames,
 request limits, authorization, and shutdown with a deterministically blocked
-event writer. `test/e2e` boots the real runtime, subscribes to app lifecycle
+event writer. Scoped-token integration also checks operator-only event access,
+authenticated principal preservation, pending-response rejection on revocation,
+and subscription cleanup when an event credential is revoked.
+`test/e2e` boots the real runtime, subscribes to app lifecycle
 events, and checks that document contents and the runtime token never enter
 IPC history. Run these with `go test -race ./...`.

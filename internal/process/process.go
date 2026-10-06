@@ -18,8 +18,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -234,7 +236,9 @@ func (m *Manager) StartChild(ctx context.Context, spec Spec) (*Process, error) {
 	cmd := exec.CommandContext(procCtx, spec.Args[0], spec.Args[1:]...)
 	cmd.Dir = spec.Dir
 	if spec.Env != nil {
-		cmd.Env = spec.Env // nil inherits the host environment
+		cmd.Env = spec.Env
+	} else {
+		cmd.Env = CleanEnv()
 	}
 
 	p := &Process{done: make(chan struct{}), ctx: procCtx, cancel: cancel, cmd: cmd}
@@ -367,4 +371,32 @@ func (m *Manager) Count() int {
 		}
 	}
 	return n
+}
+
+// CleanEnv returns an explicit child process environment containing only
+// standard system execution variables (PATH, SYSTEMROOT, TMPDIR, etc.) and
+// explicit additions. This prevents wholesale inheritance of host secrets or
+// operator tokens by child processes.
+func CleanEnv(explicit ...string) []string {
+	allowlist := map[string]bool{
+		"PATH":        true,
+		"SYSTEMROOT":  true,
+		"WINDIR":      true,
+		"TMPDIR":      true,
+		"TEMP":        true,
+		"TMP":         true,
+		"HOME":        true,
+		"USERPROFILE": true,
+		"LANG":        true,
+		"LC_ALL":      true,
+	}
+	var out []string
+	for _, env := range os.Environ() {
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) > 0 && allowlist[strings.ToUpper(parts[0])] {
+			out = append(out, env)
+		}
+	}
+	out = append(out, explicit...)
+	return out
 }
