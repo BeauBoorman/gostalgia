@@ -320,6 +320,12 @@ builtin manifests are approved by compilation/registration.
 | `app.list` | `app/list` | none | array `{manifest,running,pid?}` |
 | `app.launch` | `app/launch` | `{"id":"com.example.counter"}` | `{id,pid}` |
 | `proc.stop` | `app/stop` | `{id}` (app ID string) | `{id,stopped:true}` |
+| `clipboard.read` | `clipboard/read` | `{"target?":"auto"}` | `{text,source}` |
+| `clipboard.write` | `clipboard/write` | `{"text":"...","target?":"auto"}` | `{written:true,bytes,source}` |
+| `clipboard.write` | `clipboard/clear` | none | `{cleared:true}` |
+| `hostfs.read` | `fs/list`, `fs/read` on shared mounts | path on shared mount | directory entries or file content |
+| `hostfs.write` | `fs/write`, `fs/save`, `fs/mkdir` on shared mounts | path on shared mount | write confirmation |
+| `net.egress` | `net/fetch` | `{"url":"...","method?":"GET","headers?":{},"body_base64?":""}` | `{status,headers,data_base64,size}` |
 | `shutdown` | `sys/shutdown` | `{reason?}` | `{stopping:true,reason}`; teardown may close connection |
 
 `sys/ping` returns `{pong:true,version}`. `session/whoami` returns

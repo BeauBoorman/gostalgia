@@ -62,6 +62,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	must(t, apps.Register(registry))
 	appMgr := app.NewManager(registry, procs, router, bus, log)
 
+	policyStore := security.NewPolicyStore(security.DefaultOperatorPolicy())
 	sctx := &service.Context{
 		Root:     root,
 		Version:  "test",
@@ -74,6 +75,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		Apps:     appMgr,
 		Sessions: sessions,
 		Token:    "test-token",
+		Policy:   policyStore,
 		BootedAt: time.Now(),
 		Shutdown: func(reason string) {},
 	}
@@ -82,6 +84,8 @@ func newTestEnv(t *testing.T) *testEnv {
 	must(t, sm.Register(NewSys()))
 	must(t, sm.Register(NewProc()))
 	must(t, sm.Register(NewFS()))
+	must(t, sm.Register(NewClipboard()))
+	must(t, sm.Register(NewNet()))
 	must(t, sm.StartAll(context.Background()))
 	t.Cleanup(func() { _ = sm.StopAll(context.Background()) })
 	// Mirror the runtime: a default user session exists.
@@ -145,8 +149,8 @@ func TestSysStatus(t *testing.T) {
 	if status.Version != "test" {
 		t.Errorf("version = %q, want test", status.Version)
 	}
-	if len(status.Services) != 3 {
-		t.Errorf("services = %d, want 3", len(status.Services))
+	if len(status.Services) != 5 {
+		t.Errorf("services = %d, want 5", len(status.Services))
 	}
 	if len(status.Apps) != len(apps.Manifests()) {
 		t.Errorf("apps count = %d, want %d", len(status.Apps), len(apps.Manifests()))

@@ -54,6 +54,12 @@ func (v *VFS) SetGrants(gs *GrantStore) {
 
 // CheckAccess checks whether appID is authorized to perform mode on envPath.
 func (v *VFS) CheckAccess(appID, envPath string, mode AccessMode) error {
+	if isShared, _, readOnly := v.SharedHostInfo(envPath); isShared {
+		if mode == AccessReadWrite && readOnly {
+			return &Error{Op: "access", Path: envPath, Code: ErrReadOnly, Message: "shared host mount is read-only"}
+		}
+		return nil
+	}
 	v.mu.RLock()
 	gs := v.grants
 	v.mu.RUnlock()
@@ -90,7 +96,8 @@ func (v *VFS) Mount(path string, f FS) error {
 	return nil
 }
 
-// Unmount removes the mount at path.
+// Unmount removes the mount at path. If the mounted filesystem implements
+// a Close method, it is closed to release backing OS resources.
 func (v *VFS) Unmount(path string) error {
 	name, err := Normalize(path)
 	if err != nil {
@@ -98,10 +105,14 @@ func (v *VFS) Unmount(path string) error {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if _, ok := v.mounts[name]; !ok {
+	fsys, ok := v.mounts[name]
+	if !ok {
 		return fmt.Errorf("vfs: nothing is mounted at %s", path)
 	}
 	delete(v.mounts, name)
+	if closer, ok := fsys.(interface{ Close() error }); ok {
+		_ = closer.Close()
+	}
 	return nil
 }
 
@@ -115,6 +126,46 @@ func (v *VFS) MountPoints() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// SharedHostMountInfo contains metadata for an active shared host folder mount.
+type SharedHostMountInfo struct {
+	MountPath string `json:"mount_path"`
+	HostPath  string `json:"host_path"`
+	ReadOnly  bool   `json:"read_only"`
+}
+
+// SharedHostMounts returns all active shared host folder mounts.
+func (v *VFS) SharedHostMounts() []SharedHostMountInfo {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	var list []SharedHostMountInfo
+	for mp, fsys := range v.mounts {
+		if sh, ok := fsys.(*SharedHostFS); ok {
+			list = append(list, SharedHostMountInfo{
+				MountPath: "/" + mp,
+				HostPath:  sh.RootPath(),
+				ReadOnly:  sh.readOnly,
+			})
+		}
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].MountPath < list[j].MountPath
+	})
+	return list
+}
+
+// SharedHostInfo reports whether envPath falls within an active shared host folder mount.
+func (v *VFS) SharedHostInfo(envPath string) (isSharedHost bool, hostPath string, readOnly bool) {
+	name, err := Normalize(envPath)
+	if err != nil {
+		return false, "", false
+	}
+	fsys, _, _ := v.resolveMount(name)
+	if sh, ok := fsys.(*SharedHostFS); ok {
+		return true, sh.RootPath(), sh.readOnly
+	}
+	return false, "", false
 }
 
 // Root returns the root filesystem (used for status reporting only).

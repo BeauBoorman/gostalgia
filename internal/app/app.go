@@ -173,6 +173,7 @@ type Manager struct {
 	bus     *events.Bus
 	tokens  *security.TokenStore
 	grants  *vfs.GrantStore
+	policy  *security.PolicyStore
 	log     *slog.Logger
 	mu      sync.Mutex
 	running map[string]*runningApp
@@ -216,6 +217,20 @@ func (m *Manager) SetTokenStore(tokens *security.TokenStore) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.tokens = tokens
+}
+
+// SetPolicyStore configures the operator policy store.
+func (m *Manager) SetPolicyStore(policy *security.PolicyStore) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.policy = policy
+}
+
+// PolicyStore returns the configured operator policy store.
+func (m *Manager) PolicyStore() *security.PolicyStore {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.policy
 }
 
 // TokenStore returns the token store.
@@ -560,6 +575,26 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest) (*process.Pr
 		cancel()
 		forget()
 		return nil, fmt.Errorf("app: resolve isolation for %s: %w", man.ID, pErr)
+	}
+
+	hasNetCap := false
+	for _, c := range man.Permissions {
+		if c == sdk.CapNetEgress {
+			hasNetCap = true
+			break
+		}
+	}
+	m.mu.Lock()
+	pStore := m.policy
+	m.mu.Unlock()
+	netAllowed := false
+	if pStore != nil && pStore.Get().Network.Enabled {
+		netAllowed = true
+	}
+	if hasNetCap && netAllowed {
+		policy.DenyNetwork = false
+	} else if policy.Isolation == platform.IsolationSandbox || policy.Isolation == platform.IsolationStrict {
+		policy.DenyNetwork = true
 	}
 
 	spec := process.Spec{

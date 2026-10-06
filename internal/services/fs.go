@@ -48,6 +48,9 @@ func (s *FSService) Start(ctx context.Context) error {
 		"fs/grant":        s.grant,
 		"fs/grant/revoke": s.grantRevoke,
 		"fs/grant/list":   s.grantList,
+		"hostfs/mount":    s.hostfsMount,
+		"hostfs/unmount":  s.hostfsUnmount,
+		"hostfs/list":     s.hostfsList,
 	} {
 		if err := s.ctx.Router.Handle(method, h); err != nil {
 			return err
@@ -58,6 +61,7 @@ func (s *FSService) Start(ctx context.Context) error {
 
 func (s *FSService) Stop(ctx context.Context) error {
 	s.ctx.Router.UnhandlePrefix("fs/")
+	s.ctx.Router.UnhandlePrefix("hostfs/")
 	return nil
 }
 
@@ -95,6 +99,22 @@ func (s *FSService) grantStore() (*vfs.GrantStore, error) {
 
 func (s *FSService) requireReadAccess(ctx context.Context, envPath string) error {
 	principal := ipc.CallerPrincipal(ctx)
+	if v, ok := s.ctx.VFS.(*vfs.VFS); ok {
+		if isShared, hostPath, _ := v.SharedHostInfo(envPath); isShared {
+			policy := security.DefaultOperatorPolicy()
+			if s.ctx.Policy != nil {
+				policy = s.ctx.Policy.Get()
+			}
+			if err := policy.CheckHostFS(hostPath, false); err != nil {
+				return err
+			}
+			if principal.IsApp() {
+				return ipc.RequireCap(ctx, security.CapHostFSRead)
+			}
+			return nil
+		}
+	}
+
 	if principal.IsApp() {
 		if vfs.IsAppPrivatePath(principal.AppID, envPath) {
 			return nil
@@ -110,6 +130,25 @@ func (s *FSService) requireReadAccess(ctx context.Context, envPath string) error
 
 func (s *FSService) requireWriteAccess(ctx context.Context, envPath string) error {
 	principal := ipc.CallerPrincipal(ctx)
+	if v, ok := s.ctx.VFS.(*vfs.VFS); ok {
+		if isShared, hostPath, readOnly := v.SharedHostInfo(envPath); isShared {
+			if readOnly {
+				return &vfs.Error{Op: "write", Path: envPath, Code: vfs.ErrReadOnly, Message: "shared host mount is read-only"}
+			}
+			policy := security.DefaultOperatorPolicy()
+			if s.ctx.Policy != nil {
+				policy = s.ctx.Policy.Get()
+			}
+			if err := policy.CheckHostFS(hostPath, true); err != nil {
+				return err
+			}
+			if principal.IsApp() {
+				return ipc.RequireCap(ctx, security.CapHostFSWrite)
+			}
+			return nil
+		}
+	}
+
 	if principal.IsApp() {
 		if vfs.IsAppPrivatePath(principal.AppID, envPath) {
 			return nil
@@ -715,4 +754,101 @@ func (s *FSService) grantList(ctx context.Context, req ipc.Request) (any, error)
 		grants = []vfs.Grant{}
 	}
 	return map[string]any{"grants": grants}, nil
+}
+
+func (s *FSService) hostfsMount(ctx context.Context, req ipc.Request) (any, error) {
+	principal := ipc.CallerPrincipal(ctx)
+	caps := ipc.Capabilities(ctx)
+	if !principal.IsOperator() && (caps == nil || !caps.Has(security.CapAdmin)) {
+		return nil, &vfs.Error{Op: "mount", Code: vfs.ErrPermission, Message: "permission denied: operator required"}
+	}
+
+	var p struct {
+		HostPath  string `json:"host_path"`
+		MountPath string `json:"mount_path"`
+		ReadOnly  bool   `json:"read_only"`
+	}
+	if err := ipc.DecodeParams(req.Params, &p); err != nil {
+		return nil, err
+	}
+	if p.HostPath == "" || p.MountPath == "" {
+		return nil, fmt.Errorf("params.host_path and params.mount_path are required")
+	}
+
+	policy := security.DefaultOperatorPolicy()
+	if s.ctx.Policy != nil {
+		policy = s.ctx.Policy.Get()
+	}
+	if err := policy.CheckHostFS(p.HostPath, !p.ReadOnly); err != nil {
+		return nil, err
+	}
+
+	v, ok := s.ctx.VFS.(*vfs.VFS)
+	if !ok {
+		return nil, fmt.Errorf("vfs does not support mounting")
+	}
+
+	sharedFS, err := vfs.NewSharedHost(p.HostPath, p.ReadOnly)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := v.Mount(p.MountPath, sharedFS); err != nil {
+		_ = sharedFS.Close()
+		return nil, err
+	}
+
+	return map[string]any{
+		"mounted":    true,
+		"mount_path": p.MountPath,
+		"host_path":  p.HostPath,
+		"read_only":  p.ReadOnly,
+	}, nil
+}
+
+func (s *FSService) hostfsUnmount(ctx context.Context, req ipc.Request) (any, error) {
+	principal := ipc.CallerPrincipal(ctx)
+	caps := ipc.Capabilities(ctx)
+	if !principal.IsOperator() && (caps == nil || !caps.Has(security.CapAdmin)) {
+		return nil, &vfs.Error{Op: "unmount", Code: vfs.ErrPermission, Message: "permission denied: operator required"}
+	}
+
+	var p struct {
+		MountPath string `json:"mount_path"`
+	}
+	if err := ipc.DecodeParams(req.Params, &p); err != nil {
+		return nil, err
+	}
+	if p.MountPath == "" {
+		return nil, fmt.Errorf("params.mount_path is required")
+	}
+
+	v, ok := s.ctx.VFS.(*vfs.VFS)
+	if !ok {
+		return nil, fmt.Errorf("vfs does not support mounting")
+	}
+
+	if err := v.Unmount(p.MountPath); err != nil {
+		return nil, err
+	}
+
+	return map[string]any{
+		"unmounted":  true,
+		"mount_path": p.MountPath,
+	}, nil
+}
+
+func (s *FSService) hostfsList(ctx context.Context, req ipc.Request) (any, error) {
+	if err := ipc.RequireCap(ctx, security.CapIPC); err != nil {
+		return nil, err
+	}
+
+	v, ok := s.ctx.VFS.(*vfs.VFS)
+	if !ok {
+		return map[string]any{"mounts": []any{}}, nil
+	}
+
+	return map[string]any{
+		"mounts": v.SharedHostMounts(),
+	}, nil
 }

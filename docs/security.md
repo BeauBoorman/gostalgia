@@ -41,8 +41,10 @@ Permission tokens (`security.Capabilities`) travel with IPC call contexts:
   handlers require `ipc` from callers while executing under the app's own
   grant. An operator invoking an app cannot lend it admin privileges (the
   confused-deputy boundary).
-- **Enforcement:** `ipc.RequireCap` guards filesystem read/write, process
-  list/stop, app list/launch/stop, and shutdown. SDK calls and app route
+- **Enforcement:** `ipc.RequireCap` guards filesystem read/write (`fs.read`/`fs.write`),
+  shared host folder access (`hostfs.read`/`hostfs.write`), process list/stop (`proc.list`/`proc.stop`),
+  app list/launch/stop (`app.list`/`app.launch`/`app.stop`), clipboard operations (`clipboard.read`/`clipboard.write`),
+  network egress (`net.egress`), and shutdown (`shutdown`). SDK calls and app route
   declaration/invocation require `ipc`. Because app `Call` and `Handle`
   adapters replace caller capabilities with manifest grants, **`RequireCap`
   does fail in production** if an app attempts an undeclared operation (for
@@ -137,11 +139,38 @@ in-process execution.
 #### Host security capabilities & diagnostics
 
 `platform.GetHostSecurityCapabilities()` probes live host enforcement mechanisms:
-- `sys/status` exposes the `security` capabilities block and live process isolation levels.
+- `sys/status` exposes the `security` capabilities block, live process isolation levels, and active operator policy.
 - `proc/info` and `proc/list` report the effective `isolation` level and active
   `policy` parameters for every process.
 - Process termination (`platform.KillProcessTree`) kills the entire process group
   (`SIGKILL` to `-pid`), ensuring no orphan descendant processes can escape.
+
+### Opt-in platform integration and operator policies
+
+Host integration adapters (clipboard, shared folders, network egress) default to
+strictly disabled/internal-only and require two distinct levels of authorization:
+1. **Application capability declaration:** The app must declare the corresponding
+   capability token (`clipboard.read`, `clipboard.write`, `hostfs.read`, `hostfs.write`,
+   or `net.egress`) in its manifest.
+2. **Explicit operator policy:** The operator must explicitly enable the integration
+   in `OperatorPolicy` (`internal/security.PolicyStore`), inspected via `sys/policy`
+   and updated by operator clients via `sys/policy/update`:
+   - **Clipboard (`clipboard.*`):** When disabled, clipboard reads and writes operate
+     purely within an internal, in-memory clipboard buffer. When enabled, incoming and
+     outgoing data is strictly sanitized (`platform.SanitizeClipboard`), stripping
+     terminal control sequences, DCS sequences, and OSC 52 sequences (which could hijack
+     the host terminal or exfiltrate clipboard state) before interacting with the host clipboard.
+   - **Shared host folders (`hostfs.*`):** Host paths cannot be accessed directly; they
+     must be explicitly mounted by an operator via `hostfs/mount`. Backed by `SharedHostFS`,
+     shared mounts use Go 1.24 `os.Root` confinement to guarantee that path traversals and
+     symlinks cannot escape the designated host folder root. If mounted read-only, all write
+     operations fail closed with `ErrReadOnly`.
+   - **Network egress (`net.egress`):** Outbound network access is disabled by default. When
+     enabled by policy, requests via `net/fetch` are checked against operator-configured host
+     whitelists (`allowed_hosts`), blacklists (`blocked_hosts`), port filters (`allowed_ports`),
+     and HTTPS-only transport requirements (`allow_insecure: false`). In addition, for external
+     sandboxed apps, host network access at the kernel/sandbox level is denied unless both the app
+     manifest grants `net.egress` and the operator policy permits network egress.
 
 ## Isolation levels — honest labels
 

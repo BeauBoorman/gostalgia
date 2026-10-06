@@ -24,6 +24,12 @@ const (
 	CapAppLaunch = "app.launch"
 	CapShutdown  = "shutdown"
 
+	CapClipboardRead  = "clipboard.read"
+	CapClipboardWrite = "clipboard.write"
+	CapHostFSRead     = "hostfs.read"
+	CapHostFSWrite    = "hostfs.write"
+	CapNetEgress      = "net.egress"
+
 	ModeInProc   = "inproc"
 	ModeExternal = "external"
 
@@ -103,7 +109,8 @@ func (m Manifest) Validate() error {
 	seen := make(map[string]bool)
 	for _, cap := range m.Permissions {
 		switch cap {
-		case CapIPC, CapFileRead, CapFileWrite, CapProcList, CapProcStop, CapAppList, CapAppLaunch, CapShutdown:
+		case CapIPC, CapFileRead, CapFileWrite, CapProcList, CapProcStop, CapAppList, CapAppLaunch, CapShutdown,
+			CapClipboardRead, CapClipboardWrite, CapHostFSRead, CapHostFSWrite, CapNetEgress:
 		default:
 			return fmt.Errorf("app: manifest %s: unknown or reserved permission %q", m.ID, cap)
 		}

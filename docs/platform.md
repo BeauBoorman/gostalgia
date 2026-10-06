@@ -10,18 +10,26 @@ abstract, kept deliberately thin.
 | IPC listener | unix domain socket (`$TMPDIR/gostalgia-<hash>.sock`, derived from the root to respect the 104-byte socket path limit) | loopback TCP, ephemeral port |
 | IPC dial | `unix://` scheme | `tcp://` scheme |
 | Shutdown signal set | `os.Interrupt`, `SIGTERM` | `os.Interrupt` only (Ctrl-C / console close) |
+| Host clipboard | Darwin: `pbcopy`/`pbpaste`; Linux: `wl-copy`/`xclip`/`xsel` | Pure Go Win32 API (`user32.dll` / `kernel32.dll`) |
+| Network adapter | Standard HTTP/Dialer client | Standard HTTP/Dialer client |
 
 Both are selected by build tags (`//go:build unix`, `//go:build windows`).
 Signals are the exception to portability, not an accident of it: the set of
 terminating signals a host delivers differs per platform, so the requested
-set lives behind build tags here. On Windows, termination paths other than
-Ctrl-C / console close (`taskkill /f`, job-object teardown) deliver no
-signal at all and give the process no callback — a **known gap** until
-platform parity and host integration ([#38](https://github.com/drawmeanelephant/gostalgia/issues/38),
-[#44](https://github.com/drawmeanelephant/gostalgia/issues/44)) add service/job-object
-integration; until then, Windows shutdown is graceful via Ctrl-C or IPC
-only. Everything else — filesystem, exec, clocks, randomness — is already
-portable in the standard library and is used directly.
+set lives behind build tags here.
+
+### Host clipboard integration and sanitization
+
+`platform.HostClipboardAdapter` provides host system clipboard access:
+- **macOS (`platform/clipboard_darwin.go`):** Executes `pbcopy` and `pbpaste` directly without intermediate shell scripts.
+- **Linux (`platform/clipboard_linux.go`):** Probes Wayland (`wl-copy`/`wl-paste`) and X11 (`xclip`/`xsel`) helpers cleanly.
+- **Windows (`platform/clipboard_windows.go`):** Directly invokes Win32 clipboard APIs via `syscall.NewLazyDLL` (`OpenClipboard`, `GetClipboardData`, `SetClipboardData`, `CloseClipboard`) with zero cgo and robust memory copying.
+- **Sanitization (`platform.SanitizeClipboard`):** Strips terminal escape codes, ANSI control codes, OSC 52 sequences (which could hijack the host terminal), DCS sequences, unprintable control characters, and invalid UTF-8 bytes, and enforces a 1 MiB payload ceiling.
+- **Internal fallback:** When host integration is disabled or unsupported, the clipboard service falls back to an in-memory clipboard store without interrupting user workflows.
+
+### Network egress adapter
+
+`platform.NetworkAdapter` provides outbound network transport (`platform/network.go`). In conjunction with `internal/services.NetService`, it enforces explicit `net.egress` capability checks and operator-configured destination whitelisting, port filtering, and HTTPS transport rules.
 
 ## Rules
 
