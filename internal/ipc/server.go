@@ -17,14 +17,39 @@ import (
 // maxLine bounds one protocol line (request or response).
 const maxLine = 4 << 20 // 4 MiB
 
+// Authenticator authenticates and validates connection credentials.
+type Authenticator interface {
+	// Authenticate verifies the handshake token, returning the bound principal and capabilities.
+	Authenticate(token string) (security.Principal, *security.Capabilities, error)
+	// Validate checks whether an already-authenticated token remains valid and unrevoked.
+	Validate(token string) error
+}
+
+type staticAuthenticator struct {
+	token string
+}
+
+func (s staticAuthenticator) Authenticate(token string) (security.Principal, *security.Capabilities, error) {
+	if subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) != 1 {
+		return security.Principal{}, nil, errors.New("unauthorized: bad token")
+	}
+	return security.OperatorPrincipal(security.User{Name: "operator"}), security.AdminCapabilities(), nil
+}
+
+func (s staticAuthenticator) Validate(token string) error {
+	if subtle.ConstantTimeCompare([]byte(token), []byte(s.token)) != 1 {
+		return errors.New("unauthorized: bad token")
+	}
+	return nil
+}
+
 // Server serves the router over a local listener. Every connection must
-// authenticate with the environment token before any other method is
-// accepted; authenticated connections receive the admin capability set
-// (trusted local peers — see docs/security.md).
+// authenticate before any other method is accepted; authenticated connections
+// receive the capabilities and principal bound to their credential.
 type Server struct {
 	ln     net.Listener
 	router *Router
-	token  string
+	auth   Authenticator
 	log    *slog.Logger
 
 	mu    sync.Mutex
@@ -33,11 +58,20 @@ type Server struct {
 	done  chan struct{}
 }
 
-func NewServer(ln net.Listener, router *Router, token string, log *slog.Logger) *Server {
+func NewServer(ln net.Listener, router *Router, auth any, log *slog.Logger) *Server {
+	var a Authenticator
+	switch v := auth.(type) {
+	case Authenticator:
+		a = v
+	case string:
+		a = staticAuthenticator{token: v}
+	default:
+		panic(fmt.Sprintf("ipc: unsupported auth type %T", auth))
+	}
 	return &Server{
 		ln:     ln,
 		router: router,
-		token:  token,
+		auth:   a,
 		log:    log,
 		conns:  map[net.Conn]struct{}{},
 		done:   make(chan struct{}),
@@ -131,19 +165,26 @@ func (s *Server) handleConn(conn net.Conn) {
 		_ = writeResponse(w, Response{ID: req.ID, Error: err.Error()})
 		return
 	}
-	if subtle.ConstantTimeCompare([]byte(p.Token), []byte(s.token)) != 1 {
-		s.log.Warn("ipc: rejected connection with bad token", "remote", conn.RemoteAddr())
-		_ = writeResponse(w, Response{ID: req.ID, Error: "unauthorized: bad token"})
+	principal, caps, err := s.auth.Authenticate(p.Token)
+	if err != nil {
+		s.log.Warn("ipc: rejected connection with invalid token", "remote", conn.RemoteAddr(), "err", err)
+		_ = writeResponse(w, Response{ID: req.ID, Error: err.Error()})
 		return
 	}
 	if err := writeResponse(w, Response{ID: req.ID, OK: true}); err != nil {
 		return
 	}
 
-	authCtx := WithCapabilities(ctx, security.AdminCapabilities())
+	authCtx := WithPrincipal(WithCapabilities(ctx, caps), principal)
+	token := p.Token
 	for {
 		req, err := readRequest(r)
 		if err != nil {
+			return
+		}
+		if err := s.auth.Validate(token); err != nil {
+			s.log.Warn("ipc: connection credential invalidated", "remote", conn.RemoteAddr(), "err", err)
+			_ = writeResponse(w, Response{ID: req.ID, Error: "unauthorized: credential revoked"})
 			return
 		}
 		resp := s.router.Dispatch(authCtx, req)

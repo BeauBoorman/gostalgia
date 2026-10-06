@@ -6,24 +6,32 @@ states exactly what is and is not protected.
 
 ## What exists
 
-### Users and sessions
+### Users, sessions, and principals
 
-`internal/security` defines `User`; `internal/session` opens and closes
-sessions. The runtime creates user `guest` and one session at boot. Process
-specs record the owning session and user.
+`internal/security` defines `User`, `PrincipalKind` (`operator` vs `app`),
+`Principal`, and `Credential`. `internal/session` opens and closes sessions.
+The runtime creates user `guest` and one session at boot. Process specs record
+the owning session and user. Every IPC connection resolves to a verified
+`Principal` attached to the request context.
 
 ### Capabilities and authority separation
 
 Permission tokens (`security.Capabilities`) travel with IPC call contexts:
 
-- **Operator socket clients:** Socket clients that complete the token
-  handshake (such as `gctl` and the interactive Charm shell) receive the
-  `admin` capability set. They act as trusted operator clients with full
-  system authority.
+- **Operator socket clients:** Socket clients that authenticate with the
+  operator token (such as `gctl` and the interactive Charm shell) receive the
+  `admin` capability set and operator principal identity. They act as trusted
+  operator clients with full system authority.
 - **Applications:** Applications declare their complete grants in JSON
   manifests; the runtime attaches those grants to the process context and
   process info. Unknown, duplicate, or operator-only `admin` declarations are
   rejected.
+- **Distinct application credentials:** When an app launches, the runtime
+  generates a distinct, cryptographically random app token via
+  `internal/security.TokenStore`, bound to the application's ID, process ID,
+  session, and declared manifest capabilities. App tokens are never written to
+  `runtime.json`, leaked to process listings (`proc/list`), or inherited by
+  child processes (`process.CleanEnv`).
 - **SDK capability scoping:** The public SDK exposes scoped `Call` and
   Init-only `Handle` adapters, not raw runtime managers. `Context.Call`
   replaces incoming capabilities with the app's manifest grant, and app
@@ -40,26 +48,39 @@ Permission tokens (`security.Capabilities`) travel with IPC call contexts:
   set. See [applications.md](applications.md) for method schemas and the exact
   capability table. Filesystem grants are currently service-wide, not per-path.
 
-### Transport authentication
+### Transport authentication and lifecycle revocation
 
-The local socket requires a token handshake (constant-time compare) before
-any other method. The token is generated per boot and stored in `runtime.json`
-(mode 0600 on unix; on Windows the mode does not map to an ACL — the file
-inherits the environment directory's permissions).
+The local socket requires a token handshake before any other method. The IPC
+server verifies tokens using `internal/security.TokenStore`:
+
+- **Operator authentication:** The operator token is generated per boot and
+  stored in `runtime.json` (mode 0600 on unix; on Windows the mode does not map
+  to an ACL — the file inherits the environment directory's permissions).
+- **App authentication:** App clients authenticate with their assigned app
+  token, establishing an app principal with strictly scoped capabilities.
+- **Per-request validation:** The server continuously validates token validity
+  on every request (`auth.Validate(token)`).
+- **Lifecycle revocation:** When an app stops or exits, its credential is
+  immediately revoked in `TokenStore`. In-flight and subsequent calls on active
+  connections fail with `unauthorized: credential revoked` and the connection
+  is terminated; reconnection attempts fail handshake with `unauthorized: token
+  revoked`. Stale credentials cannot be replayed.
+- **Child environment scrubbing:** `process.CleanEnv` prevents child processes
+  from inheriting host environment secrets or tokens.
 
 ## Isolation levels — honest labels
 
 | Level | Status |
 |---|---|
 | Logical isolation (namespaces, capabilities in-process) | **current** (SDK adapters enforce manifest grants; confused-deputy protection in place) |
-| Process isolation (child processes for apps) | **manager exists** (`internal/process`); external app lifecycle tracked in [#36](https://github.com/drawmeanelephant/gostalgia/issues/36); distinct app identity in [#35](https://github.com/drawmeanelephant/gostalgia/issues/35) |
+| Process isolation (child processes for apps) | **in progress** (distinct authenticated app identities and lifecycle revocation implemented in [#35](https://github.com/drawmeanelephant/gostalgia/issues/35); external app lifecycle tracked in [#36](https://github.com/drawmeanelephant/gostalgia/issues/36)) |
 | OS sandboxing (job objects, sandbox profiles, landlock, seccomp) | not started (tracked in [#38](https://github.com/drawmeanelephant/gostalgia/issues/38)) |
 | Host / kernel isolation | out of scope for the host runtime; separate VirelaiOS bring-up is tracked independently by the owner and not claimed here |
 
 ## What is NOT protected
 
 - **No OS sandbox.** A local attacker who can read `<root>/runtime.json` can
-  fully control the environment. The token is local authentication
+  fully control the environment. The operator token is local authentication
   convenience (prevents accidental cross-user access), not a security boundary.
 - **In-process memory sharing:** `inproc` applications share the runtime's
   address space. While SDK adapters enforce capability checks logically, a
@@ -74,7 +95,7 @@ inherits the environment directory's permissions).
 ## Roadmap
 
 Application isolation and trust is organized under Milestone 4:
-- Distinct authenticated app identities and scoped credentials ([#35](https://github.com/drawmeanelephant/gostalgia/issues/35)).
+- Distinct authenticated app identities and scoped credentials ([#35](https://github.com/drawmeanelephant/gostalgia/issues/35) — implemented).
 - External Go application lifecycle over the environment protocol ([#36](https://github.com/drawmeanelephant/gostalgia/issues/36)).
 - App-private storage and scoped VFS grants ([#37](https://github.com/drawmeanelephant/gostalgia/issues/37)).
 - Platform-specific app execution and resource policies on macOS/Linux ([#38](https://github.com/drawmeanelephant/gostalgia/issues/38)).
