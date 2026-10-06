@@ -5,14 +5,14 @@ package shell
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
-	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"gostalgia/internal/experience/theme"
+	"gostalgia/internal/experience/ui"
 )
 
 const maxTranscript = 400
@@ -43,10 +43,17 @@ type Model struct {
 	scroll        int
 	presentation  *appView
 	viewEpoch     uint64
+	kit           ui.Kit
 }
 
 func New(ctx context.Context, c Caller, closed <-chan struct{}) *Model {
-	return &Model{ctx: ctx, client: c, closed: closed, width: 80, height: 24, cwd: "/users/guest", transcript: []entry{
+	return NewWithTheme(ctx, c, closed, theme.Nostalgia(), ui.ANSI256)
+}
+
+// NewWithTheme makes appearance and color capability explicit. Plain rendering
+// is useful for snapshots and terminals without ANSI styling.
+func NewWithTheme(ctx context.Context, c Caller, closed <-chan struct{}, t theme.Theme, mode ui.ColorMode) *Model {
+	return &Model{ctx: ctx, client: c, closed: closed, kit: ui.New(t, mode), width: 80, height: 24, cwd: "/users/guest", transcript: []entry{
 		{"Welcome home. A familiar prompt. A whole new environment.", "accent"},
 		{"Type help to explore, or F2 to open your app shelf.", "muted"},
 	}}
@@ -284,69 +291,58 @@ func (m *Model) complete() {
 	}
 }
 
-var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?(\x07|\x1b\\)`)
-
-func safe(s string) string {
-	s = ansiRegex.ReplaceAllString(s, "")
-	return strings.Map(func(r rune) rune {
-		if r == '\n' {
-			return r
-		}
-		if r == '\t' {
-			return ' '
-		}
-		if unicode.IsControl(r) {
-			return -1
-		}
-		return r
-	}, s)
-}
+func safe(s string) string { return ui.Sanitize(s) }
 
 func dosPath(p string) string { return "C:" + strings.ReplaceAll(p, "/", `\`) }
 
-var (
-	frame         = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62"))
-	accent        = lipgloss.NewStyle().Foreground(lipgloss.Color("117")).Bold(true)
-	muted         = lipgloss.NewStyle().Foreground(lipgloss.Color("103"))
-	gold          = lipgloss.NewStyle().Foreground(lipgloss.Color("221")).Bold(true)
-	bad           = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62"))
-)
-
 func (m *Model) View() string {
-	w := max(1, m.width-4)
-	if m.width < 30 || m.height < 10 {
-		return lipgloss.NewStyle().MaxWidth(max(1, m.width)).MaxHeight(max(1, m.height)).Render("GOSTALGIA\nResize to 30×10 or larger.\nCtrl-C exits.")
+	if m.width <= 0 || m.height <= 0 {
+		return ""
 	}
-	header := accent.Render("G O S T A L G I A") + muted.Render("  /  PERSONAL COMPUTING, REIMAGINED")
-	badge := gold.Render("● ONLINE") + muted.Render("   guest · C: environment drive")
+	bounds := ui.Bounds{Width: m.width, Height: m.height}
+	if m.width < 30 || m.height < 10 {
+		return ui.Fit(m.kit.Text("GOSTALGIA\nResize to 30×10 or larger.\nCtrl-C exits."), bounds)
+	}
+	panelBounds := ui.Bounds{Width: m.width, Height: m.height - 1}
+	w := m.kit.PanelContentBounds(panelBounds).Width
+	active := 0
+	if m.shelf {
+		active = 1
+	}
+	tabs := m.kit.Tabs([]ui.Tab{{Label: "Home / Prompt"}, {Label: "App Shelf"}}, active, w)
+	badge := m.kit.Badge("ONLINE", theme.Success, w) + m.kit.Muted("   guest · C: environment drive")
 	bodyHeight := max(1, m.height-9)
 	var lines []string
 	if m.shelf {
-		lines = append(lines, gold.Render("APP SHELF"), muted.Render("Enter launch · F3 stop · F4 view · Esc prompt"))
-		visible := max(1, bodyHeight-6)
+		cardHeight := min(5, bodyHeight)
+		if cardHeight == 3 {
+			cardHeight = 2 // A compact card retains both name and status.
+		}
+		visible := max(1, (bodyHeight-2)/cardHeight)
 		start := max(0, m.selected-visible+1)
 		end := min(len(m.apps), start+visible)
 		for i := start; i < end; i++ {
 			a := m.apps[i]
-			state := "READY"
+			status, state := "READY", theme.Normal
 			if a.Running {
-				state = fmt.Sprintf("LIVE / PID %d", a.PID)
+				status, state = fmt.Sprintf("LIVE / PID %d", a.PID), theme.Success
 			}
-			line := fmt.Sprintf("%s  %s  v%s  [%s]", a.Manifest.Name, a.Manifest.ID, a.Manifest.Version, state)
-			if i == m.selected {
-				line = selectedStyle.Render("› " + safe(line))
-			} else {
-				line = "  " + safe(line)
-			}
-			lines = append(lines, line)
+			card := m.kit.AppCard(ui.AppCard{
+				Name: a.Manifest.Name, ID: a.Manifest.ID, Version: a.Manifest.Version,
+				Status: status, State: state, Focused: i == m.selected,
+			}, ui.Bounds{Width: w, Height: cardHeight})
+			lines = append(lines, strings.Split(card, "\n")...)
 		}
 		if len(m.apps) == 0 {
-			lines = append(lines, "No apps installed.")
+			notice := m.kit.Notice(ui.Notice{
+				Title: "No apps installed", Message: "Your shelf is ready for its first app.", State: theme.Empty,
+			}, ui.Bounds{Width: w, Height: bodyHeight})
+			lines = append(lines, strings.Split(notice, "\n")...)
 		}
 		if len(m.apps) > 0 {
 			a := m.apps[m.selected]
-			lines = append(lines, "", safe(a.Manifest.Description), muted.Render("GRANT  "+safe(strings.Join(a.Manifest.Permissions, " · "))))
+			lines = append(lines, m.kit.Muted(ui.Truncate(safe(a.Manifest.Description), w)),
+				m.kit.Muted(ui.Truncate("GRANT  "+safe(strings.Join(a.Manifest.Permissions, " · ")), w)))
 		}
 	} else if m.presentation != nil {
 		lines = m.viewLines(bodyHeight)
@@ -355,16 +351,18 @@ func (m *Model) View() string {
 		}
 	} else {
 		for _, e := range m.transcript {
-			line := lipgloss.NewStyle().Width(w).Render(e.text)
+			line := ui.Wrap(e.text, w)
 			switch e.kind {
 			case "accent":
-				line = accent.Render(line)
+				line = m.kit.Heading(line)
 			case "muted":
-				line = muted.Render(line)
+				line = m.kit.Muted(line)
 			case "command":
-				line = gold.Render(line)
+				line = m.kit.Heading(line)
 			case "error":
-				line = bad.Render(line)
+				line = m.kit.StatusText(line, theme.Error)
+			default:
+				line = m.kit.Text(line)
 			}
 			lines = append(lines, strings.Split(line, "\n")...)
 		}
@@ -378,38 +376,44 @@ func (m *Model) View() string {
 		start := max(0, end-bodyHeight)
 		lines = lines[start:end]
 	}
-	body := lipgloss.NewStyle().Width(w).Height(bodyHeight).MaxHeight(bodyHeight).MaxWidth(w).Render(strings.Join(lines, "\n"))
+	body := ui.Fit(strings.Join(lines, "\n"), ui.Bounds{Width: w, Height: bodyHeight})
 	promptPath := safe(dosPath(m.cwd))
 	if lipgloss.Width(promptPath) > w/2 {
-		runes := []rune(promptPath)
-		for len(runes) > 0 && lipgloss.Width(string(runes)) > max(1, w/2-4) {
-			runes = runes[1:]
-		}
-		promptPath = "C:…" + string(runes)
+		promptPath = "C:…" + ui.Tail(promptPath, max(1, w/2-3))
 	}
-	prompt := gold.Render(promptPath + "> ")
+	prompt := m.kit.Heading(promptPath + "> ")
 	if m.presentation != nil {
-		prompt += muted.Render("App view owns focus. Esc returns to prompt.")
+		prompt += m.kit.Muted("App view owns focus. Esc returns to prompt.")
 	} else if m.busy {
-		prompt += muted.Render("working…")
+		prompt += m.kit.Badge("", theme.Busy, max(0, w-lipgloss.Width(prompt)))
 	} else {
 		// Show a cursor-centered slice rather than allowing long pasted input to
 		// push the prompt off screen. Cell width, not bytes, controls the slice.
 		room := max(1, w-lipgloss.Width(prompt)-1)
-		before := m.input[:m.cursor]
-		for len(before) > 0 && lipgloss.Width(string(before)) > room/2 {
-			before = before[1:]
-		}
-		after := m.input[m.cursor:]
-		for len(after) > 0 && lipgloss.Width(string(before)+string(after)) > room {
-			after = after[:len(after)-1]
-		}
-		prompt += string(before) + selectedStyle.Render(" ") + string(after)
+		before := ui.Tail(string(m.input[:m.cursor]), room/2)
+		after := ui.Fit(string(m.input[m.cursor:]), ui.Bounds{Width: room - lipgloss.Width(before), Height: 1})
+		prompt += m.kit.Text(before) + m.kit.Selection(" ") + m.kit.Text(after)
 	}
-	footer := muted.Render("F2 APPS  ·  F4 VIEW  ·  TAB COMPLETE  ·  ↑↓ HISTORY  ·  Ctrl-C EXIT")
-	clip := lipgloss.NewStyle().MaxWidth(w).MaxHeight(1)
-	content := strings.Join([]string{clip.Render(header), clip.Render(badge), "", body, "", clip.Render(prompt)}, "\n")
-	return frame.Width(w).MaxWidth(m.width).Render(content) + "\n" + lipgloss.NewStyle().MaxWidth(m.width).Render(footer)
+	bindings := []ui.Binding{
+		{Key: "Ctrl-C", Help: "EXIT"}, {Key: "F2", Help: "APPS"},
+		{Key: "Tab", Help: "COMPLETE", Disabled: m.busy},
+		{Key: "↑↓", Help: "HISTORY", Disabled: m.busy}, {Key: "PgUp", Help: "SCROLL"},
+	}
+	if m.shelf {
+		bindings = []ui.Binding{
+			{Key: "Esc", Help: "PROMPT"}, {Key: "Enter", Help: "LAUNCH", Disabled: m.busy || len(m.apps) == 0},
+			{Key: "F3", Help: "STOP", Disabled: m.busy || len(m.apps) == 0}, {Key: "↑↓", Help: "SELECT", Disabled: m.busy},
+			{Key: "Ctrl-C", Help: "EXIT"},
+		}
+	} else if m.presentation != nil {
+		bindings = []ui.Binding{
+			{Key: "Esc", Help: "PROMPT"},
+			{Key: "Ctrl-C", Help: "EXIT"},
+		}
+	}
+	content := strings.Join([]string{tabs, ui.Truncate(badge, w), "", body, "", ui.Truncate(prompt, w)}, "\n")
+	return m.kit.Panel(ui.Panel{Title: "G O S T A L G I A  /  PERSONAL COMPUTING, REIMAGINED", Body: content},
+		panelBounds) + "\n" + m.kit.HelpBar(bindings, m.width)
 }
 
 // Run takes over the terminal, restoring it on every exit. Passing options is

@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gostalgia/internal/events"
@@ -260,7 +261,7 @@ type Manager struct {
 	history      []HistoryEntry
 	maxHistory   int
 	reapedCount  int
-	shuttingDown bool
+	shuttingDown atomic.Bool // Supervisors read this while holding process locks.
 	bus          *events.Bus
 	log          *slog.Logger
 }
@@ -883,9 +884,7 @@ func (m *Manager) Stop(id int32, timeout time.Duration) error {
 // StopAll stops every live process, best effort. Used at shutdown.
 // It sets shuttingDown = true to ensure no supervised processes restart.
 func (m *Manager) StopAll(timeout time.Duration) {
-	m.mu.Lock()
-	m.shuttingDown = true
-	m.mu.Unlock()
+	m.shuttingDown.Store(true)
 
 	for _, info := range m.List() {
 		if info.State != StateRunning && info.State != StateStarting && info.State != StateRestarting {
@@ -903,9 +902,7 @@ func (m *Manager) Shutdown(timeout time.Duration) {
 }
 
 func (m *Manager) isShuttingDown() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.shuttingDown
+	return m.shuttingDown.Load()
 }
 
 // Get returns a process by ID.

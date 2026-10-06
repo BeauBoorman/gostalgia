@@ -173,7 +173,9 @@ over seeded disk copies. See [applications.md](applications.md) for the spec.
 ### 3.6a Terminal experience (`internal/experience/shell`)
 
 Bubble Tea owns the event loop/terminal; Lip Gloss supplies the DOS-inspired
-styling. The shell talks through authenticated IPC, never via runtime managers.
+styling through explicit `internal/experience/theme` tokens and the reusable
+`internal/experience/ui` component kit ([experience.md](experience.md)).
+The shell talks through authenticated IPC, never via runtime managers.
 `gostalgia` (no args) or `gostalgia shell` owns boot → shell → graceful shutdown;
 `gostalgia boot` remains the headless entrypoint. Runtime logging accepts an
 `io.Writer` so the interactive host suppresses console logs without importing
@@ -245,16 +247,20 @@ arrive, their host bits get adapters here.
 
 **Core and SDK: standard library only. Experience: approved Charm family.**
 Bubble Tea v1.3.10, Lip Gloss v1.1.0, and Bubbles v1.0.0 are direct dependencies
-only in `internal/experience/shell` (Issue #21). They provide terminal
+only in `internal/experience/` (Issues #21–#22). They provide terminal
 lifecycle/event handling, styling, and reusable TUI components; no alternate UI
 framework or unrelated direct dependency is added. Their required transitive
 dependencies (terminal, ANSI, Unicode width, color/input helpers, and
 `golang.org/x/*`) are pinned by go.mod/go.sum and are part of this explicit
-exception, not hand-added runtime dependencies.
+exception, not hand-added runtime dependencies. Issue #22 promotes the already
+pinned `github.com/charmbracelet/x/ansi v0.11.6` and
+`github.com/muesli/termenv v0.16.0` to direct experience helpers for cell-aware
+layout and explicit renderer profiles, without adding modules or changing
+versions. The kit never probes the host's dark/light background.
 
 `go list -deps gostalgia/internal/runtime gostalgia/sdk` contains only Gostalgia
 and standard-library packages. Automated tests in `test/e2e/dependencies_test.go`
-enforce that boundary, verify that Charm is confined to `internal/experience/shell`,
+enforce that boundary, verify that Charm is confined to `internal/experience/`,
 ensure no standalone executables (e.g. gum, glow, vhs) are used, and lock the
 approved direct baseline. `gctl` and the SDK/demo dependency closures likewise
 remain stdlib-only. The repository shares one module, so module downloads include
