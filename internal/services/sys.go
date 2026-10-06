@@ -11,6 +11,7 @@ import (
 	"gostalgia/internal/security"
 	"gostalgia/internal/service"
 	"gostalgia/internal/session"
+	"gostalgia/internal/vfs"
 	"gostalgia/platform"
 )
 
@@ -34,13 +35,15 @@ func (s *SysService) Init(ctx *service.Context) error {
 func (s *SysService) Start(ctx context.Context) error {
 	s.lifetime = ctx
 	routes := map[string]ipc.Handler{
-		"sys/ping":       s.ping,
-		"sys/status":     s.status,
-		"sys/shutdown":   s.shutdown,
-		"app/list":       s.appList,
-		"app/launch":     s.appLaunch,
-		"app/stop":       s.appStop,
-		"session/whoami": s.whoami,
+		"sys/ping":          s.ping,
+		"sys/status":        s.status,
+		"sys/shutdown":      s.shutdown,
+		"sys/policy":        s.policyGet,
+		"sys/policy/update": s.policyUpdate,
+		"app/list":          s.appList,
+		"app/launch":        s.appLaunch,
+		"app/stop":          s.appStop,
+		"session/whoami":    s.whoami,
 	}
 	for method, h := range routes {
 		if err := s.ctx.Router.Handle(method, h); err != nil {
@@ -73,6 +76,7 @@ type statusData struct {
 	Apps          []app.Status                      `json:"apps"`
 	Sessions      []sessionInfo                     `json:"sessions"`
 	Security      platform.HostSecurityCapabilities `json:"security"`
+	Policy        security.OperatorPolicy           `json:"policy"`
 }
 
 type processInfo struct {
@@ -117,6 +121,10 @@ func (s *SysService) status(ctx context.Context, req ipc.Request) (any, error) {
 		Apps:          s.ctx.Apps.List(),
 		Sessions:      sessions,
 		Security:      platform.GetHostSecurityCapabilities(),
+		Policy:        security.DefaultOperatorPolicy(),
+	}
+	if s.ctx.Policy != nil {
+		data.Policy = s.ctx.Policy.Get()
 	}
 	if sess := s.defaultSession(); sess != nil {
 		data.Session = sess.ID
@@ -239,4 +247,31 @@ func (s *SysService) whoami(ctx context.Context, req ipc.Request) (any, error) {
 		data["session"] = sess.ID
 	}
 	return data, nil
+}
+
+func (s *SysService) policyGet(ctx context.Context, req ipc.Request) (any, error) {
+	if err := ipc.RequireCap(ctx, security.CapIPC); err != nil {
+		return nil, err
+	}
+	policy := security.DefaultOperatorPolicy()
+	if s.ctx != nil && s.ctx.Policy != nil {
+		policy = s.ctx.Policy.Get()
+	}
+	return policy, nil
+}
+
+func (s *SysService) policyUpdate(ctx context.Context, req ipc.Request) (any, error) {
+	principal := ipc.CallerPrincipal(ctx)
+	caps := ipc.Capabilities(ctx)
+	if !principal.IsOperator() && (caps == nil || !caps.Has(security.CapAdmin)) {
+		return nil, &vfs.Error{Op: "policy/update", Code: vfs.ErrPermission, Message: "permission denied: operator required"}
+	}
+	var newPolicy security.OperatorPolicy
+	if err := ipc.DecodeParams(req.Params, &newPolicy); err != nil {
+		return nil, err
+	}
+	if s.ctx != nil && s.ctx.Policy != nil {
+		s.ctx.Policy.Set(newPolicy)
+	}
+	return map[string]any{"updated": true, "policy": newPolicy}, nil
 }

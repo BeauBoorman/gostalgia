@@ -62,6 +62,7 @@ type Runtime struct {
 	//nolint:unused // reserved for multi-session support
 	Sessions *session.Manager
 	Services *service.Manager
+	Policy   *security.PolicyStore
 	User     security.User
 
 	svcCtx    *service.Context
@@ -181,6 +182,10 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 	rt.Apps.SetTokenStore(tokens)
 	rt.Apps.SetGrantStore(rt.VFS.Grants())
 
+	policyStore := security.NewPolicyStore(security.DefaultOperatorPolicy())
+	rt.Policy = policyStore
+	rt.Apps.SetPolicyStore(policyStore)
+
 	svcCtx := &service.Context{
 		Root:     root,
 		Version:  Version,
@@ -194,6 +199,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		Apps:     rt.Apps,
 		Sessions: rt.Sessions,
 		Tokens:   tokens,
+		Policy:   policyStore,
 		Token:    token,
 		BootedAt: time.Now(),
 	}
@@ -212,6 +218,8 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		services.NewFS(),
 		services.NewIPC(),
 		services.NewConfig(),
+		services.NewClipboard(),
+		services.NewNet(),
 	} {
 		if err := sm.Register(s); err != nil {
 			logFile.Close()

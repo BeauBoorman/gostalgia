@@ -244,17 +244,22 @@ func (s *TokenStore) Lookup(token string) (Credential, bool) {
 // their manifest; the runtime grants them to the application's call
 // context, and system services check them before acting.
 const (
-	CapIPC         = sdk.CapIPC
-	CapFileRead    = sdk.CapFileRead
-	CapFileWrite   = sdk.CapFileWrite
-	CapProcList    = sdk.CapProcList
-	CapProcStop    = sdk.CapProcStop
-	CapAppList     = sdk.CapAppList
-	CapAppLaunch   = sdk.CapAppLaunch
-	CapShutdown    = sdk.CapShutdown
-	CapConfigRead  = sdk.CapConfigRead
-	CapConfigWrite = sdk.CapConfigWrite
-	CapAdmin       = "admin"
+	CapIPC            = sdk.CapIPC
+	CapFileRead       = sdk.CapFileRead
+	CapFileWrite      = sdk.CapFileWrite
+	CapProcList       = sdk.CapProcList
+	CapProcStop       = sdk.CapProcStop
+	CapAppList        = sdk.CapAppList
+	CapAppLaunch      = sdk.CapAppLaunch
+	CapShutdown       = sdk.CapShutdown
+	CapConfigRead     = sdk.CapConfigRead
+	CapConfigWrite    = sdk.CapConfigWrite
+	CapClipboardRead  = sdk.CapClipboardRead
+	CapClipboardWrite = sdk.CapClipboardWrite
+	CapHostFSRead     = sdk.CapHostFSRead
+	CapHostFSWrite    = sdk.CapHostFSWrite
+	CapNetEgress      = sdk.CapNetEgress
+	CapAdmin          = "admin"
 )
 
 // Capabilities is a concurrency-safe permission set.
@@ -306,6 +311,11 @@ func AdminCapabilities() *Capabilities {
 		CapIPC, CapFileRead, CapFileWrite,
 		CapProcList, CapProcStop,
 		CapAppList, CapAppLaunch,
-		CapShutdown, CapConfigRead, CapConfigWrite, CapAdmin,
+		CapShutdown,
+		CapConfigRead, CapConfigWrite,
+		CapClipboardRead, CapClipboardWrite,
+		CapHostFSRead, CapHostFSWrite,
+		CapNetEgress,
+		CapAdmin,
 	)
 }
