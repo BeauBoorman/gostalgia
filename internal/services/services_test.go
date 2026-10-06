@@ -481,6 +481,82 @@ func TestProcInfoViaIPC(t *testing.T) {
 	}
 }
 
+func TestProcHistoryAndReapViaIPC(t *testing.T) {
+	env := newTestEnv(t)
+	admin := security.AdminCapabilities()
+
+	proc, err := env.ctx.Apps.Launch(context.Background(), "com.gostalgia.echo")
+	must(t, err)
+	pid := proc.ID()
+
+	// Stop the app
+	must(t, env.ctx.Apps.Stop("com.gostalgia.echo", time.Second))
+
+	// 1. proc/history with CapProcList
+	resp := env.call(context.Background(), admin, "proc/history", nil)
+	if !resp.OK {
+		t.Fatalf("proc/history failed: %s", resp.Error)
+	}
+	var history []process.HistoryEntry
+	must(t, json.Unmarshal(resp.Data, &history))
+	if len(history) == 0 {
+		t.Fatal("expected at least 1 history entry")
+	}
+	found := false
+	for _, h := range history {
+		if h.ID == pid {
+			found = true
+			if h.Name != "com.gostalgia.echo" {
+				t.Fatalf("history entry name = %s, want com.gostalgia.echo", h.Name)
+			}
+			if h.State != process.StateStopped {
+				t.Fatalf("history entry state = %s, want stopped", h.State)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("pid %d not found in proc/history", pid)
+	}
+
+	// 2. proc/history permission denial
+	noCap := security.NewCapabilities(security.CapIPC)
+	resp = env.call(context.Background(), noCap, "proc/history", nil)
+	if resp.OK {
+		t.Fatal("proc/history succeeded without CapProcList")
+	}
+
+	// 3. proc/reap permission denial
+	resp = env.call(context.Background(), noCap, "proc/reap", nil)
+	if resp.OK {
+		t.Fatal("proc/reap succeeded without CapProcStop")
+	}
+
+	// 4. proc/reap with admin
+	resp = env.call(context.Background(), admin, "proc/reap", nil)
+	if !resp.OK {
+		t.Fatalf("proc/reap failed: %s", resp.Error)
+	}
+	var reapRes struct {
+		Reaped int `json:"reaped"`
+	}
+	must(t, json.Unmarshal(resp.Data, &reapRes))
+	if reapRes.Reaped < 1 {
+		t.Fatalf("expected at least 1 process reaped, got %d", reapRes.Reaped)
+	}
+
+	// 5. proc/info for reaped process should return from history
+	resp = env.call(context.Background(), admin, "proc/info", map[string]any{"id": pid})
+	if !resp.OK {
+		t.Fatalf("proc/info for reaped process failed: %s", resp.Error)
+	}
+	var info process.HistoryEntry
+	must(t, json.Unmarshal(resp.Data, &info))
+	if info.ID != pid {
+		t.Fatalf("info.ID = %d, want %d", info.ID, pid)
+	}
+}
+
 func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {

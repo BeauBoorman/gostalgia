@@ -36,6 +36,12 @@ func (s *ProcService) Start(ctx context.Context) error {
 	if err := s.ctx.Router.Handle("proc/logs", s.logs); err != nil {
 		return err
 	}
+	if err := s.ctx.Router.Handle("proc/history", s.history); err != nil {
+		return err
+	}
+	if err := s.ctx.Router.Handle("proc/reap", s.reap); err != nil {
+		return err
+	}
 	return s.ctx.Router.Handle("proc/stop", s.stop)
 }
 
@@ -49,6 +55,21 @@ func (s *ProcService) list(ctx context.Context, req ipc.Request) (any, error) {
 		return nil, err
 	}
 	return s.ctx.Procs.List(), nil
+}
+
+func (s *ProcService) history(ctx context.Context, req ipc.Request) (any, error) {
+	if err := ipc.RequireCap(ctx, security.CapProcList); err != nil {
+		return nil, err
+	}
+	return s.ctx.Procs.History(), nil
+}
+
+func (s *ProcService) reap(ctx context.Context, req ipc.Request) (any, error) {
+	if err := ipc.RequireCap(ctx, security.CapProcStop); err != nil {
+		return nil, err
+	}
+	reaped := s.ctx.Procs.Reap()
+	return map[string]any{"reaped": reaped}, nil
 }
 
 func (s *ProcService) info(ctx context.Context, req ipc.Request) (any, error) {
@@ -65,10 +86,14 @@ func (s *ProcService) info(ctx context.Context, req ipc.Request) (any, error) {
 		return nil, fmt.Errorf("params.id is required")
 	}
 	proc, ok := s.ctx.Procs.Get(p.ID)
-	if !ok {
-		return nil, fmt.Errorf("process: no such process %d", p.ID)
+	if ok {
+		return proc.Info(), nil
 	}
-	return proc.Info(), nil
+	entry, ok := s.ctx.Procs.HistoryByID(p.ID)
+	if ok {
+		return entry, nil
+	}
+	return nil, fmt.Errorf("process: no such process %d", p.ID)
 }
 
 func (s *ProcService) logs(ctx context.Context, req ipc.Request) (any, error) {
