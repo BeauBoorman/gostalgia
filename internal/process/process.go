@@ -340,9 +340,9 @@ func (m *Manager) StartInProc(ctx context.Context, spec Spec, run func(p *Proces
 func (m *Manager) superviseInProc(p *Process, run func(p *Process) error) {
 	defer func() {
 		p.masterCancel()
-		close(p.done)
 		m.recordHistory(p)
 		m.autoReap()
+		close(p.done)
 	}()
 
 	firstRun := true
@@ -580,7 +580,7 @@ func DefaultChildEnv(spec Spec, id int32) []string {
 	}
 	for _, kv := range spec.Env {
 		k, _, ok := strings.Cut(kv, "=")
-		if !ok || isSensitiveEnvKey(k) {
+		if !ok || (isSensitiveEnvKey(k) && !strings.HasPrefix(strings.ToUpper(k), "GOSTALGIA_")) {
 			continue
 		}
 		env = append(env, kv)
@@ -678,9 +678,9 @@ func (m *Manager) StartChild(ctx context.Context, spec Spec) (*Process, error) {
 func (m *Manager) superviseChild(p *Process) {
 	defer func() {
 		p.masterCancel()
-		close(p.done)
 		m.recordHistory(p)
 		m.autoReap()
+		close(p.done)
 	}()
 
 	firstRun := true

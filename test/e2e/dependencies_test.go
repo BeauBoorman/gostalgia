@@ -70,8 +70,12 @@ func TestAppsAndSDKUseOnlyPublicBoundary(t *testing.T) {
 				t.Errorf("%s imports private runtime package %s", pkg, imp)
 			}
 			switch imp {
-			case "os", "os/exec", "syscall", "unsafe":
+			case "os/exec", "syscall", "unsafe":
 				t.Errorf("%s imports host/terminal API %s", pkg, imp)
+			case "os":
+				if strings.HasPrefix(pkg, "gostalgia/apps/") {
+					t.Errorf("%s imports host/terminal API %s", pkg, imp)
+				}
 			}
 		}
 	}

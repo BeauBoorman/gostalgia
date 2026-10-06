@@ -1,14 +1,19 @@
 # Gostalgia app SDK — authoring specification
 
 This is the spec for adding an app without consulting runtime internals. The
-public Go package is `gostalgia/sdk` (standard library only). Apps are currently
-**trusted, compiled-in Go packages**, one live instance per ID. JSON declares
-an app but cannot load arbitrary Go code or a host executable. No plugins,
-package installer, subprocess app launcher, or VirelaiOS userspace port yet.
+public Go package is `gostalgia/sdk` (standard library only). Applications run
+in one of two distinct modes:
+
+- `inproc`: **trusted, compiled-in Go packages**, one live instance per ID,
+  executing as supervised in-process goroutines.
+- `external`: **out-of-process external Go applications**, running as
+  supervised host child processes that communicate with the environment over
+  an authenticated NDJSON protocol via dedicated IPC endpoints.
 
 ## 1. Files and manifest
 
-Create `apps/<shortname>/manifest.json` and `apps/<shortname>/<shortname>.go`.
+Create `apps/<shortname>/manifest.json` and `apps/<shortname>/<shortname>.go` (for
+in-process builtins) or a standalone executable manifest (for external applications).
 The JSON file is the source of truth; embed it with `//go:embed manifest.json`.
 Exactly one JSON object, no unknown fields or trailing values:
 
@@ -17,9 +22,26 @@ Exactly one JSON object, no unknown fields or trailing values:
   "id": "com.example.counter",
   "name": "Counter",
   "version": "0.1.0",
+  "mode": "inproc",
   "entrypoint": "counter",
   "permissions": ["ipc"],
   "description": "Counts requests within one launch."
+}
+```
+
+For an external application:
+
+```json
+{
+  "id": "com.example.externalapp",
+  "name": "External App",
+  "version": "0.1.0",
+  "mode": "external",
+  "protocol_version": 1,
+  "executable": "/path/to/app-binary",
+  "args": ["--flag"],
+  "permissions": ["ipc", "fs.read"],
+  "description": "External Go application communicating over the environment protocol."
 }
 ```
 
@@ -28,7 +50,11 @@ Exactly one JSON object, no unknown fields or trailing values:
 | `id` | yes | Unique reverse-DNS, `^[a-z][a-z0-9]*(\.[a-z0-9-]+)+$`. Process name and route namespace. |
 | `name` | yes | Nonblank display name. |
 | `version` | yes | Numeric `MAJOR.MINOR.PATCH`, no prerelease suffix. |
-| `entrypoint` | yes | Unique compiled factory key, `^[a-z][a-z0-9_-]*$`. Not a host path. |
+| `mode` | no | Execution mode: `"inproc"` (default if omitted) or `"external"`. |
+| `protocol_version` | no (external: yes) | Integer protocol version for environment communication. Defaults to `1`. Required to be `1` for external mode. |
+| `entrypoint` | inproc: yes | Compiled factory key, `^[a-z][a-z0-9_-]*$`. Required for in-proc mode; forbidden for external mode. |
+| `executable` | external: yes | Host executable binary path or command name. Required for external mode; forbidden for in-proc mode. |
+| `args` | no | Array of string arguments passed to the executable when launched. Forbidden for in-proc mode. |
 | `permissions` | no | Array of distinct capability strings; omitted/empty means no grants. Unknown, duplicate, and `admin` permissions are rejected. |
 | `description` | no | App shelf description. |
 
@@ -163,6 +189,90 @@ own PID, or shut down the environment from a handler: cleanup would wait for
 that handler. To exit yourself, signal your Run loop to return rather than calling Stop on
 yourself. Control apps should return their handler before synchronously stopping
 another app, avoiding cycles of handlers waiting for one another.
+
+## 4a. External applications and `sdk.Serve`
+
+External applications run as distinct host child processes (`mode: "external"`)
+supervised by the process manager (`KindChild`). They interact with the
+Gostalgia environment over an authenticated NDJSON protocol via a dedicated,
+ephemeral IPC socket.
+
+```go
+package main
+
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+
+    "gostalgia/sdk"
+)
+
+type App struct{}
+
+func (a *App) Init(ctx *sdk.Context) error {
+    return ctx.Handle("greet", func(_ context.Context, raw json.RawMessage) (any, error) {
+        var p struct{ Name string `json:"name"` }
+        _ = sdk.DecodeParams(raw, &p)
+        return map[string]string{"message": fmt.Sprintf("Hello, %s!", p.Name)}, nil
+    })
+}
+
+func (a *App) Run(ctx context.Context) error {
+    <-ctx.Done()
+    return nil
+}
+
+func (a *App) Stop(ctx context.Context) error {
+    return nil
+}
+
+func main() {
+    if err := sdk.Serve(&App{}); err != nil {
+        panic(err)
+    }
+}
+```
+
+### Startup handshake and protocol negotiation
+
+When an external app launches:
+
+1. **Dedicated child socket listener:** The runtime creates a dedicated,
+   ephemeral listener (`unix:///...` domain socket on Unix, loopback TCP on
+   Windows) using `platform.ListenChildIPC`.
+2. **Environment variable injection:** The runtime generates an app token
+   bound to the app ID and declared permissions, and starts the child with a
+   sanitized environment containing:
+   - `GOSTALGIA_ENDPOINT`: dedicated child IPC listener address.
+   - `GOSTALGIA_APP_TOKEN`: scoped authentication token.
+   - `GOSTALGIA_APP_ID`: application identity.
+   - `GOSTALGIA_APP_PROTOCOL_VERSION`: negotiated protocol version (`1`).
+3. **Connection and authentication:** `sdk.Serve` connects to the endpoint,
+   sends an `auth` request with the token, and verifies authentication success.
+4. **Readiness and version handshake:** `sdk.Serve` invokes `app/ready` with
+   its `app_id` and `protocol_version`. If the protocol version does not match
+   the runtime's supported protocol (`ProtocolVersion = 1`), the handshake fails.
+5. **Startup timeout:** The supervisor enforces a strict startup timeout
+   (5 seconds). If the child fails to complete the handshake, crashes, or hangs
+   during startup, the supervisor kills the child process, cleans up the socket,
+   revokes credentials, and marks the app failed.
+
+### Supervision, logs, and containment
+
+- **Process supervision:** External apps are tracked in `proc/list` as
+  `kind: "child"` with complete PID, status, start/exit timestamps, and exit code.
+- **Log ring buffers:** Stdout and stderr from the child process are captured
+  into bounded diagnostic ring buffers. View logs and stream diagnostics via
+  `proc/logs` with optional line tailing or stream filtering (`stdout`/`stderr`).
+- **Crash and hang containment:** If an external app crashes, panics, exits, or
+  is terminated, the runtime cleans up the dedicated socket, revokes credentials,
+  retracts all registered `app/<id>/*` routes, and transitions the process to
+  `stopped` or `failed`.
+- **Presentation contract:** External applications implement `app.Present`
+  identically to in-proc apps. View snapshots and action dispatches flow over the
+  child socket, rendering inside the Charm shell without the external process
+  ever owning the host terminal.
 
 ## 5. Routes and scoped service calls
 

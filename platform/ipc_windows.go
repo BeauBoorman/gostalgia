@@ -19,3 +19,12 @@ func ListenIPC(root string) (net.Listener, string, error) {
 	}
 	return ln, "tcp://" + ln.Addr().String(), nil
 }
+
+// ListenChildIPC creates a dedicated loopback listener for a child application process.
+func ListenChildIPC(appID string) (net.Listener, string, error) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		return nil, "", fmt.Errorf("platform: listen child loopback: %w", err)
+	}
+	return ln, "tcp://" + ln.Addr().String(), nil
+}
