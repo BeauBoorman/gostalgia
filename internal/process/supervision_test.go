@@ -112,7 +112,7 @@ func TestStopAllOverMixedStates(t *testing.T) {
 	if m.Count() != 0 {
 		t.Errorf("live process count = %d, want 0", m.Count())
 	}
-	// Exited processes remain listed (reaping is backlog #3).
+	// Exited processes remain listed (reaping is tracked in Milestone 3, #31).
 	if got := len(m.List()); got != 3 {
 		t.Errorf("listed processes = %d, want 3 (no reaping yet)", got)
 	}

@@ -5,7 +5,7 @@ honestly missing, and the itemized milestone list. This is the **canonical
 tracker** — `docs/architecture.md` §5 summarizes the milestone arc and points
 here.
 
-- **Current position:** M1 complete · Charm experience + capability-scoped app SDK implemented · next core item: **#2 Child-process support end-to-end**
+- **Current position:** Milestone 1 in progress (Charm experience + capability-scoped app SDK merged; active item: [#20](https://github.com/drawmeanelephant/gostalgia/issues/20) documentation and security claims reconciliation) · foundation unblocks Milestones 1–5.
 - **Last verified:** 2026-10-05 (`go build` / `go vet` / `gofmt` clean · `go test -race ./...` green · test/package counts are CI's to report · pure-Go + Windows/Linux cross-builds OK · compiled Charm CLI exercised in a real PTY; terminal restored and runtime cleaned up · **CI green on ubuntu, macOS, and Windows** · repo: `drawmeanelephant/gostalgia`, private)
 
 Rules for touching this file:
@@ -27,13 +27,13 @@ Rules for touching this file:
 | Boot → services → session → app launch → IPC → clean shutdown | ✅ working | `test/e2e` (real socket, real auth, real shutdown) |
 | Service framework (dep-ordered start, rollback, reverse stop) | ✅ working | `internal/service` unit tests |
 | IPC: in-proc + socket transports, token handshake, NDJSON | ✅ working | `internal/ipc` tests + `gctl` manual/e2e |
-| Process model: in-proc lifecycle, child spawn/kill/exit-status | ✅ working | `internal/process` tests (self-exec child helper) |
+| Process model: in-proc lifecycle, child spawn/kill/exit-status | ✅ working | `internal/process` tests (self-exec child helper); `proc/list` returns `exit_code` over IPC |
 | VFS: env paths, host backend confined via `os.Root`, memfs `/tmp`, mounts | ✅ working | `testing/fstest` + escape/mount tests |
 | App SDK: embedded JSON manifest, Init/Run/Stop, scoped calls/routes, launch/stop | ✅ working | `sdk`, `internal/app`, services + shell socket lifecycle tests |
 | Charm shell: DOS-style prompt, app shelf, history/completion, VFS/process commands | ✅ working | `internal/experience/shell` (real Bubble Tea + authenticated IPC) |
 | Event bus (typed, synchronous, wildcard) | ✅ working | `internal/events` tests |
 | Config store (dotted paths, atomic persist) | ✅ working | `internal/config` tests |
-| Sessions exist; capability checks are tested but not enforced in production | ⚠️ honest state | `internal/session`, `internal/services` tests; every production dispatch path runs as admin — see `docs/security.md` |
+| Capability scoping: app Call/Handle adapters enforce manifest grants | ✅ working | SDK adapters replace caller grants; IPC methods reject unauthorized app calls; admin tokens remain trusted operator clients — see `docs/security.md` |
 | Cross-platform compile (darwin/linux/windows) | ✅ compiles | `GOOS=` builds in CI matrix |
 | Cross-platform behavior: CI runs the full test suite on ubuntu, macOS, and Windows runners | ✅ CI-green (Windows: full fstest skipped — see `docs/filesystem.md` metadata caveat; structural checks run everywhere) | `.github/workflows/ci.yml` |
 
@@ -50,91 +50,82 @@ go run ./cmd/gctl --root /tmp/gs status      # terminal 2
 
 ## Known gaps (honest list)
 
-- **No OS sandbox.** SDK calls/routes enforce manifest capability scoping and
-  prevent borrowing caller permissions, but apps still run in-process; malicious
-  Go code could bypass the SDK boundary. The socket token is local trust, not a
-  boundary. Details and roadmap: `docs/security.md`.
-- **No supervision yet:** exited processes stay listed (no reaping), no
-  restart policies, no per-process log capture.
-- **Single-user, single-session:** user `guest` is fixed; no login.
-- **Config has one layer** (system); per-user/per-app layers are backlog #5.
-- **IPC client is serialized** (one outstanding call per client); no
-  server-push notifications.
-- **Desktop, networking, packages, notifications** do not exist yet — by
-  design, they are behind the core milestones.
+- **No OS sandbox.** SDK calls and routes enforce manifest capability scoping
+  and prevent borrowing caller permissions, but apps still run in-process;
+  malicious Go code could bypass in-process checks. The socket token provides
+  local operator authentication, not an isolation boundary. Arbitrary external
+  apps remain trusted-only until platform sandboxing is implemented (Milestone 4,
+  issues [#35](https://github.com/drawmeanelephant/gostalgia/issues/35)–[#39](https://github.com/drawmeanelephant/gostalgia/issues/39)).
+- **No process supervision or log capture yet:** `proc/list` returns
+  `process.Info` snapshots (including `exit_code`, timing, and error state) over
+  IPC, but `gctl ps` and shell `ps` do not yet render exit codes; exited
+  processes remain listed indefinitely (no reaping), restart policies and
+  crash-loop protection are not yet implemented, and child stdout/stderr output
+  is not captured into bounded buffers (Milestone 3, issues
+  [#30](https://github.com/drawmeanelephant/gostalgia/issues/30)–[#33](https://github.com/drawmeanelephant/gostalgia/issues/33)).
+- **Single-user, single-session:** user `guest` is fixed; personal profiles and
+  session ownership are scheduled for Milestone 5 ([#41](https://github.com/drawmeanelephant/gostalgia/issues/41)).
+- **Config has one layer** (system); layered preferences are scheduled for
+  Milestone 2 ([#29](https://github.com/drawmeanelephant/gostalgia/issues/29)).
+- **IPC client is serialized** (one outstanding call per client); subscriptions
+  and multiplexing are scheduled for Milestone 3 ([#32](https://github.com/drawmeanelephant/gostalgia/issues/32)).
 - **Windows filesystem metadata:** directory mtimes are advisory on Windows
   (OS-level API inconsistency; see `docs/filesystem.md`). Deep platform
-  behavior beyond the CI suite (packaging, GUI paths) is still backlog #12.
+  behavior beyond the CI suite is scheduled for host integration ([#44](https://github.com/drawmeanelephant/gostalgia/issues/44)).
+- **VirelaiOS note:** Early VirelaiOS bring-up (toolchain, guest runner, kernel
+  integration) is separately owned by the repository owner and is not treated as
+  implemented; the shipped runtime remains standard-library Go on host platforms.
 
 ---
 
 ## The list
 
-Twenty tracked items. Each one produces runnable code with tests and updates
-the affected docs. Grouped under the milestone arc from `docs/architecture.md`
-§5.
+Twenty-five tracked issues across five GitHub milestones. Each one produces
+runnable code with tests and updates the affected docs.
 
-### M1 — Runtime vertical slice ✅ (2026-10-04)
+Foundational runtime vertical slice, Charm shell, and capability-scoped public
+SDK are merged and verified (`test/e2e`, `internal/experience/shell`,
+`internal/app`).
 
-- [x] **1. Vertical slice** — boot/config/log/events/services/VFS/IPC/
-  process/session/echo app/gctl, with unit + e2e tests and the docs set.
+### Milestone 1: 01: A welcoming terminal workspace
 
-### M2 — Hardened core (next up)
+- [ ] **[#20 Docs: reconcile the roadmap and security claims with the current implementation](https://github.com/drawmeanelephant/gostalgia/issues/20)** (active) — reconcile status.md, security.md, processes.md, and guides against merged SDK and process services.
+- [ ] **[#21 Experience: establish a coordinated Charm version and dependency baseline](https://github.com/drawmeanelephant/gostalgia/issues/21)** — evaluate coordinated Bubble Tea/Lip Gloss/Bubbles baseline without cgo.
+- [ ] **[#22 Experience: build a reusable Gostalgia visual language and component kit](https://github.com/drawmeanelephant/gostalgia/issues/22)** — tokens, panel borders, headers, tabs, dialogs, badges.
+- [ ] **[#23 Experience: add a home screen, searchable launcher, and command palette](https://github.com/drawmeanelephant/gostalgia/issues/23)** — home screen, searchable app cards, keyboard command palette.
+- [ ] **[#24 Experience: add accessible terminal modes and layout regression coverage](https://github.com/drawmeanelephant/gostalgia/issues/24)** — monochrome, high-contrast, reduced-motion, Unicode/layout regression tests.
 
-- [ ] **2. Child-process support end-to-end** — child specs, exec, stop/kill,
-  exit codes *(already partially in place: `StartChild` works and is tested —
-  this item finishes it: output capture into per-process ring buffers,
-  exit-code surfacing over IPC, `gctl` visibility)*.
-- [ ] **3. Process supervision** — restart policies, process reaping,
-  resource snapshots; `proc/list` grows history.
-- [x] **4. Native shell** — `gostalgia shell` (default command), Bubble Tea +
-  Lip Gloss experience, fs/ps/apps/launch/stop via authenticated IPC only;
-  app shelf, history, completion, bounded safe scrollback. `gsh` is not a
-  separate binary. See `docs/shell.md`.
-- [ ] **5. Config layering** — system + per-user + per-app layers, change
-  events, `gctl config get/set`.
-- [ ] **6. Event persistence** — event log on disk, `events/recent` endpoint
-  (audit trail), `gctl events`.
+### Milestone 2: 02: Everyday apps and documents
 
-### M3 — Application model v2
+- [ ] **[#25 Filesystem: add safe VFS document operations and recoverable saves](https://github.com/drawmeanelephant/gostalgia/issues/25)** — atomic saves, copy/move, trash/restore, bounded reads/writes.
+- [ ] **[#26 Apps: define a data/action presentation contract with one terminal owner](https://github.com/drawmeanelephant/gostalgia/issues/26)** — typed/versioned data and action contracts; shell alone owns rendering.
+- [ ] **[#27 Apps: build a VFS-backed Files browser](https://github.com/drawmeanelephant/gostalgia/issues/27)** — keyboard browsing, sorting, previews, file operations.
+- [ ] **[#28 Apps: build Notes with safe saving, dirty state, and crash recovery](https://github.com/drawmeanelephant/gostalgia/issues/28)** — editor, save/save-as, dirty indicator, crash recovery.
+- [ ] **[#29 Settings: add layered preferences, live updates, and an interactive settings screen](https://github.com/drawmeanelephant/gostalgia/issues/29)** — layered system/user/app precedence, live change events.
 
-- [ ] **7. IPC v2** — server-push notifications, subscriptions over the
-  socket, client multiplexing, method versioning.
-- [ ] **8. App model v2** — app directories in VFS, manifest lint, dependency
-  ordering between apps, `app/install` from a package file.
-- [ ] **9. Out-of-proc app launcher** — spawn `gostalgia-app` binaries, socket
-  handshake, capability negotiation; per-app call contexts enforced.
+### Milestone 3: 03: A live, observable computer
 
-### M4 — Desktop
+- [ ] **[#30 Processes: capture bounded child output and expose complete diagnostics](https://github.com/drawmeanelephant/gostalgia/issues/30)** — bounded stdout/stderr ring buffers, IPC diagnostics, gctl/shell presentation.
+- [ ] **[#31 Processes: add supervision, bounded history, and crash-loop protection](https://github.com/drawmeanelephant/gostalgia/issues/31)** — restart policies, crash-loop backoff, bounded exit history, reaping.
+- [ ] **[#32 IPC: add bounded event subscriptions, audit history, and responsive concurrent calls](https://github.com/drawmeanelephant/gostalgia/issues/32)** — non-blocking event subscriptions, multiplexing, audit trail.
+- [ ] **[#33 Experience: add a live Task Manager, notification center, and crash receipts](https://github.com/drawmeanelephant/gostalgia/issues/33)** — live process screen, toasts, notifications, crash receipts.
+- [ ] **[#34 Sessions: support detachable shells and persistent workspace state](https://github.com/drawmeanelephant/gostalgia/issues/34)** — attach/detach, persistent workspace state, headless survival.
 
-- [ ] **10. Window service API + toolkit spike** — design the window service
-  first, then spike Gio (pure Go) behind a `desktop/` adapter: one window,
-  lifecycle events on the bus.
-- [ ] **11. Terminal app** — line-mode first, on the window service.
+### Milestone 4: 04: Application isolation and trust
 
-### M5 — Platform parity
+- [ ] **[#35 Security: give external apps distinct authenticated identities and scoped grants](https://github.com/drawmeanelephant/gostalgia/issues/35)** — separate operator authority from app principals; lifecycle-bound tokens.
+- [ ] **[#36 Apps: launch external Go applications over the environment protocol](https://github.com/drawmeanelephant/gostalgia/issues/36)** — external Go app execution, protocol compatibility, process tracking.
+- [ ] **[#37 Security: add app-private storage and scoped VFS grants](https://github.com/drawmeanelephant/gostalgia/issues/37)** — per-app private storage roots, scoped file-selection grants.
+- [ ] **[#38 Security: enforce platform-specific app execution and resource policies](https://github.com/drawmeanelephant/gostalgia/issues/38)** — host enforcement on macOS and Linux; honest unsupported reporting.
+- [ ] **[#39 Security: add adversarial isolation tests, IPC fuzzing, and a threat model](https://github.com/drawmeanelephant/gostalgia/issues/39)** — adversarial test suite, protocol fuzzing, threat model documentation.
 
-- [ ] **12. Platform parity pass** — behavior tests (not just compilation) on
-  Windows/macOS/Linux, packaging smoke (zip / app bundle / deb).
+### Milestone 5: 05: A personal, extensible computer
 
-### M6 — Expansion
-
-- [ ] **13. Permission enforcement pass** — per-app VFS views (scoped roots),
-  cap checks on every fs/net route, deny-by-default, OS sandboxing where the
-  host offers it.
-- [ ] **14. Package format + manager** — signed tar+manifest packages;
-  install/remove/update/list/search.
-- [ ] **15. Network service** — env-level egress abstraction, per-app
-  `network` capability, allow/deny policy.
-- [ ] **16. Notification service** — event-driven toasts once the desktop
-  exists.
-- [ ] **17. Multi-session / multi-user** — login, per-session workspaces,
-  secrets on OS keychains.
-- [ ] **18. Desktop polish** — workspaces, window management, settings app,
-  file manager app.
-- [ ] **19. Security review** — threat model doc, fuzz the IPC parser,
-  re-examine the token/transport story.
-- [ ] **20. Release engineering** — versioned API, installers, update channel.
+- [ ] **[#40 Packages: add safe app installation, updates, rollback, and permission inspection](https://github.com/drawmeanelephant/gostalgia/issues/40)** — package format, verification, staging, rollback.
+- [ ] **[#41 Profiles: add personal workspace profiles and session ownership](https://github.com/drawmeanelephant/gostalgia/issues/41)** — personal profile identities, isolated preferences/workspaces.
+- [ ] **[#42 Documents: add permission-aware search, recents, favorites, and open-with handoff](https://github.com/drawmeanelephant/gostalgia/issues/42)** — bounded search, recent files, app handoff contracts.
+- [ ] **[#43 Recovery: add portable backup, export/import, and verified restore](https://github.com/drawmeanelephant/gostalgia/issues/43)** — versioned backup archive, verified staging and restore.
+- [ ] **[#44 Platform: add explicit opt-in clipboard, shared-folder, and network integration](https://github.com/drawmeanelephant/gostalgia/issues/44)** — capability-gated host adapters (clipboard, mounts, egress).
 
 ---
 

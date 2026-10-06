@@ -52,7 +52,7 @@ apps/              builtin applications: echo/ plus registration and
 platform/          host-specific listeners/dialers (build tags)
 test/e2e           boots a real environment and exercises it over a socket
 docs/              architecture + subsystem documents
-status.md          living status + the canonical backlog list
+status.md          living status + the canonical milestone tracker
 ```
 
 ## Conventions

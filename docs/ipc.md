@@ -78,7 +78,7 @@ a deadline aborts the in-flight call immediately instead of waiting out the
 default. An aborted call gives up mid-protocol — the response may still
 arrive later — so the client marks itself broken and further calls fail
 immediately; use a fresh client. Multiplexing and server-push notifications
-are planned (backlog #7 in status.md).
+are planned (Milestone 3, [#32](https://github.com/drawmeanelephant/gostalgia/issues/32)).
 
 ## Shutdown
 

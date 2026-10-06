@@ -52,7 +52,7 @@ See [docs/applications.md](docs/applications.md) for the complete app-writing
 spec, [docs/shell.md](docs/shell.md) for the terminal experience, and
 [docs/architecture.md](docs/architecture.md)
 for the design, decisions, milestone arc, and risks; subsystem details in
-[docs/](docs/); the itemized backlog and current state in
+[docs/](docs/); the itemized milestone tracker and current state in
 [status.md](status.md).
 
 ## Checks

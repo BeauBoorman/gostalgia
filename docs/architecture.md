@@ -125,9 +125,12 @@ distinct:
 | `child`  | Real host child process | `os/exec` + `CommandContext` | host process |
 
 The distinction is part of the API and of every listing/IPC payload. We do
-**not** pretend goroutines are OS processes. Supervision (restart policies,
-log capture, resource accounting) is deferred but the manager API anticipates
-it. `process/child` sandboxing is a later milestone.
+**not** pretend goroutines are OS processes. `proc/list` already returns
+complete `process.Info` snapshots (including `exit_code`, timing, state, and
+error) over IPC, though CLI/shell presentation and output capture into
+bounded buffers are tracked in Milestone 3. Supervision (restart policies,
+reaping, crash-loop protection) is tracked in Milestone 3, and platform-specific
+execution policies in Milestone 4.
 
 ### 3.4 IPC (`internal/ipc`)
 
@@ -195,13 +198,18 @@ Users and sessions exist as first-class environment concepts from day one
 permissions; they are attached to the IPC context and enforced at handler
 boundaries (`security.Capabilities.Has`). Read/write VFS methods, process
 listing/stopping, app listing/launching/stopping, and shutdown check their
-individual grants; app route publication/invocation checks `ipc`. See the
-complete permission table in [applications.md](applications.md).
+individual grants; app route publication/invocation checks `ipc`. App SDK
+`Call` and `Handle` adapters replace caller capabilities with the app's manifest
+grant, enforcing capability scoping and preventing confused-deputy attacks.
+Calls attempting undeclared capabilities fail in production. Trusted operator
+clients (`gctl`, shell) connect over the local socket with an admin token.
+See the complete permission table in [applications.md](applications.md).
 
-**Honesty clause:** this is *logical* isolation only. The auth token on the
-socket protects against accidental cross-user access, not a determined local
-attacker. OS-level sandboxing (job objects / sandbox profiles / landlock) is
-a later milestone and is not claimed until it exists.
+**Honesty clause:** this is *logical* isolation only while applications run
+in-process. The auth token on the socket protects against accidental
+cross-user access, not a determined local attacker. Process isolation and
+OS-level sandboxing (job objects / sandbox profiles / landlock / seccomp) are
+organized under Milestone 4 and are not claimed until implemented and verified.
 
 ### 3.9 Configuration (`internal/config`)
 
@@ -249,8 +257,9 @@ and standard-library packages. An automated test enforces that boundary.
 The repository shares one module, so module downloads include Charm, but
 headless runtime packages never import it. No cgo requirement; verify with
 `CGO_ENABLED=0 go build ./...`. JSON manifests and stdlib command parsing remain
-intentional. A future VirelaiOS port can omit the experience layer entirely;
-userspace porting is not implemented here.
+intentional. Early VirelaiOS bring-up (toolchain, guest runner, kernel
+integration) is separately owned by the repository owner and tracked outside
+this roadmap; no guest port is treated as implemented here.
 
 ### 4.2 JSON manifests, not YAML
 
@@ -285,35 +294,41 @@ will be designed first so the toolkit sits behind `desktop/` adapters.
 
 ## 5. Milestones
 
-Big-picture milestones (from the project brief, refined):
+The roadmap is structured into five sequential milestones:
 
-- **M0 Architecture** ✅ — this document + docs set.
-- **M1 Runtime vertical slice** ✅ — boot → config → services → session → one
-  app → IPC → clean shutdown.
-- **M2 Hardened core** — child processes with log capture; config layering;
-  event persistence; Charm shell over env APIs (**implemented**). Core hardening next.
-- **M3 Application model v2** — manifests with deps; out-of-proc apps over
-  the socket transport; per-app VFS views.
-- **M4 Desktop** — window service; pick toolkit; one window; terminal app.
-- **M5 Platform parity** — real behavior tests on all three OSes; packaging.
-- **M6 Expansion** — packages, networking, notifications, sandboxing.
+- **01: A welcoming terminal workspace** ([#20](https://github.com/drawmeanelephant/gostalgia/issues/20)–[#24](https://github.com/drawmeanelephant/gostalgia/issues/24)) —
+  evidence-based roadmap/security reconciliation, coordinated Charm dependency
+  baseline, reusable visual language, home/launcher navigation, and accessibility
+  fallbacks.
+- **02: Everyday apps and documents** ([#25](https://github.com/drawmeanelephant/gostalgia/issues/25)–[#29](https://github.com/drawmeanelephant/gostalgia/issues/29)) —
+  safe VFS document operations, decoupled UI presentation contract, Files browser,
+  Notes editor with crash recovery, and interactive layered settings.
+- **03: A live, observable computer** ([#30](https://github.com/drawmeanelephant/gostalgia/issues/30)–[#34](https://github.com/drawmeanelephant/gostalgia/issues/34)) —
+  bounded child-process stdout/stderr capture, process supervision and crash-loop
+  protection, non-blocking IPC event subscriptions, Task Manager, and detachable
+  workspaces.
+- **04: Application isolation and trust** ([#35](https://github.com/drawmeanelephant/gostalgia/issues/35)–[#39](https://github.com/drawmeanelephant/gostalgia/issues/39)) —
+  distinct app identity and credentials, external Go app lifecycle, app-private
+  storage and scoped grants, platform execution enforcement on macOS and Linux,
+  and adversarial isolation tests.
+- **05: A personal, extensible computer** ([#40](https://github.com/drawmeanelephant/gostalgia/issues/40)–[#44](https://github.com/drawmeanelephant/gostalgia/issues/44)) —
+  safe application packages and rollback, personal workspace profiles, document
+  search and open-with handoff, portable backup/restore, and explicit host bridges.
 
-The itemized implementation backlog — 20 tracked items, each producing
-runnable code with tests, with per-item status — lives in
-[status.md](../status.md), which is the canonical tracker. Keep that list and
-this section in sync: an item moves only when it boots, passes `go vet` and
-`go test -race ./...`, and its documentation is updated.
+The foundational runtime vertical slice (boot, services, VFS, IPC, inproc/child
+processes, initial Charm shell, Echo app SDK demo) is merged and verified.
+The canonical tracker for all 25 issues lives in [status.md](../status.md).
 
 ## 6. Risks
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Windowing toolkit choice (M4) | rework of desktop layer | design window service API first; toolkit behind adapter; spike Gio early |
+| Windowing toolkit choice | rework of desktop layer | design window service API first; toolkit behind adapter; spike Gio early |
 | Goroutine-vs-process confusion | wrong abstractions, false security | explicit `Kind` everywhere; docs state isolation level per kind |
 | Windows divergence (named pipes vs AF_UNIX, path quirks, case-insensitivity) | broken parity | platform/ adapters + CI matrix + behavior tests, not just compilation |
-| VFS symlink/TOCTOU escape | containment failure | confinement via `os.Root` now; per-app views + OS sandboxing in backlog #13; honest docs |
+| VFS symlink/TOCTOU escape | containment failure | confinement via `os.Root` now; per-app views in Milestone 4 (#37); honest docs |
 | Scope creep (kernel/browser envy) | nothing actually works | milestone gates: each must boot, run, and be tested before the next |
-| Single-runtime coupling (crash kills env) | reliability | supervisor/restart of core services in M2; out-of-proc apps in M3 |
+| Single-runtime coupling (crash kills env) | reliability | supervisor/restart in Milestone 3 (#31); out-of-proc apps in Milestone 4 (#36) |
 | Auth/token theater | false security claims | security doc states exactly what is and is not protected |
 
 ## 7. Testing strategy

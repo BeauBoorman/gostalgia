@@ -16,8 +16,9 @@ Signals are the exception to portability, not an accident of it: the set of
 terminating signals a host delivers differs per platform, so the requested
 set lives behind build tags here. On Windows, termination paths other than
 Ctrl-C / console close (`taskkill /f`, job-object teardown) deliver no
-signal at all and give the process no callback — a **known gap** until the
-platform-parity milestone (backlog #12) adds service/job-object
+signal at all and give the process no callback — a **known gap** until
+platform parity and host integration ([#38](https://github.com/drawmeanelephant/gostalgia/issues/38),
+[#44](https://github.com/drawmeanelephant/gostalgia/issues/44)) add service/job-object
 integration; until then, Windows shutdown is graceful via Ctrl-C or IPC
 only. Everything else — filesystem, exec, clocks, randomness — is already
 portable in the standard library and is used directly.

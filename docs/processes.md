@@ -27,8 +27,35 @@ States: `starting → running → stopping → stopped` (or `failed`).
 - `Manager.Stop(id, timeout)` — sets `stopping`, cancels, waits up to the
   timeout. A process that ignores its context leaves Stop with an error and is
   reported as failed at shutdown.
-- Exited processes remain listed (with state and exit status) until reaping —
-  reaping/supervision is future work (architecture.md, milestone 3).
+- Exited processes remain listed (with state, exit code, and error) until
+  reaping; supervision and crash-loop protection are tracked in Milestone 3
+  ([#31](https://github.com/drawmeanelephant/gostalgia/issues/31)).
+
+## Process inspection and IPC (`proc/list`)
+
+The `proc/list` IPC endpoint already returns complete `process.Info` snapshots,
+including:
+- `id`, `name`, `kind`, and `state`
+- `session` and `user` ownership
+- `caps` (granted capabilities snapshot)
+- `started_at` and `exited_at` timestamps
+- `error` (failure description)
+- `exit_code` (for both child processes and exited in-proc runs)
+
+### Diagnostics and presentation status
+
+While `exit_code` and lifecycle timestamps are returned over IPC today, they are
+distinct from current presentation and diagnostics:
+- **Presentation gap:** `gctl ps` and the shell `ps` command currently format
+  only PID, name, kind, state, and caps. Richer presentation and exit status
+  display are scheduled for Milestone 3 ([#30](https://github.com/drawmeanelephant/gostalgia/issues/30),
+  [#33](https://github.com/drawmeanelephant/gostalgia/issues/33)).
+- **Log capture gap:** Output from child processes (`stdout`/`stderr`) is not yet
+  captured into bounded ring buffers; capturing bounded logs and surfacing them
+  via IPC and tools is tracked in [#30](https://github.com/drawmeanelephant/gostalgia/issues/30).
+- **Supervision gap:** Processes are not yet automatically restarted or reaped,
+  and crash loops are not yet guarded; tracked in
+  [#31](https://github.com/drawmeanelephant/gostalgia/issues/31).
 
 ## Events
 

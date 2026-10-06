@@ -58,7 +58,7 @@ FS on Windows, including stdlib `os.DirFS`. Consequences:
 - `TestHostFSMatchesFstest` runs on unix; on Windows a structural
   consistency suite (`TestHostFSConsistency`) runs instead.
 - Directory `ModTime` values on Windows should be treated as advisory until
-  the OS behavior is worked around (backlog: revisit with #12).
+  the OS behavior is worked around (revisit with platform integration, [#44](https://github.com/drawmeanelephant/gostalgia/issues/44)).
 
 ## Mounts
 
