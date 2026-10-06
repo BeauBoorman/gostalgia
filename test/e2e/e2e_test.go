@@ -124,8 +124,8 @@ func TestFullEnvironmentLifecycle(t *testing.T) {
 	if status.User != "guest" || status.Session == "" {
 		t.Errorf("session state = user:%q session:%q", status.User, status.Session)
 	}
-	if len(status.Services) != 6 {
-		t.Errorf("services = %d, want 6", len(status.Services))
+	if len(status.Services) != 7 {
+		t.Errorf("services = %d, want 7", len(status.Services))
 	}
 
 	// 2. Talk to the launched application over the socket.

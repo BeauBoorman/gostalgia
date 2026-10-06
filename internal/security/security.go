@@ -252,6 +252,8 @@ const (
 	CapAppList        = sdk.CapAppList
 	CapAppLaunch      = sdk.CapAppLaunch
 	CapShutdown       = sdk.CapShutdown
+	CapConfigRead     = sdk.CapConfigRead
+	CapConfigWrite    = sdk.CapConfigWrite
 	CapClipboardRead  = sdk.CapClipboardRead
 	CapClipboardWrite = sdk.CapClipboardWrite
 	CapHostFSRead     = sdk.CapHostFSRead
@@ -310,6 +312,7 @@ func AdminCapabilities() *Capabilities {
 		CapProcList, CapProcStop,
 		CapAppList, CapAppLaunch,
 		CapShutdown,
+		CapConfigRead, CapConfigWrite,
 		CapClipboardRead, CapClipboardWrite,
 		CapHostFSRead, CapHostFSWrite,
 		CapNetEgress,

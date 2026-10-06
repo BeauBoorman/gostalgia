@@ -8,6 +8,7 @@ import (
 	"gostalgia/apps/echo"
 	"gostalgia/apps/files"
 	"gostalgia/apps/notes"
+	"gostalgia/apps/settings"
 	"gostalgia/sdk"
 )
 
@@ -27,10 +28,13 @@ func Register(r Registrar) error {
 	if err := r.RegisterBuiltin(files.Manifest(), files.Factory); err != nil {
 		return fmt.Errorf("apps: register %s: %w", files.ID, err)
 	}
+	if err := r.RegisterBuiltin(settings.Manifest(), settings.Factory); err != nil {
+		return fmt.Errorf("apps: register %s: %w", settings.ID, err)
+	}
 	return nil
 }
 
 // Manifests returns fresh builtin declarations, without filesystem access.
 func Manifests() []sdk.Manifest {
-	return []sdk.Manifest{echo.Manifest(), notes.Manifest(), files.Manifest()}
+	return []sdk.Manifest{echo.Manifest(), notes.Manifest(), files.Manifest(), settings.Manifest()}
 }

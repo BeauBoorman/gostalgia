@@ -49,15 +49,16 @@ type Options struct {
 
 // Runtime is a booted Gostalgia environment.
 type Runtime struct {
-	Root    string
-	Version string
-	Cfg     *config.Store
-	Bus     *events.Bus
-	Log     *slog.Logger
-	Router  *ipc.Router
-	VFS     *vfs.VFS
-	Procs   *process.Manager
-	Apps    *app.Manager
+	Root       string
+	Version    string
+	Cfg        *config.Store
+	LayeredCfg *config.LayeredStore
+	Bus        *events.Bus
+	Log        *slog.Logger
+	Router     *ipc.Router
+	VFS        *vfs.VFS
+	Procs      *process.Manager
+	Apps       *app.Manager
 	//nolint:unused // reserved for multi-session support
 	Sessions *session.Manager
 	Services *service.Manager
@@ -100,23 +101,28 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		return nil, err
 	}
 
-	cfg, err := config.Load(filepath.Join(root, "config", "system.json"))
+	layeredCfg, err := config.NewLayeredStore(
+		filepath.Join(root, "config", "system.json"),
+		filepath.Join(root, "vfs", "users", "guest", "config", "settings.json"),
+	)
 	if err != nil {
 		return nil, err
 	}
+	cfg := layeredCfg.SystemStore()
 
 	logFile, log := newLogger(root, opts.Verbose, opts.LogOutput)
 
 	rt := &Runtime{
-		Root:      root,
-		Version:   Version,
-		Cfg:       cfg,
-		Bus:       events.NewBusWithLogger(log),
-		Router:    ipc.NewRouter(),
-		logFile:   logFile,
-		done:      make(chan struct{}),
-		completed: make(chan struct{}),
-		User:      security.User{ID: "u-guest", Name: "guest"},
+		Root:       root,
+		Version:    Version,
+		Cfg:        cfg,
+		LayeredCfg: layeredCfg,
+		Bus:        events.NewBusWithLogger(log),
+		Router:     ipc.NewRouter(),
+		logFile:    logFile,
+		done:       make(chan struct{}),
+		completed:  make(chan struct{}),
+		User:       security.User{ID: "u-guest", Name: "guest"},
 	}
 	rt.Log = log
 
@@ -184,6 +190,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		Root:     root,
 		Version:  Version,
 		Config:   cfg,
+		Layered:  layeredCfg,
 		Events:   rt.Bus,
 		Log:      log,
 		Router:   rt.Router,
@@ -210,6 +217,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		services.NewProc(),
 		services.NewFS(),
 		services.NewIPC(),
+		services.NewConfig(),
 		services.NewClipboard(),
 		services.NewNet(),
 	} {

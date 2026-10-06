@@ -97,6 +97,7 @@ func (s *Store) Set(path string, v any) error {
 	if len(segs) == 0 || segs[0] == "" {
 		return errors.New("config: empty path")
 	}
+	oldData := cloneMap(s.data)
 	m := s.data
 	for i, seg := range segs[:len(segs)-1] {
 		next, ok := m[seg]
@@ -106,12 +107,64 @@ func (s *Store) Set(path string, v any) error {
 		}
 		nm, ok := next.(map[string]any)
 		if !ok {
+			s.data = oldData
 			return fmt.Errorf("config: %q conflicts with a non-object value", strings.Join(segs[:i+1], "."))
 		}
 		m = nm
 	}
 	m[segs[len(segs)-1]] = v
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		s.data = oldData
+		return err
+	}
+	return nil
+}
+
+// Delete removes the value at the dotted path and persists the document.
+// It returns true if the key existed and was deleted, false if not found.
+func (s *Store) Delete(path string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	segs := strings.Split(path, ".")
+	if len(segs) == 0 || segs[0] == "" {
+		return false, errors.New("config: empty path")
+	}
+	m := s.data
+	for _, seg := range segs[:len(segs)-1] {
+		next, ok := m[seg]
+		if !ok {
+			return false, nil
+		}
+		nm, ok := next.(map[string]any)
+		if !ok {
+			return false, nil
+		}
+		m = nm
+	}
+	last := segs[len(segs)-1]
+	if _, ok := m[last]; !ok {
+		return false, nil
+	}
+	oldData := cloneMap(s.data)
+	delete(m, last)
+	if err := s.saveLocked(); err != nil {
+		s.data = oldData
+		return false, err
+	}
+	return true, nil
+}
+
+// Reset clears all data in the store and persists the empty document.
+func (s *Store) Reset() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	oldData := s.data
+	s.data = map[string]any{}
+	if err := s.saveLocked(); err != nil {
+		s.data = oldData
+		return err
+	}
+	return nil
 }
 
 // Snapshot returns a deep copy of the document.
@@ -165,4 +218,20 @@ func lookup(m map[string]any, segs []string) (any, bool) {
 		}
 	}
 	return cur, true
+}
+
+func cloneMap(m map[string]any) map[string]any {
+	if m == nil {
+		return map[string]any{}
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return map[string]any{}
+	}
+	var out map[string]any
+	_ = json.Unmarshal(b, &out)
+	if out == nil {
+		out = map[string]any{}
+	}
+	return out
 }

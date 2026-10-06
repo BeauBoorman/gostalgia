@@ -53,6 +53,7 @@ type Context struct {
 	Root     string                // environment root directory
 	Version  string                // environment version
 	Config   *config.Store         // system configuration
+	Layered  *config.LayeredStore  // layered configuration store
 	Events   *events.Bus           // event bus
 	Log      *slog.Logger          // runtime logger
 	Router   *ipc.Router           // IPC router (in-proc + socket)

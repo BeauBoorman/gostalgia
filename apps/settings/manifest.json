@@ -1,0 +1,8 @@
+{
+  "id": "com.gostalgia.settings",
+  "name": "Settings",
+  "version": "0.1.0",
+  "entrypoint": "settings",
+  "permissions": ["ipc", "fs.read", "fs.write", "app.list", "config.read", "config.write"],
+  "description": "Preferences, theme selector, accessibility modes, shortcuts, and startup options."
+}

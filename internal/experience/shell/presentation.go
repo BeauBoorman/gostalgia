@@ -194,6 +194,9 @@ func (m *Model) updatePresentation(msg tea.Msg) tea.Cmd {
 		} else {
 			v.banner = ""
 		}
+		if msg.action && v.id == "com.gostalgia.settings" {
+			return m.fetchConfigCmd()
+		}
 	case viewTickMsg:
 		if v != nil && msg.epoch == v.epoch {
 			return m.checkView()
