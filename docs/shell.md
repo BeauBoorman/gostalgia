@@ -6,8 +6,9 @@ go run ./cmd/gostalgia shell --root /tmp/gs     # explicit root
 ```
 
 Use a real interactive terminal (30×10 minimum, 80×24 recommended). Bubble Tea
-owns its alternate screen and event loop; Lip Gloss draws a rounded indigo
-frame, icy-cyan wordmark, gold DOS prompt, and app shelf. `C:` is the
+owns its alternate screen and event loop; the shared [visual kit](experience.md)
+draws thick slate borders, cream surfaces, amber filled headers and DOS prompt,
+and focused app cards. `C:` is the
 **environment VFS**, not your host drive. Runtime logs stay in
 `<root>/logs/gostalgia.log`, not on top of the TUI. `--verbose` enables debug
 file logging. The shell owns the runtime: exit, Ctrl-C, or Ctrl-D restores the
@@ -44,6 +45,10 @@ JSON is preserved, not passed through path/quote parsing.
 - **F2**: switch between prompt and app shelf. **↑/↓** selects an app;
   **Enter** launches it; **F3** stops it; **Esc** returns to the prompt. The
   shelf displays description and manifest permissions.
+- **F4**: open the selected running app's data/action view. Tab/Shift-Tab moves
+  focus, Enter invokes an enabled action, and ↑/↓ selects an item. Esc cancels
+  busy work or returns to the prompt. F2 returns to the shelf. See
+  [the presentation contract](applications.md#7-dataaction-presentation-contract-version-1).
 - **↑/↓** at prompt: history (100 commands, current draft restored).
 - **Tab**: complete an unambiguous command or ID after launch/run/stop.
 - **Left/Right, Home/End, Ctrl-A/E**: move cursor. Backspace/Delete edits;
@@ -62,7 +67,7 @@ are clipped to the viewport and never require the core to know terminal size.
 
 ## Verification and boundaries
 
-`internal/experience/shell` is the only production package importing Charm.
+Charm is confined to `internal/experience/` (shell, theme, and component kit).
 The runtime, SDK, and Echo demo remain standard-library-only. Module
 transitives are documented in [architecture.md §4.1](architecture.md#41-dependency-policy).
 
@@ -95,12 +100,16 @@ Gostalgia adopts a coordinated **Charm v1** baseline pinned in `go.mod`:
    - **Harmonica** (spring physics animation): Transitive dependency of Bubbles (`v0.2.0`), available if subtle physics-based motion is needed without adding direct dependencies.
 
 3. **Dependency fences and boundaries**:
-   - Charm libraries are strictly restricted to `internal/experience/shell`.
+   - Charm libraries are strictly restricted to `internal/experience/`.
    - Core runtime (`internal/runtime`), public SDK (`sdk`), builtin applications (`apps/...`), and operator CLI (`cmd/gctl`) remain **100% standard-library-only**.
    - Dependency fences in `test/e2e/dependencies_test.go` enforce that:
      - `go list -deps gostalgia/internal/runtime gostalgia/sdk gostalgia/apps/... gostalgia/cmd/gctl` contains zero non-stdlib and zero Charm dependencies.
-     - `internal/experience/shell` is the sole package importing Charm libraries.
+     - Only packages under `internal/experience/` import Charm libraries.
      - Direct module dependencies in `go.mod` match the approved baseline.
+   - Issue #22 promotes two already pinned transitive helpers to direct
+     experience imports: `x/ansi v0.11.6` for grapheme cell layout and
+     `termenv v0.16.0` for explicit color profiles, not background probes.
+     See [experience.md](experience.md#dependencies-and-boundary).
 
 4. **No standalone host binaries or host shells**:
    - The shipped runtime does not require or execute standalone host tools or Charm binaries (`gum`, `glow`, `vhs`). All terminal rendering runs in-process via pure-Go libraries.
