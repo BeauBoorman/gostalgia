@@ -161,8 +161,9 @@ func (s *Server) Serve() error {
 		default:
 		}
 		if s.maxConns > 0 && len(s.conns) >= s.maxConns {
+			active := len(s.conns)
 			s.mu.Unlock()
-			s.log.Warn("ipc: connection budget exceeded, rejecting connection", "remote", conn.RemoteAddr(), "active", len(s.conns), "max", s.maxConns)
+			s.log.Warn("ipc: connection budget exceeded, rejecting connection", "remote", conn.RemoteAddr(), "active", active, "max", s.maxConns)
 			conn.Close()
 			continue
 		}
