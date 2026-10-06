@@ -23,17 +23,26 @@ const (
 	CapAppList   = "app.list"
 	CapAppLaunch = "app.launch"
 	CapShutdown  = "shutdown"
+
+	ModeInProc   = "inproc"
+	ModeExternal = "external"
+
+	ProtocolVersion = 1
 )
 
-// Manifest describes a compiled-in application. Permissions are the complete
+// Manifest describes an application. Permissions are the complete
 // grant, not hints. App manifests cannot request the operator-only admin cap.
 type Manifest struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Version     string   `json:"version"`
-	Entrypoint  string   `json:"entrypoint"`
-	Permissions []string `json:"permissions,omitempty"`
-	Description string   `json:"description,omitempty"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	Version         string   `json:"version"`
+	Entrypoint      string   `json:"entrypoint,omitempty"`
+	Mode            string   `json:"mode,omitempty"`
+	Executable      string   `json:"executable,omitempty"`
+	Args            []string `json:"args,omitempty"`
+	ProtocolVersion int      `json:"protocol_version,omitempty"`
+	Permissions     []string `json:"permissions,omitempty"`
+	Description     string   `json:"description,omitempty"`
 }
 
 var (
@@ -53,8 +62,26 @@ func (m Manifest) Validate() error {
 	if !versionPattern.MatchString(m.Version) {
 		return fmt.Errorf("app: manifest %s: version must be MAJOR.MINOR.PATCH", m.ID)
 	}
-	if !entryPattern.MatchString(m.Entrypoint) {
-		return fmt.Errorf("app: manifest %s: entrypoint must match %s", m.ID, entryPattern)
+	if m.ProtocolVersion < 0 || (m.ProtocolVersion > 0 && m.ProtocolVersion != ProtocolVersion) {
+		return fmt.Errorf("app: manifest %s: unsupported protocol version %d", m.ID, m.ProtocolVersion)
+	}
+	switch m.Mode {
+	case "", ModeInProc:
+		if !entryPattern.MatchString(m.Entrypoint) {
+			return fmt.Errorf("app: manifest %s: entrypoint must match %s", m.ID, entryPattern)
+		}
+		if m.Executable != "" {
+			return fmt.Errorf("app: manifest %s: executable is not permitted for inproc mode", m.ID)
+		}
+	case ModeExternal:
+		if strings.TrimSpace(m.Executable) == "" {
+			return fmt.Errorf("app: manifest %s: executable is required for external mode", m.ID)
+		}
+		if m.Entrypoint != "" && !entryPattern.MatchString(m.Entrypoint) {
+			return fmt.Errorf("app: manifest %s: entrypoint must match %s", m.ID, entryPattern)
+		}
+	default:
+		return fmt.Errorf("app: manifest %s: unknown mode %q", m.ID, m.Mode)
 	}
 	seen := make(map[string]bool)
 	for _, cap := range m.Permissions {

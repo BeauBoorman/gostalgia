@@ -8,6 +8,7 @@ package platform
 import (
 	"fmt"
 	"net"
+	"os"
 	"strings"
 )
 
@@ -22,5 +23,12 @@ func DialIPC(endpoint string) (net.Conn, error) {
 		return net.Dial("tcp", strings.TrimPrefix(endpoint, "tcp://"))
 	default:
 		return nil, fmt.Errorf("platform: unknown endpoint scheme %q", endpoint)
+	}
+}
+
+// RemoveChildSocket cleans up a child socket file if the endpoint is a Unix domain socket.
+func RemoveChildSocket(endpoint string) {
+	if strings.HasPrefix(endpoint, "unix://") {
+		_ = os.Remove(strings.TrimPrefix(endpoint, "unix://"))
 	}
 }
