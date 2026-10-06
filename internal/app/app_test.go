@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"gostalgia/sdk"
+	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +20,7 @@ import (
 	"gostalgia/internal/ipc"
 	"gostalgia/internal/process"
 	"gostalgia/internal/security"
+	"gostalgia/sdk"
 )
 
 // fakeInstance is a minimal application: blocks until stopped, serves one
@@ -449,5 +453,275 @@ func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+var (
+	buildExtOnce sync.Once
+	extBinPath   string
+	buildExtErr  error
+)
+
+func getExternalBinary(t *testing.T) string {
+	t.Helper()
+	buildExtOnce.Do(func() {
+		tmpDir, err := os.MkdirTemp("", "ext-bin-*")
+		if err != nil {
+			buildExtErr = err
+			return
+		}
+		bin := filepath.Join(tmpDir, "external-app")
+		cmd := exec.Command("go", "build", "-o", bin, "gostalgia/test/testapps/external")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			buildExtErr = fmt.Errorf("build external-app: %w\n%s", err, string(out))
+			return
+		}
+		extBinPath = bin
+	})
+	if buildExtErr != nil {
+		t.Fatalf("failed to build external test binary: %v", buildExtErr)
+	}
+	return extBinPath
+}
+
+func TestExternalAppLifecycle(t *testing.T) {
+	bin := getExternalBinary(t)
+	m, router := newTestManager(t)
+
+	extMan := Manifest{
+		ID:              "com.test.external",
+		Name:            "External App",
+		Version:         "1.0.0",
+		Mode:            sdk.ModeExternal,
+		Executable:      bin,
+		Permissions:     []string{sdk.CapIPC},
+		ProtocolVersion: 1,
+	}
+	must(t, m.reg.RegisterExternal(extMan))
+
+	proc, err := m.Launch(context.Background(), extMan.ID)
+	must(t, err)
+	if proc.ID() <= 0 {
+		t.Fatalf("expected positive PID, got %d", proc.ID())
+	}
+	if !m.IsRunning(extMan.ID) {
+		t.Fatal("expected app to be running")
+	}
+
+	adminCtx := ipc.WithCapabilities(context.Background(), security.AdminCapabilities())
+
+	// Call greet route
+	greetReq := ipc.Request{
+		Method: "app/com.test.external/greet",
+		Params: json.RawMessage(`{"name":"Gostalgia"}`),
+	}
+	greetResp := router.Dispatch(adminCtx, greetReq)
+	if !greetResp.OK {
+		t.Fatalf("greet failed: %s", greetResp.Error)
+	}
+	var greetData struct {
+		Greeting string `json:"greeting"`
+		State    string `json:"state"`
+	}
+	must(t, json.Unmarshal(greetResp.Data, &greetData))
+	if greetData.Greeting != "hello Gostalgia" || greetData.State != "initialized" {
+		t.Fatalf("unexpected greet data: %+v", greetData)
+	}
+
+	// Call presentation view route
+	viewReq := ipc.Request{
+		Method: "app/com.test.external/view",
+		Params: json.RawMessage(`{"version":1}`),
+	}
+	viewResp := router.Dispatch(adminCtx, viewReq)
+	if !viewResp.OK {
+		t.Fatalf("view failed: %s", viewResp.Error)
+	}
+	var view sdk.View
+	must(t, json.Unmarshal(viewResp.Data, &view))
+	if view.Title != "External Test App" || view.Status != "initialized" {
+		t.Fatalf("unexpected view: %+v", view)
+	}
+
+	// Call presentation action route
+	actionReq := ipc.Request{
+		Method: "app/com.test.external/action",
+		Params: json.RawMessage(fmt.Sprintf(`{"version":1,"instance":%q,"request_id":"req1","action":"set_state","values":{"state":"active"}}`, view.Instance)),
+	}
+	actionResp := router.Dispatch(adminCtx, actionReq)
+	if !actionResp.OK {
+		t.Fatalf("action failed: %s", actionResp.Error)
+	}
+	var updatedView sdk.View
+	must(t, json.Unmarshal(actionResp.Data, &updatedView))
+	if updatedView.Status != "active" {
+		t.Fatalf("expected updated status 'active', got %q", updatedView.Status)
+	}
+
+	// Stop application
+	must(t, m.Stop(extMan.ID, 5*time.Second))
+	if m.IsRunning(extMan.ID) {
+		t.Fatal("expected app to be stopped")
+	}
+
+	// Verify route retraction
+	deadResp := router.Dispatch(adminCtx, greetReq)
+	if deadResp.OK {
+		t.Fatal("expected greet to fail after stop")
+	}
+
+	// Verify token revocation
+	if _, ok := m.AppToken(extMan.ID); ok {
+		t.Fatal("expected token to be revoked")
+	}
+
+	// Relaunch application with fresh state
+	proc2, err := m.Launch(context.Background(), extMan.ID)
+	must(t, err)
+	if proc2.ID() == proc.ID() {
+		t.Fatalf("expected new PID, got same %d", proc2.ID())
+	}
+	if !m.IsRunning(extMan.ID) {
+		t.Fatal("expected app to be running after relaunch")
+	}
+
+	// Verify state is fresh ("initialized", not "active")
+	greetResp2 := router.Dispatch(adminCtx, greetReq)
+	if !greetResp2.OK {
+		t.Fatalf("greet failed after relaunch: %s", greetResp2.Error)
+	}
+	must(t, json.Unmarshal(greetResp2.Data, &greetData))
+	if greetData.State != "initialized" {
+		t.Fatalf("expected state 'initialized' on fresh launch, got %q", greetData.State)
+	}
+
+	must(t, m.Stop(extMan.ID, 5*time.Second))
+}
+
+func TestExternalAppCrashContainment(t *testing.T) {
+	bin := getExternalBinary(t)
+	m, router := newTestManager(t)
+
+	extMan := Manifest{
+		ID:              "com.test.crashapp",
+		Name:            "Crash App",
+		Version:         "1.0.0",
+		Mode:            sdk.ModeExternal,
+		Executable:      bin,
+		Permissions:     []string{sdk.CapIPC},
+		ProtocolVersion: 1,
+	}
+	must(t, m.reg.RegisterExternal(extMan))
+
+	_, err := m.Launch(context.Background(), extMan.ID)
+	must(t, err)
+
+	adminCtx := ipc.WithCapabilities(context.Background(), security.AdminCapabilities())
+
+	// Invoke crash route
+	crashReq := ipc.Request{
+		Method: "app/com.test.crashapp/crash",
+	}
+	_ = router.Dispatch(adminCtx, crashReq)
+
+	// Wait for supervisor to observe crash and clean up
+	deadline := time.Now().Add(5 * time.Second)
+	for m.IsRunning(extMan.ID) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if m.IsRunning(extMan.ID) {
+		t.Fatal("app still considered running after crash")
+	}
+
+	// Verify routes retracted
+	greetReq := ipc.Request{
+		Method: "app/com.test.crashapp/greet",
+		Params: json.RawMessage(`{"name":"test"}`),
+	}
+	if resp := router.Dispatch(adminCtx, greetReq); resp.OK {
+		t.Fatal("expected route to be unhandled after crash")
+	}
+
+	// Verify we can relaunch cleanly after crash
+	proc2, err := m.Launch(context.Background(), extMan.ID)
+	must(t, err)
+	if !m.IsRunning(extMan.ID) {
+		t.Fatal("expected app to be running after relaunch")
+	}
+	must(t, m.Stop(extMan.ID, 5*time.Second))
+	_ = proc2
+}
+
+func TestExternalAppHangContainment(t *testing.T) {
+	bin := getExternalBinary(t)
+	m, router := newTestManager(t)
+
+	extMan := Manifest{
+		ID:              "com.test.hangapp",
+		Name:            "Hang App",
+		Version:         "1.0.0",
+		Mode:            sdk.ModeExternal,
+		Executable:      bin,
+		Permissions:     []string{sdk.CapIPC},
+		ProtocolVersion: 1,
+	}
+	must(t, m.reg.RegisterExternal(extMan))
+
+	_, err := m.Launch(context.Background(), extMan.ID)
+	must(t, err)
+
+	adminCtx := ipc.WithCapabilities(context.Background(), security.AdminCapabilities())
+
+	// Put app in a hung state in a goroutine
+	go func() {
+		_ = router.Dispatch(adminCtx, ipc.Request{Method: "app/com.test.hangapp/hang"})
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	// Stop must kill the process tree within bounded timeout
+	stopStart := time.Now()
+	must(t, m.Stop(extMan.ID, 2*time.Second))
+	if time.Since(stopStart) > 4*time.Second {
+		t.Fatal("Stop took too long on hung process")
+	}
+	if m.IsRunning(extMan.ID) {
+		t.Fatal("expected hung app to be stopped")
+	}
+}
+
+func TestExternalAppStartupFailures(t *testing.T) {
+	m, _ := newTestManager(t)
+
+	// Non-existent binary
+	missingMan := Manifest{
+		ID:              "com.test.missing",
+		Name:            "Missing Binary",
+		Version:         "1.0.0",
+		Mode:            sdk.ModeExternal,
+		Executable:      "/nonexistent/path/to/binary-12345",
+		Permissions:     []string{sdk.CapIPC},
+		ProtocolVersion: 1,
+	}
+	must(t, m.reg.RegisterExternal(missingMan))
+	if _, err := m.Launch(context.Background(), missingMan.ID); err == nil {
+		t.Fatal("expected launch to fail for missing executable")
+	}
+	if m.IsRunning(missingMan.ID) {
+		t.Fatal("missing app should not be running")
+	}
+
+	// Incompatible protocol version in manifest
+	badVersionMan := Manifest{
+		ID:              "com.test.badver",
+		Name:            "Bad Version",
+		Version:         "1.0.0",
+		Mode:            sdk.ModeExternal,
+		Executable:      "/bin/true",
+		Permissions:     []string{sdk.CapIPC},
+		ProtocolVersion: 99,
+	}
+	if err := badVersionMan.Validate(); err == nil {
+		t.Fatal("expected validation failure for protocol version 99")
 	}
 }

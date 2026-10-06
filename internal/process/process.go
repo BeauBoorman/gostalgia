@@ -579,7 +579,7 @@ func DefaultChildEnv(spec Spec, id int32) []string {
 	}
 	for _, kv := range spec.Env {
 		k, _, ok := strings.Cut(kv, "=")
-		if !ok || isSensitiveEnvKey(k) {
+		if !ok || (isSensitiveEnvKey(k) && !strings.HasPrefix(strings.ToUpper(k), "GOSTALGIA_")) {
 			continue
 		}
 		env = append(env, kv)

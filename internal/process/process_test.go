@@ -290,6 +290,36 @@ func TestChildCleanEnvPreventsSecretLeak(t *testing.T) {
 	}
 }
 
+func TestDefaultChildEnv(t *testing.T) {
+	spec := Spec{
+		Name: "test-child",
+		Env: []string{
+			"GOSTALGIA_APP_TOKEN=token123",
+			"CUSTOM_VAR=value",
+			"HOST_SECRET_TOKEN=leaked",
+			"MY_PASSWORD=bad",
+		},
+	}
+	env := DefaultChildEnv(spec, 42)
+	envMap := make(map[string]string)
+	for _, e := range env {
+		k, v, _ := strings.Cut(e, "=")
+		envMap[k] = v
+	}
+	if envMap["GOSTALGIA_APP_TOKEN"] != "token123" {
+		t.Errorf("GOSTALGIA_APP_TOKEN = %q, want token123", envMap["GOSTALGIA_APP_TOKEN"])
+	}
+	if envMap["CUSTOM_VAR"] != "value" {
+		t.Errorf("CUSTOM_VAR = %q, want value", envMap["CUSTOM_VAR"])
+	}
+	if _, ok := envMap["HOST_SECRET_TOKEN"]; ok {
+		t.Error("HOST_SECRET_TOKEN was not stripped")
+	}
+	if _, ok := envMap["MY_PASSWORD"]; ok {
+		t.Error("MY_PASSWORD was not stripped")
+	}
+}
+
 func TestRingBuffer(t *testing.T) {
 	rb := NewRingBuffer(10)
 	diag := rb.Snapshot()

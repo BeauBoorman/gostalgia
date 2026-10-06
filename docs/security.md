@@ -31,7 +31,10 @@ Permission tokens (`security.Capabilities`) travel with IPC call contexts:
   `internal/security.TokenStore`, bound to the application's ID, process ID,
   session, and declared manifest capabilities. App tokens are never written to
   `runtime.json`, leaked to process listings (`proc/list`), or inherited by
-  child processes (`process.CleanEnv`).
+  unrelated child processes (`process.CleanEnv`). External applications receive
+  their scoped token explicitly via `GOSTALGIA_APP_TOKEN` over a dedicated child
+  IPC socket, and the credential is immediately revoked upon process exit or
+  launch failure.
 - **SDK capability scoping:** The public SDK exposes scoped `Call` and
   Init-only `Handle` adapters, not raw runtime managers. `Context.Call`
   replaces incoming capabilities with the app's manifest grant, and app

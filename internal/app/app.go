@@ -3,15 +3,20 @@
 package app
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"path"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gostalgia/internal/events"
@@ -19,6 +24,7 @@ import (
 	"gostalgia/internal/process"
 	"gostalgia/internal/security"
 	"gostalgia/internal/vfs"
+	"gostalgia/platform"
 	"gostalgia/sdk"
 )
 
@@ -76,6 +82,23 @@ func (r *Registry) RegisterBuiltin(m Manifest, f Factory) error {
 	}
 	r.manifests[m.ID] = cloneManifest(m)
 	r.factories[m.Entrypoint] = f
+	return nil
+}
+
+// RegisterExternal registers an application manifest configured for out-of-process execution.
+func (r *Registry) RegisterExternal(m Manifest) error {
+	if m.Mode == "" {
+		m.Mode = sdk.ModeExternal
+	}
+	if err := m.Validate(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, dup := r.manifests[m.ID]; dup {
+		return fmt.Errorf("app: %s is already registered", m.ID)
+	}
+	r.manifests[m.ID] = cloneManifest(m)
 	return nil
 }
 
@@ -155,6 +178,7 @@ type runningApp struct {
 	pid        int32 // zero while initializing
 	token      string
 	cleanupErr error // written before process Done closes
+	done       chan struct{}
 }
 
 func NewManager(reg *Registry, procs *process.Manager, router *ipc.Router, bus *events.Bus, log *slog.Logger) *Manager {
@@ -197,6 +221,11 @@ func (m *Manager) TokenStore() *security.TokenStore {
 	return m.tokens
 }
 
+// Registry returns the manifest registry.
+func (m *Manager) Registry() *Registry {
+	return m.reg
+}
+
 // AppToken returns the launch-bound credential issued for a running app.
 func (m *Manager) AppToken(id string) (string, bool) {
 	m.mu.Lock()
@@ -225,11 +254,23 @@ func (m *Manager) Launch(ctx context.Context, id string) (*process.Process, erro
 	if !ok {
 		return nil, fmt.Errorf("app: unknown application %q", id)
 	}
+	switch man.Mode {
+	case "", sdk.ModeInProc:
+		return m.launchInProc(ctx, man)
+	case sdk.ModeExternal:
+		return m.launchExternal(ctx, man)
+	default:
+		return nil, fmt.Errorf("app: unsupported mode %q", man.Mode)
+	}
+}
+
+func (m *Manager) launchInProc(ctx context.Context, man Manifest) (*process.Process, error) {
+	id := man.ID
 	factory, ok := m.reg.factory(man.Entrypoint)
 	if !ok {
 		return nil, fmt.Errorf("app: no factory for entrypoint %q", man.Entrypoint)
 	}
-	ra := &runningApp{}
+	ra := &runningApp{done: make(chan struct{})}
 	m.mu.Lock()
 	if existing, dup := m.running[id]; dup {
 		pid := existing.pid
@@ -395,6 +436,7 @@ func (m *Manager) Launch(ctx context.Context, id string) (*process.Process, erro
 			ra.cleanupErr = cleanup()
 			runErr = errors.Join(runErr, ra.cleanupErr)
 			forget()
+			close(ra.done)
 			msg := ""
 			if runErr != nil {
 				msg = runErr.Error()
@@ -421,6 +463,494 @@ func (m *Manager) Launch(ctx context.Context, id string) (*process.Process, erro
 	return proc, nil
 }
 
+type rpcWireMessage struct {
+	ID     int64           `json:"id"`
+	Method string          `json:"method,omitempty"`
+	Params json.RawMessage `json:"params,omitempty"`
+	OK     bool            `json:"ok,omitempty"`
+	Data   json.RawMessage `json:"data,omitempty"`
+	Error  string          `json:"error,omitempty"`
+}
+
+func writeWireMessage(conn io.Writer, mu *sync.Mutex, msg rpcWireMessage) error {
+	mu.Lock()
+	defer mu.Unlock()
+	b, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	_, err = conn.Write(b)
+	return err
+}
+
+func (m *Manager) launchExternal(ctx context.Context, man Manifest) (*process.Process, error) {
+	if man.ProtocolVersion != 0 && man.ProtocolVersion != sdk.ProtocolVersion {
+		return nil, fmt.Errorf("app: %s: unsupported protocol version %d", man.ID, man.ProtocolVersion)
+	}
+
+	ra := &runningApp{done: make(chan struct{})}
+	m.mu.Lock()
+	if existing, dup := m.running[man.ID]; dup {
+		pid := existing.pid
+		m.mu.Unlock()
+		return nil, fmt.Errorf("app: %s is already running or initializing (pid %d)", man.ID, pid)
+	}
+	m.running[man.ID] = ra
+	m.mu.Unlock()
+	forget := func() {
+		m.mu.Lock()
+		delete(m.running, man.ID)
+		m.mu.Unlock()
+	}
+
+	caps := append([]string(nil), man.Permissions...)
+	var appToken string
+	if m.tokens != nil {
+		var tokErr error
+		appToken, tokErr = m.tokens.IssueAppToken(man.ID, 0, "", security.User{Name: "guest"}, caps...)
+		if tokErr != nil {
+			forget()
+			return nil, fmt.Errorf("app: issue token for %s: %w", man.ID, tokErr)
+		}
+		ra.token = appToken
+	}
+
+	ln, endpoint, err := platform.ListenChildIPC(man.ID)
+	if err != nil {
+		if m.tokens != nil && appToken != "" {
+			m.tokens.Revoke(appToken)
+		}
+		forget()
+		return nil, fmt.Errorf("app: listen child ipc for %s: %w", man.ID, err)
+	}
+
+	life, cancel := context.WithCancel(ctx)
+	childArgs := append([]string(nil), man.Args...)
+	childEnv := []string{
+		"GOSTALGIA_ENDPOINT=" + endpoint,
+		"GOSTALGIA_APP_TOKEN=" + appToken,
+		"GOSTALGIA_TOKEN=" + appToken,
+		"GOSTALGIA_APP_ID=" + man.ID,
+		fmt.Sprintf("GOSTALGIA_PROTOCOL_VERSION=%d", sdk.ProtocolVersion),
+	}
+	spec := process.Spec{
+		Name: man.ID,
+		Args: append([]string{man.Executable}, childArgs...),
+		Caps: caps,
+		Env:  childEnv,
+	}
+
+	proc, err := m.procs.StartChild(life, spec)
+	if err != nil {
+		_ = ln.Close()
+		platform.RemoveChildSocket(endpoint)
+		if m.tokens != nil && appToken != "" {
+			m.tokens.Revoke(appToken)
+		}
+		cancel()
+		forget()
+		return nil, fmt.Errorf("app: start %s: %w", man.ID, err)
+	}
+
+	m.mu.Lock()
+	ra.pid = proc.ID()
+	m.mu.Unlock()
+	if m.tokens != nil && appToken != "" {
+		m.tokens.BindProcess(appToken, proc.ID())
+	}
+
+	type acceptRes struct {
+		conn net.Conn
+		err  error
+	}
+	acceptCh := make(chan acceptRes, 1)
+	go func() {
+		c, aErr := ln.Accept()
+		acceptCh <- acceptRes{conn: c, err: aErr}
+	}()
+
+	var conn net.Conn
+	select {
+	case <-time.After(5 * time.Second):
+		_ = ln.Close()
+		platform.RemoveChildSocket(endpoint)
+		_ = m.procs.Stop(proc.ID(), 2*time.Second)
+		if m.tokens != nil && appToken != "" {
+			m.tokens.Revoke(appToken)
+		}
+		cancel()
+		forget()
+		return nil, fmt.Errorf("app: %s: handshake timed out waiting for connection", man.ID)
+	case <-proc.Done():
+		_ = ln.Close()
+		platform.RemoveChildSocket(endpoint)
+		if m.tokens != nil && appToken != "" {
+			m.tokens.Revoke(appToken)
+		}
+		cancel()
+		forget()
+		info := proc.Info()
+		return nil, fmt.Errorf("app: %s exited before connecting: %s", man.ID, info.Err)
+	case res := <-acceptCh:
+		if res.err != nil {
+			_ = ln.Close()
+			platform.RemoveChildSocket(endpoint)
+			_ = m.procs.Stop(proc.ID(), 2*time.Second)
+			if m.tokens != nil && appToken != "" {
+				m.tokens.Revoke(appToken)
+			}
+			cancel()
+			forget()
+			return nil, fmt.Errorf("app: %s: accept connection: %w", man.ID, res.err)
+		}
+		conn = res.conn
+	}
+	_ = ln.Close()
+	platform.RemoveChildSocket(endpoint)
+
+	var writeMu sync.Mutex
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	reader := bufio.NewReader(conn)
+
+	// Read auth request
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		_ = conn.Close()
+		_ = m.procs.Stop(proc.ID(), 2*time.Second)
+		if m.tokens != nil && appToken != "" {
+			m.tokens.Revoke(appToken)
+		}
+		cancel()
+		forget()
+		return nil, fmt.Errorf("app: %s: read auth handshake: %w", man.ID, err)
+	}
+	var authReq rpcWireMessage
+	if err := json.Unmarshal(line, &authReq); err != nil || authReq.Method != "auth" {
+		_ = conn.Close()
+		_ = m.procs.Stop(proc.ID(), 2*time.Second)
+		if m.tokens != nil && appToken != "" {
+			m.tokens.Revoke(appToken)
+		}
+		cancel()
+		forget()
+		return nil, fmt.Errorf("app: %s: expected auth method, got %q", man.ID, authReq.Method)
+	}
+	var authParams struct {
+		Token string `json:"token"`
+	}
+	_ = json.Unmarshal(authReq.Params, &authParams)
+	if authParams.Token != appToken {
+		_ = writeWireMessage(conn, &writeMu, rpcWireMessage{
+			ID:    authReq.ID,
+			OK:    false,
+			Error: "invalid application token",
+		})
+		_ = conn.Close()
+		_ = m.procs.Stop(proc.ID(), 2*time.Second)
+		if m.tokens != nil && appToken != "" {
+			m.tokens.Revoke(appToken)
+		}
+		cancel()
+		forget()
+		return nil, fmt.Errorf("app: %s: invalid token in handshake", man.ID)
+	}
+	if err := writeWireMessage(conn, &writeMu, rpcWireMessage{
+		ID:   authReq.ID,
+		OK:   true,
+		Data: json.RawMessage(`{"authenticated":true}`),
+	}); err != nil {
+		_ = conn.Close()
+		_ = m.procs.Stop(proc.ID(), 2*time.Second)
+		if m.tokens != nil && appToken != "" {
+			m.tokens.Revoke(appToken)
+		}
+		cancel()
+		forget()
+		return nil, fmt.Errorf("app: %s: write auth response: %w", man.ID, err)
+	}
+
+	// Read app/ready request
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	line, err = reader.ReadBytes('\n')
+	if err != nil {
+		_ = conn.Close()
+		_ = m.procs.Stop(proc.ID(), 2*time.Second)
+		if m.tokens != nil && appToken != "" {
+			m.tokens.Revoke(appToken)
+		}
+		cancel()
+		forget()
+		return nil, fmt.Errorf("app: %s: read ready handshake: %w", man.ID, err)
+	}
+	var readyReq rpcWireMessage
+	if err := json.Unmarshal(line, &readyReq); err != nil || readyReq.Method != "app/ready" {
+		_ = conn.Close()
+		_ = m.procs.Stop(proc.ID(), 2*time.Second)
+		if m.tokens != nil && appToken != "" {
+			m.tokens.Revoke(appToken)
+		}
+		cancel()
+		forget()
+		return nil, fmt.Errorf("app: %s: expected app/ready method, got %q", man.ID, readyReq.Method)
+	}
+	var readyParams struct {
+		ProtocolVersion int      `json:"protocol_version"`
+		AppID           string   `json:"app_id"`
+		Routes          []string `json:"routes"`
+	}
+	if err := json.Unmarshal(readyReq.Params, &readyParams); err != nil {
+		_ = conn.Close()
+		_ = m.procs.Stop(proc.ID(), 2*time.Second)
+		if m.tokens != nil && appToken != "" {
+			m.tokens.Revoke(appToken)
+		}
+		cancel()
+		forget()
+		return nil, fmt.Errorf("app: %s: invalid ready params: %w", man.ID, err)
+	}
+	if readyParams.ProtocolVersion != sdk.ProtocolVersion {
+		_ = writeWireMessage(conn, &writeMu, rpcWireMessage{
+			ID:    readyReq.ID,
+			OK:    false,
+			Error: fmt.Sprintf("unsupported protocol version %d", readyParams.ProtocolVersion),
+		})
+		_ = conn.Close()
+		_ = m.procs.Stop(proc.ID(), 2*time.Second)
+		if m.tokens != nil && appToken != "" {
+			m.tokens.Revoke(appToken)
+		}
+		cancel()
+		forget()
+		return nil, fmt.Errorf("app: %s: unsupported protocol version %d", man.ID, readyParams.ProtocolVersion)
+	}
+	if readyParams.AppID != "" && readyParams.AppID != man.ID {
+		_ = writeWireMessage(conn, &writeMu, rpcWireMessage{
+			ID:    readyReq.ID,
+			OK:    false,
+			Error: fmt.Sprintf("mismatched app_id %q", readyParams.AppID),
+		})
+		_ = conn.Close()
+		_ = m.procs.Stop(proc.ID(), 2*time.Second)
+		if m.tokens != nil && appToken != "" {
+			m.tokens.Revoke(appToken)
+		}
+		cancel()
+		forget()
+		return nil, fmt.Errorf("app: %s: mismatched app_id %q", man.ID, readyParams.AppID)
+	}
+	if len(readyParams.Routes) > 0 && !security.NewCapabilities(caps...).Has(security.CapIPC) {
+		_ = writeWireMessage(conn, &writeMu, rpcWireMessage{
+			ID:    readyReq.ID,
+			OK:    false,
+			Error: fmt.Sprintf("permission denied: missing capability %q", security.CapIPC),
+		})
+		_ = conn.Close()
+		_ = m.procs.Stop(proc.ID(), 2*time.Second)
+		if m.tokens != nil && appToken != "" {
+			m.tokens.Revoke(appToken)
+		}
+		cancel()
+		forget()
+		return nil, fmt.Errorf("app: %s: permission denied: missing capability %q", man.ID, security.CapIPC)
+	}
+	if err := writeWireMessage(conn, &writeMu, rpcWireMessage{
+		ID:   readyReq.ID,
+		OK:   true,
+		Data: json.RawMessage(`{"ready":true}`),
+	}); err != nil {
+		_ = conn.Close()
+		_ = m.procs.Stop(proc.ID(), 2*time.Second)
+		if m.tokens != nil && appToken != "" {
+			m.tokens.Revoke(appToken)
+		}
+		cancel()
+		forget()
+		return nil, fmt.Errorf("app: %s: write ready response: %w", man.ID, err)
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+
+	base := "app/" + man.ID + "/"
+	var mu sync.Mutex
+	active := true
+	registered := false
+	routes := map[string]ipc.Handler{}
+	var inflight sync.WaitGroup
+	var msgSeq int64 = 1000
+	var pendingMu sync.Mutex
+	pendingCalls := map[int64]chan rpcWireMessage{}
+
+	scope := func(parent context.Context) (context.Context, func()) {
+		c, stop := context.WithCancel(parent)
+		detach := context.AfterFunc(life, stop)
+		c = ipc.WithCapabilities(c, security.NewCapabilities(caps...))
+		m.mu.Lock()
+		curPID := ra.pid
+		m.mu.Unlock()
+		c = ipc.WithPrincipal(c, security.AppPrincipal(man.ID, curPID, "", security.User{Name: "guest"}))
+		return c, func() { detach(); stop() }
+	}
+
+	for _, rName := range readyParams.Routes {
+		routeMethod := base + rName
+		localName := rName
+		routes[routeMethod] = func(parent context.Context, req ipc.Request) (any, error) {
+			if err := ipc.RequireCap(parent, security.CapIPC); err != nil {
+				return nil, err
+			}
+			mu.Lock()
+			if !active {
+				mu.Unlock()
+				return nil, fmt.Errorf("app: instance stopped")
+			}
+			inflight.Add(1)
+			mu.Unlock()
+			defer inflight.Done()
+
+			c, stop := scope(parent)
+			defer stop()
+			if err := c.Err(); err != nil {
+				return nil, err
+			}
+
+			callID := atomic.AddInt64(&msgSeq, 1)
+			resCh := make(chan rpcWireMessage, 1)
+			pendingMu.Lock()
+			pendingCalls[callID] = resCh
+			pendingMu.Unlock()
+			defer func() {
+				pendingMu.Lock()
+				delete(pendingCalls, callID)
+				pendingMu.Unlock()
+			}()
+
+			if err := writeWireMessage(conn, &writeMu, rpcWireMessage{
+				ID:     callID,
+				Method: localName,
+				Params: req.Params,
+			}); err != nil {
+				return nil, fmt.Errorf("app: send to child: %w", err)
+			}
+
+			select {
+			case <-c.Done():
+				return nil, c.Err()
+			case <-life.Done():
+				return nil, fmt.Errorf("app: instance stopped")
+			case res, ok := <-resCh:
+				if !ok {
+					return nil, fmt.Errorf("app: connection closed")
+				}
+				if !res.OK {
+					return nil, errors.New(res.Error)
+				}
+				if len(res.Data) > 0 && !bytes.Equal(res.Data, []byte("null")) {
+					return json.RawMessage(res.Data), nil
+				}
+				return nil, nil
+			}
+		}
+	}
+
+	if len(routes) > 0 {
+		if err := m.router.HandleBatch(routes); err != nil {
+			_ = conn.Close()
+			_ = m.procs.Stop(proc.ID(), 2*time.Second)
+			if m.tokens != nil && appToken != "" {
+				m.tokens.Revoke(appToken)
+			}
+			cancel()
+			forget()
+			return nil, fmt.Errorf("app: %s: handle routes: %w", man.ID, err)
+		}
+		registered = true
+	}
+
+	var cleanupOnce sync.Once
+	cleanup := func() error {
+		cleanupOnce.Do(func() {
+			mu.Lock()
+			active = false
+			mu.Unlock()
+			cancel()
+			_ = conn.Close()
+			if m.tokens != nil && ra.token != "" {
+				m.tokens.Revoke(ra.token)
+			}
+			if registered {
+				for method := range routes {
+					m.router.Unhandle(method)
+				}
+			}
+			platform.RemoveChildSocket(endpoint)
+			drained := make(chan struct{})
+			go func() { inflight.Wait(); close(drained) }()
+			select {
+			case <-drained:
+			case <-time.After(3 * time.Second):
+			}
+		})
+		return nil
+	}
+
+	go func() {
+		for {
+			l, rErr := reader.ReadBytes('\n')
+			if rErr != nil {
+				return
+			}
+			l = bytes.TrimSpace(l)
+			if len(l) == 0 {
+				continue
+			}
+			var msg rpcWireMessage
+			if err := json.Unmarshal(l, &msg); err != nil {
+				continue
+			}
+			if msg.Method != "" {
+				go func(req rpcWireMessage) {
+					childCtx := ipc.WithCapabilities(life, security.NewCapabilities(caps...))
+					m.mu.Lock()
+					curPID := ra.pid
+					m.mu.Unlock()
+					childCtx = ipc.WithPrincipal(childCtx, security.AppPrincipal(man.ID, curPID, "", security.User{Name: "guest"}))
+					resp := m.router.Dispatch(childCtx, ipc.Request{ID: req.ID, Method: req.Method, Params: req.Params})
+					_ = writeWireMessage(conn, &writeMu, rpcWireMessage{
+						ID:    resp.ID,
+						OK:    resp.OK,
+						Data:  resp.Data,
+						Error: resp.Error,
+					})
+				}(msg)
+			} else {
+				pendingMu.Lock()
+				ch, ok := pendingCalls[msg.ID]
+				pendingMu.Unlock()
+				if ok {
+					select {
+					case ch <- msg:
+					default:
+					}
+				}
+			}
+		}
+	}()
+
+	go func() {
+		<-proc.Done()
+		ra.cleanupErr = cleanup()
+		forget()
+		close(ra.done)
+		info := proc.Info()
+		m.bus.Publish("app", Event{ID: man.ID, PID: proc.ID(), State: "exited", Err: info.Err})
+		m.log.Info("external application exited", "app", man.ID, "pid", proc.ID(), "err", info.Err)
+	}()
+
+	m.bus.Publish("app", Event{ID: man.ID, PID: proc.ID(), State: "launched"})
+	m.log.Info("external application launched", "app", man.ID, "pid", proc.ID())
+	return proc, nil
+}
+
 // Stop waits for Run, handler draining, Stop, and route/state retraction.
 func (m *Manager) Stop(id string, timeout time.Duration) error {
 	m.mu.Lock()
@@ -438,6 +968,10 @@ func (m *Manager) Stop(id string, timeout time.Duration) error {
 	}
 	if err := m.procs.Stop(pid, timeout); err != nil {
 		return err
+	}
+	select {
+	case <-ra.done:
+	case <-time.After(timeout):
 	}
 	return ra.cleanupErr
 }
