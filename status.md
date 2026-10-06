@@ -5,10 +5,14 @@ honestly missing, and the itemized milestone list. This is the **canonical
 tracker** — `docs/architecture.md` §5 summarizes the milestone arc and points
 here.
 
-- **Current position:** Milestone 1 in progress (Charm baseline pinned: Bubble Tea v1.3.10, Lip Gloss v1.1.0, Bubbles v1.0.0; automated dependency fences enforced; active item: [#22](https://github.com/drawmeanelephant/gostalgia/issues/22) reusable visual language and component kit); Milestone 3 IPC subscriptions, bounded event history, and concurrent calls implemented for [#32](https://github.com/drawmeanelephant/gostalgia/issues/32). Foundation unblocks Milestones 1–5.
-- **Last verified:** 2026-10-05 (`gofmt -l .` clean; `go build ./...`, `go vet ./...`, `go test -race ./...`, and `CGO_ENABLED=0 go build ./...` pass locally on macOS; repeated IPC/event race stress and real-runtime subscription/history tests pass. Earlier Charm PTY and platform CI evidence is recorded below; this change does not claim new Windows/Linux behavioral or VirelaiOS verification.)
+> **Workflow note:** Daily task dispatch, issue progress, and parallel agent
+> workflows are tracked natively on GitHub (issues, milestones, and pull
+> requests with `Fixes #XX`). To prevent git merge conflicts and serialization
+> bottlenecks across parallel agents, **feature PRs do not edit `status.md`**.
+> This document is reconciled on `main` at milestone completions or periodic
+> project syncs.
 
-Rules for touching this file:
+Rules for updating this file (milestone syncs):
 
 1. An item moves to ✅ only when it **boots and runs**, passes
    `go vet ./...` and `go test -race ./...`, and its documentation in `docs/`

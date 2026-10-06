@@ -69,6 +69,12 @@ status.md          living status + the canonical milestone tracker
   `process:`); messages must not leak host paths.
 - Documents under `docs/` are kept in sync with the implementation; a PR that
   changes behavior updates the matching document.
+- **Workflow and PR isolation:** Feature PRs must **not** edit `status.md`.
+  Task and milestone tracking is managed natively on GitHub using issue links
+  (`Fixes #XX` in PR descriptions). Parallel feature branches touch only code,
+  tests, and domain documentation under `docs/`. `status.md` is updated on
+  milestone completion or periodic project syncs, eliminating merge conflicts
+  between concurrent agents.
 
 ## CI
 
