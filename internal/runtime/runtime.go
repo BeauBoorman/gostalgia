@@ -252,6 +252,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		services.NewNet(),
 		services.NewSession(),
 		services.NewProfile(),
+		services.NewPackage(),
 	} {
 		if err := sm.Register(s); err != nil {
 			logFile.Close()

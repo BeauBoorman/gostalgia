@@ -34,6 +34,9 @@ go run ./cmd/gctl --root /tmp/gs shutdown    # clean shutdown
 - **Core services** (`internal/services`) — `sys`, `process`, `fs`, `ipc`.
 - **Process model** (`internal/process`) — explicit in-proc vs child kinds,
   states, events, stop timeouts.
+- **Packages** (`internal/pkg`) — bounded archive verification, publisher
+  provenance, atomic install/update/rollback, and permission inspection through
+  `gctl pkg` and shell `pkg`/`package`. See [docs/packages.md](docs/packages.md).
 - **IPC** (`internal/ipc`) — one router, in-proc + NDJSON socket transports,
   token handshake, capability-carrying call contexts.
 - **VFS** (`internal/vfs`) — environment-rooted filesystem with mounts,

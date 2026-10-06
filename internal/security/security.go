@@ -274,6 +274,8 @@ const (
 	CapSessionWrite   = sdk.CapSessionWrite
 	CapProfileRead    = sdk.CapProfileRead
 	CapProfileWrite   = sdk.CapProfileWrite
+	CapPackageRead    = sdk.CapPackageRead
+	CapPackageWrite   = sdk.CapPackageWrite
 	CapAdmin          = "admin"
 )
 
@@ -333,6 +335,7 @@ func AdminCapabilities() *Capabilities {
 		CapNetEgress,
 		CapSessionRead, CapSessionWrite,
 		CapProfileRead, CapProfileWrite,
+		CapPackageRead, CapPackageWrite,
 		CapAdmin,
 	)
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"path"
 	"regexp"
 	"strings"
 )
@@ -35,6 +36,8 @@ const (
 	CapSessionWrite   = "session.write"
 	CapProfileRead    = "profile.read"
 	CapProfileWrite   = "profile.write"
+	CapPackageRead    = "package.read"
+	CapPackageWrite   = "package.write"
 
 	ModeInProc   = "inproc"
 	ModeExternal = "external"
@@ -50,18 +53,26 @@ const (
 // Manifest describes an application. Permissions are the complete
 // grant, not hints. App manifests cannot request the operator-only admin cap.
 type Manifest struct {
-	ID              string   `json:"id"`
-	Name            string   `json:"name"`
-	Version         string   `json:"version"`
-	Entrypoint      string   `json:"entrypoint,omitempty"`
-	Mode            string   `json:"mode,omitempty"`
-	Executable      string   `json:"executable,omitempty"`
-	Args            []string `json:"args,omitempty"`
-	ProtocolVersion int      `json:"protocol_version,omitempty"`
-	Permissions     []string `json:"permissions,omitempty"`
-	Description     string   `json:"description,omitempty"`
-	Isolation       string   `json:"isolation,omitempty"`
-	DocumentTypes   []string `json:"document_types,omitempty"`
+	ID              string      `json:"id"`
+	Name            string      `json:"name"`
+	Version         string      `json:"version"`
+	Entrypoint      string      `json:"entrypoint,omitempty"`
+	Mode            string      `json:"mode,omitempty"`
+	Executable      string      `json:"executable,omitempty"`
+	Args            []string    `json:"args,omitempty"`
+	ProtocolVersion int         `json:"protocol_version,omitempty"`
+	Permissions     []string    `json:"permissions,omitempty"`
+	PathGrants      []PathGrant `json:"path_grants,omitempty"`
+	Description     string      `json:"description,omitempty"`
+	Isolation       string      `json:"isolation,omitempty"`
+	DocumentTypes   []string    `json:"document_types,omitempty"`
+}
+
+// PathGrant requests environment filesystem access, independently of capabilities.
+type PathGrant struct {
+	Path      string `json:"path"`
+	Access    string `json:"access"`
+	Recursive bool   `json:"recursive,omitempty"`
 }
 
 var (
@@ -70,9 +81,12 @@ var (
 	versionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 )
 
+// ValidAppID reports whether id is a canonical reverse-DNS application identity.
+func ValidAppID(id string) bool { return idPattern.MatchString(id) }
+
 // Validate rejects invalid identity, version, entrypoint, or permissions.
 func (m Manifest) Validate() error {
-	if !idPattern.MatchString(m.ID) {
+	if !ValidAppID(m.ID) {
 		return fmt.Errorf("app: manifest id %q is not a reverse-DNS name", m.ID)
 	}
 	if strings.TrimSpace(m.Name) == "" {
@@ -120,7 +134,8 @@ func (m Manifest) Validate() error {
 			CapConfigRead, CapConfigWrite,
 			CapClipboardRead, CapClipboardWrite, CapHostFSRead, CapHostFSWrite, CapNetEgress,
 			CapSessionRead, CapSessionWrite,
-			CapProfileRead, CapProfileWrite:
+			CapProfileRead, CapProfileWrite,
+			CapPackageRead, CapPackageWrite:
 		default:
 			return fmt.Errorf("app: manifest %s: unknown or reserved permission %q", m.ID, cap)
 		}
@@ -128,6 +143,33 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf("app: manifest %s: duplicate permission %q", m.ID, cap)
 		}
 		seen[cap] = true
+	}
+	paths := make(map[string]bool)
+	for _, g := range m.PathGrants {
+		if !strings.HasPrefix(g.Path, "/") || g.Path == "/" || path.Clean(g.Path) != g.Path ||
+			strings.ContainsAny(g.Path, "\\\x00:") {
+			return fmt.Errorf("app: manifest %s: invalid grant path %q", m.ID, g.Path)
+		}
+		for _, part := range strings.Split(strings.TrimPrefix(g.Path, "/"), "/") {
+			if strings.TrimRight(part, ". ") != part || strings.ContainsAny(part, "<>\"?*|") {
+				return fmt.Errorf("app: manifest %s: nonportable grant path %q", m.ID, g.Path)
+			}
+		}
+		// Installed code and other applications' private data are not grantable.
+		folded := strings.ToLower(g.Path)
+		if folded == "/apps" || strings.HasPrefix(folded, "/apps/") {
+			own := "/apps/data/" + m.ID
+			if g.Path != own && !strings.HasPrefix(g.Path, own+"/") {
+				return fmt.Errorf("app: manifest %s: forbidden grant path %q", m.ID, g.Path)
+			}
+		}
+		if g.Access != "read" && g.Access != "read-write" {
+			return fmt.Errorf("app: manifest %s: invalid grant access %q", m.ID, g.Access)
+		}
+		if paths[g.Path] {
+			return fmt.Errorf("app: manifest %s: duplicate grant path %q", m.ID, g.Path)
+		}
+		paths[g.Path] = true
 	}
 	return nil
 }

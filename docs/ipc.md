@@ -89,6 +89,7 @@ sandbox enforcement is implemented — see security.md.
 | `doc/*` (`search`, `lookup`, `recents`, `favorites`, `associations`, `handoff`) | doc service |
 | `session/*` (`list`, `get`, `create`, `close`, `attach`, `detach`, `workspace/get`, `workspace/set`, `workspace/clear`) | session service |
 | `profile/*` (`list`, `get`, `active`, `create`, `update`, `switch`, `delete`) | profile service |
+| `pkg/*` (`install`, `update`, `uninstall`, `list`, `inspect`, `rollback`) | package service |
 | `app/list`, `app/launch`, `app/stop`, `session/whoami` | sys service |
 | `app/<app-id>/<method>` | the application instance |
 | `events/v1/*` (`subscribe`, `unsubscribe`, `history`) | ipc service |
@@ -102,6 +103,9 @@ runtime lifetime, not the request lifetime. `session/*` read endpoints require
 endpoints (`list`, `get`, `active`) require `profile.read`; mutation endpoints
 (`create`, `update`, `switch`, `delete`) require `profile.write`. The app contract includes the
 [complete method schemas and capability table](applications.md#5-routes-and-scoped-service-calls).
+Package reads require `package.read`, writes require `package.write`, and
+permission expansion requires explicit operator confirmation. See
+[packages](packages.md) for archive verification and transaction semantics.
 
 ## Endpoints per platform
 
