@@ -65,7 +65,7 @@ func (a *adversarialApp) Init(ctx *sdk.Context) error {
 		case <-time.After(100 * time.Millisecond):
 			// Still running after 100ms: process was not killed
 			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
+			<-done
 			return map[string]any{
 				"spawned": true,
 			}, nil
@@ -117,7 +117,7 @@ func (a *adversarialApp) Stop(ctx context.Context) error {
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--dummy" {
 		// Used by spawn_descendant test
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(2 * time.Second)
 		return
 	}
 	if err := sdk.Serve(&adversarialApp{}); err != nil {
