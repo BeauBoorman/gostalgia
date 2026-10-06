@@ -25,6 +25,11 @@ func TestMain(m *testing.M) {
 		}
 	case "exit":
 		os.Exit(3)
+	case "check_clean_env":
+		if os.Getenv("SUPER_SECRET_HOST_KEY") != "" {
+			os.Exit(42) // leaked secret!
+		}
+		os.Exit(0)
 	}
 	os.Exit(m.Run())
 }
@@ -217,5 +222,36 @@ func TestChildRequiresArgs(t *testing.T) {
 	m, _ := newTestManager(t)
 	if _, err := m.StartChild(context.Background(), Spec{Name: "empty"}); err == nil {
 		t.Fatal("StartChild without args succeeded, want error")
+	}
+}
+
+func TestChildCleanEnvPreventsSecretLeak(t *testing.T) {
+	if testing.Short() {
+		t.Skip("child process test skipped in short mode")
+	}
+	// Set a sensitive environment variable on the host
+	t.Setenv("SUPER_SECRET_HOST_KEY", "super-secret-token")
+
+	m, _ := newTestManager(t)
+	// Start child with nil Env: manager should apply CleanEnv() by default
+	p, err := m.StartChild(context.Background(), Spec{
+		Name: "clean-env-test",
+		Args: childHelperArgs(t),
+		Env:  append(CleanEnv(), "GOSTALGIA_TEST_CHILD=check_clean_env"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("child did not exit")
+	}
+	info := p.Info()
+	if info.State != StateStopped {
+		t.Errorf("state = %q, want stopped; err = %s", info.State, info.Err)
+	}
+	if info.ExitCode != 0 {
+		t.Errorf("exit code = %d (code 42 indicates secret leaked into child env)", info.ExitCode)
 	}
 }

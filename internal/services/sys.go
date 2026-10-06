@@ -204,7 +204,26 @@ func (s *SysService) whoami(ctx context.Context, req ipc.Request) (any, error) {
 		names = caps.List()
 	}
 	data := map[string]any{"capabilities": names}
-	if sess := s.defaultSession(); sess != nil {
+	p := ipc.CallerPrincipal(ctx)
+	if p.Kind != "" {
+		data["principal"] = string(p.Kind)
+		if p.IsApp() {
+			data["app_id"] = p.AppID
+			data["process_id"] = p.ProcessID
+			if p.SessionID != "" {
+				data["session"] = p.SessionID
+			}
+			if p.User.Name != "" {
+				data["user"] = p.User.Name
+				data["user_id"] = p.User.ID
+			}
+		} else if p.IsOperator() {
+			if p.User.Name != "" {
+				data["user"] = p.User.Name
+				data["user_id"] = p.User.ID
+			}
+		}
+	} else if sess := s.defaultSession(); sess != nil {
 		data["user"] = sess.User.Name
 		data["user_id"] = sess.User.ID
 		data["session"] = sess.ID

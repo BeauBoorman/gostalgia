@@ -77,3 +77,16 @@ func RequireCap(ctx context.Context, capability string) error {
 	}
 	return nil
 }
+
+type principalKey struct{}
+
+// WithPrincipal returns a context carrying the caller's authenticated principal.
+func WithPrincipal(ctx context.Context, p security.Principal) context.Context {
+	return context.WithValue(ctx, principalKey{}, p)
+}
+
+// CallerPrincipal returns the caller's authenticated principal, or a zero Principal.
+func CallerPrincipal(ctx context.Context) security.Principal {
+	p, _ := ctx.Value(principalKey{}).(security.Principal)
+	return p
+}
