@@ -82,7 +82,83 @@ contextual help. Disabled actions are not highlighted. The shell remains the
 only terminal owner; apps provide SDK data, not Charm views. Existing app
 snapshot/lifecycle polling is functional refresh, not decorative animation.
 Dialogs and progress are reusable building blocks, not new shell commands.
-Home/launcher navigation is still the next issue (#23).
+
+## Navigation, home screen, and command palette
+
+Issue #23 expands the shell into a cohesive navigation environment comprising
+a discoverable home screen dashboard, a searchable application launcher, an
+actionable command palette overlay, and deterministic focus routing under one
+terminal owner.
+
+### Home screen dashboard
+
+The home screen (`modeHome`, default on startup, toggleable via `F1` or typing `home`)
+presents three discoverable activity sections:
+
+1. **System Activity**: Live uptime formatted humanely (e.g. `just booted`, `45m`,
+   `2h 15m`), active process count, registered service count, current user, and
+   environment drive indicator sourced directly via `sys/status`.
+2. **Running Applications**: Quick-switch shortcuts for all currently active
+   applications displaying live PIDs. An honest empty notice is displayed when
+   no applications are running, hinting at `F2` to launch apps.
+3. **Document Shortcuts**: Quick-open links to user files stored under
+   `C:\users\guest\documents` (`/users/guest/documents`), discovered via `fs/list`.
+   Selecting a document and pressing `Enter` automatically opens and prints it
+   via `type <path>`.
+
+### Searchable friendly-name app launcher
+
+The launcher (`modeLauncher`, opened via `F2` or typing `launcher`/`shelf`)
+replaces minimal static shelves with searchable friendly-name application cards:
+
+- **Incremental Search**: Real-time text query filtering across application
+  friendly names, IDs, and descriptions.
+- **Card Presentation**: Uses Issue #22 `AppCard` and `Badge` components, showing
+  the friendly name, ID, version, running status (`READY` vs. `LIVE / PID <pid>`),
+  description, and permissions grant line.
+- **Honest Empty States**: If no applications are installed or if a query has no
+  matches, an honest `Notice` component is displayed with query clearing advice.
+- **Actions**: `Enter` launches the selected app, `F3` sends a graceful stop
+  request, and `F4` switches focus directly to the app's presentation view.
+
+### Command palette overlay
+
+The command palette (`modePalette`, opened with `Ctrl+P` anywhere or `/` at an
+empty prompt) provides a modal overlay for keyboard-driven navigation:
+
+- Indexes installed applications (`[APP]`), documents in the user documents
+  folder (`[DOC]`), and core system commands (`[CMD]`).
+- Supports fuzzy/prefix substring filtering.
+- Navigated via `↑` / `↓`; pressing `Enter` immediately executes the selected
+  action (launches app, opens document, or runs shell command) and dismisses
+  the overlay.
+- `Esc` or `Ctrl+P` dismisses the overlay without taking action.
+
+### Predictable focus management
+
+A strict single terminal owner contract ensures input is never dropped or ambiguous:
+
+- `FocusPrompt`: Command prompt owns input; transcript scrollback and history
+  navigation active.
+- `FocusHome`: Home dashboard owns selection; `↑`/`↓` navigates running apps
+  and document shortcuts, `Enter` opens the item, typing any command rune
+  transitions focus directly to the command prompt.
+- `FocusLauncher`: Launcher search bar and card list own selection; typing
+  filters the app cards, `↑`/`↓` selects, `Enter` runs, `Esc` clears the search
+  or returns to the prompt.
+- `FocusApp`: Active app presentation view owns keyboard interaction; `Esc`
+  retracts presentation and restores prompt focus.
+- `FocusPalette`: Command palette overlay owns all keystrokes; `Esc` restores
+  prior view mode.
+
+### Single-instance launch and graceful stop
+
+Applications follow the platform single-instance contract. When launching an
+app that is already running or rejected by the runtime, the shell handles the
+rejection gracefully: the error is recorded in the transcript, focus safely
+transitions to the prompt to display the diagnostic message, and the terminal
+state remains intact. Stopping an application via `F3` or `stop <app-id>`
+issues a graceful IPC stop request.
 
 ## Layout and external text
 
