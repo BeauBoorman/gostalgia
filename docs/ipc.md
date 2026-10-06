@@ -86,6 +86,7 @@ sandbox enforcement is implemented — see security.md.
 | `sys/*` (`ping`, `status`, `shutdown`) | sys service |
 | `proc/*` (`list`, `stop`) | process service |
 | `fs/*` (`list`, `read`, `write`, `mkdir`, `remove`) | fs service |
+| `doc/*` (`search`, `lookup`, `recents`, `favorites`, `associations`, `handoff`) | doc service |
 | `app/list`, `app/launch`, `app/stop`, `session/whoami` | sys service |
 | `app/<app-id>/<method>` | the application instance |
 | `events/v1/*` (`subscribe`, `unsubscribe`, `history`) | ipc service |

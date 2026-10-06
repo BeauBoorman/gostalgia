@@ -61,6 +61,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	registry := app.NewRegistry()
 	must(t, apps.Register(registry))
 	appMgr := app.NewManager(registry, procs, router, bus, log)
+	appMgr.SetGrantStore(env.Grants())
 
 	policyStore := security.NewPolicyStore(security.DefaultOperatorPolicy())
 	sctx := &service.Context{
@@ -84,6 +85,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	must(t, sm.Register(NewSys()))
 	must(t, sm.Register(NewProc()))
 	must(t, sm.Register(NewFS()))
+	must(t, sm.Register(NewDocument()))
 	must(t, sm.Register(NewClipboard()))
 	must(t, sm.Register(NewNet()))
 	must(t, sm.StartAll(context.Background()))
@@ -149,8 +151,8 @@ func TestSysStatus(t *testing.T) {
 	if status.Version != "test" {
 		t.Errorf("version = %q, want test", status.Version)
 	}
-	if len(status.Services) != 5 {
-		t.Errorf("services = %d, want 5", len(status.Services))
+	if len(status.Services) != 6 {
+		t.Errorf("services = %d, want 6", len(status.Services))
 	}
 	if len(status.Apps) != len(apps.Manifests()) {
 		t.Errorf("apps count = %d, want %d", len(status.Apps), len(apps.Manifests()))

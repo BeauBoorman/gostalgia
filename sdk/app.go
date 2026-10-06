@@ -57,6 +57,7 @@ type Manifest struct {
 	Permissions     []string `json:"permissions,omitempty"`
 	Description     string   `json:"description,omitempty"`
 	Isolation       string   `json:"isolation,omitempty"`
+	DocumentTypes   []string `json:"document_types,omitempty"`
 }
 
 var (

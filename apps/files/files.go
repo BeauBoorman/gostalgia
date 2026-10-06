@@ -712,9 +712,25 @@ func (f *Files) handleOpenLocked(ctx context.Context) {
 		return
 	}
 
-	// Selected item is a file: open in Notes
+	// Selected item is a file: open via document handoff if possible
+	var res sdk.HandoffResult
+	err := f.app.Call(ctx, "doc/handoff", sdk.HandoffRequest{
+		Version: sdk.DocumentHandoffVersion,
+		Path:    targetPath,
+		Mode:    "read-write",
+	}, &res)
+	if err == nil {
+		appName := "Notes"
+		if res.AppID != NotesAppID && res.AppID != "" {
+			appName = res.AppID
+		}
+		f.lastStatus = fmt.Sprintf("Opened %s in %s", f.selectedName, appName)
+		return
+	}
+
+	// Selected item is a file: fallback to direct Notes open
 	_ = f.app.Call(ctx, "app/launch", map[string]string{"id": NotesAppID}, nil)
-	err := f.app.Call(ctx, "app/"+NotesAppID+"/open", map[string]any{
+	err = f.app.Call(ctx, "app/"+NotesAppID+"/open", map[string]any{
 		"path":  targetPath,
 		"force": false,
 	}, nil)
@@ -1145,12 +1161,34 @@ func (f *Files) openRoute(ctx context.Context, raw json.RawMessage) (any, error)
 	var p struct {
 		Path  string `json:"path"`
 		AppID string `json:"app_id"`
+		Mode  string `json:"mode"`
 	}
 	if err := sdk.DecodeParams(raw, &p); err != nil {
 		return nil, err
 	}
 	if p.Path == "" {
 		return nil, fmt.Errorf("params.path is required")
+	}
+
+	mode := p.Mode
+	if mode == "" {
+		mode = "read-write"
+	}
+
+	var res sdk.HandoffResult
+	err := f.app.Call(ctx, "doc/handoff", sdk.HandoffRequest{
+		Version: sdk.DocumentHandoffVersion,
+		Path:    p.Path,
+		AppID:   p.AppID,
+		Mode:    mode,
+	}, &res)
+	if err == nil {
+		return map[string]any{
+			"path":     res.Path,
+			"app_id":   res.AppID,
+			"grant_id": res.GrantID,
+			"opened":   res.Success,
+		}, nil
 	}
 
 	appID := p.AppID
