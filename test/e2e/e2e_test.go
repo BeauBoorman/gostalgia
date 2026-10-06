@@ -9,13 +9,61 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"gostalgia/internal/events"
 	"gostalgia/internal/ipc"
 	"gostalgia/internal/runtime"
 	"gostalgia/platform"
 )
+
+func TestEnvironmentSubscriptionsAndPrivateHistory(t *testing.T) {
+	root := t.TempDir()
+	rt, err := runtime.Boot(context.Background(), runtime.Options{Root: root})
+	must(t, err)
+	t.Cleanup(func() { rt.Shutdown("subscription test") })
+	client := dialRunning(t, root)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	sub, err := client.Subscribe(ctx, ipc.SubscribeParams{Topic: "app.state"})
+	must(t, err)
+	private := "private-document-and-credential-value"
+	must(t, client.Call(ctx, "fs/write", map[string]string{
+		"path":        "/users/guest/documents/private.txt",
+		"data_base64": base64.StdEncoding.EncodeToString([]byte(private)),
+	}, nil))
+	must(t, client.Call(ctx, "app/com.gostalgia.echo/echo", map[string]string{"msg": private}, nil))
+	must(t, client.Call(ctx, "app/stop", map[string]string{"id": "com.gostalgia.echo"}, nil))
+	select {
+	case n := <-sub.Events:
+		if n.Event.Type != "app.state" || n.Event.ID <= sub.Info.Cursor {
+			t.Fatalf("live lifecycle event = %+v", n)
+		}
+	case <-ctx.Done():
+		t.Fatal("no live app lifecycle event")
+	}
+	var history events.History
+	must(t, client.Call(ctx, ipc.HistoryMethod, ipc.HistoryParams{Topic: "*"}, &history))
+	if len(history.Events) == 0 || history.Epoch != sub.Info.Epoch {
+		t.Fatal("runtime event trail not exposed")
+	}
+	raw, err := json.Marshal(history)
+	must(t, err)
+	runtimeData, err := os.ReadFile(filepath.Join(root, "runtime.json"))
+	must(t, err)
+	var info struct {
+		Token string `json:"token"`
+	}
+	must(t, json.Unmarshal(runtimeData, &info))
+	for _, secret := range []string{private, base64.StdEncoding.EncodeToString([]byte(private)), info.Token, "private.txt"} {
+		if strings.Contains(string(raw), secret) {
+			t.Fatalf("history leaked private content")
+		}
+	}
+	must(t, sub.Close(ctx))
+}
 
 func dialRunning(t *testing.T, root string) *ipc.Client {
 	t.Helper()

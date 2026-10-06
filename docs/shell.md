@@ -116,4 +116,3 @@ Gostalgia adopts a coordinated **Charm v1** baseline pinned in `go.mod`:
 
 7. **Separation from VirelaiOS**:
    - Early VirelaiOS bring-up (toolchain, guest runner, kernel integration) is separately owned by the repository owner and tracked outside this roadmap. The Charm shell does not assume POSIX or claim guest-OS support; it runs on standard Go host targets (macOS, Linux, Windows).
-
