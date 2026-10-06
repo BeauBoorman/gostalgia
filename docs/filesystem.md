@@ -140,11 +140,46 @@ prefix wins; `Unmount` restores the root view.
 │   ├── desktop/
 │   ├── config/
 │   └── .trash/        trash store (files/ and info/)
-├── apps/manifests/    application manifests (JSON)
+├── apps/
+│   ├── manifests/     application manifests (JSON)
+│   └── data/          partitioned app-private storage (/apps/data/<app_id>)
 ├── data/
 ├── mounts/            (reserved)
 └── tmp/               ← memfs mount (ephemeral)
 ```
+
+## App-Private Storage & Scoped VFS Grants
+
+Rather than open-ended access to the entire root, applications receive scoped views (`ScopedVFS`):
+
+### 1. App-Private Storage (`/apps/data/<app_id>`)
+- Every application automatically receives a private partition under `/apps/data/<app_id>`.
+- Applications have inherent read/write access to their own partition without requiring global filesystem permissions.
+- Isolation is strictly enforced: an application cannot enumerate, read, write, stat, remove, rename, copy, or trash files belonging to another application's partition.
+- `ReadDir("/apps/data")` presents a principal-aware view showing only the calling application's partition.
+- Applications cannot delete or rename the `/apps/data` root or their partition root directory itself.
+
+### 2. Scoped VFS Grants (`GrantStore`)
+- Access to paths outside an application's private storage requires an explicit path-scoped grant issued by an operator.
+- Grants specify:
+  - `app_id`: the target application identifier.
+  - `path`: canonical environment path (e.g. `/users/guest/documents/report.txt` or `/shared/workspace`).
+  - `access`: access mode (`read` or `read-write`).
+  - `recursive`: whether access extends to all descendants of a directory.
+- Confinement checks prevent grant expansion:
+  - Path traversal (`..`) is rejected.
+  - Host symlinks resolving outside the authorized root fail closed with `path_escape`.
+  - Same-mount rename enforces write permissions on both source and destination; cross-mount rename fails with `cross_mount`.
+  - Cross-mount copy requires read on source and write on destination; cross-mount move requires write on both.
+- Revocation:
+  - Operators revoke grants via `fs/grant/revoke`.
+  - Revoked grants fail immediately on subsequent operations with `permission_denied: grant revoked`.
+  - Grants are scoped to `app_id`; active grants persist across application process restarts until explicitly revoked. Revoked grants remain revoked across restarts.
+
+### 3. Trash Isolation
+- Applications listing the trash (`fs/trash/list`) only see items that originated from paths they are authorized to access.
+- Restoring or purging trash items belonging to another application or unauthorized paths is denied.
+- `EmptyTrash()` only purges the calling application's trashed entries.
 
 ## IPC Surface (`fs/*`)
 
@@ -152,20 +187,23 @@ The filesystem is exposed to applications and shell commands over IPC:
 
 | Method | Capability Required | Description |
 |---|---|---|
-| `fs/list` | `fs.read` | Lists directory entries with sizes, modes, and directory indicators. |
-| `fs/stat` | `fs.read` | Returns path metadata (size, mod_time, is_dir, mode). |
-| `fs/read` | `fs.read` | Reads file data in base64. Supports bounded reads with `offset` and `limit` (max 4 MiB). Files > 4 MiB require bounded parameters. |
-| `fs/write` | `fs.write` | Writes base64 data to a file (bounded to 4 MiB). |
-| `fs/save` | `fs.write` | Atomic recoverable save with collision detection (`overwrite` flag, perm). |
-| `fs/mkdir` | `fs.write` | Creates directories recursively (`MkdirAll`). |
-| `fs/remove` | `fs.write` | Removes a file, empty directory, or tree (`recursive: true`). |
-| `fs/rename` | `fs.write` | Atomic same-mount rename with collision detection. |
+| `fs/list` | `fs.read` (or app private/granted) | Lists directory entries with sizes, modes, and directory indicators. |
+| `fs/stat` | `fs.read` (or app private/granted) | Returns path metadata (size, mod_time, is_dir, mode). |
+| `fs/read` | `fs.read` (or app private/granted) | Reads file data in base64. Supports bounded reads with `offset` and `limit` (max 4 MiB). Files > 4 MiB require bounded parameters. |
+| `fs/write` | `fs.write` (or app private/granted) | Writes base64 data to a file (bounded to 4 MiB). |
+| `fs/save` | `fs.write` (or app private/granted) | Atomic recoverable save with collision detection (`overwrite` flag, perm). |
+| `fs/mkdir` | `fs.write` (or app private/granted) | Creates directories recursively (`MkdirAll`). |
+| `fs/remove` | `fs.write` (or app private/granted) | Removes a file, empty directory, or tree (`recursive: true`). |
+| `fs/rename` | `fs.write` (or app private/granted) | Atomic same-mount rename with collision detection. |
 | `fs/copy` | `fs.read` + `fs.write` | Copies file or directory tree with collision detection. |
-| `fs/move` | `fs.write` | Moves file or directory with collision detection across mounts. |
-| `fs/trash` | `fs.write` | Moves target to `.trash/files` and registers metadata in `.trash/info`. |
-| `fs/restore`| `fs.write` | Restores trashed item by ID with collision handling. |
-| `fs/trash/list` | `fs.read` | Lists all trashed items and metadata. |
-| `fs/trash/empty` | `fs.write`| Permanently deletes all trashed entries. |
+| `fs/move` | `fs.write` (or app private/granted) | Moves file or directory with collision detection across mounts. |
+| `fs/trash` | `fs.write` (or app private/granted) | Moves target to `.trash/files` and registers metadata in `.trash/info`. |
+| `fs/restore`| `fs.write` (or app private/granted) | Restores trashed item by ID with collision handling. |
+| `fs/trash/list` | `fs.read` | Lists trashed items accessible to the caller. |
+| `fs/trash/empty` | `fs.write` | Permanently deletes trashed entries accessible to the caller. |
+| `fs/grant` | `admin` | Issues a path-scoped capability grant to an application. |
+| `fs/grant/revoke` | `admin` | Revokes an issued grant by ID. |
+| `fs/grant/list` | Caller app or `admin` | Lists active grants for an application or across the system. |
 
 ## Testing
 

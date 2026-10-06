@@ -78,6 +78,7 @@ const (
 	ErrNotDir     ErrorCode = "not_directory"
 	ErrCrossMount ErrorCode = "cross_mount"
 	ErrEscape     ErrorCode = "path_escape"
+	ErrPermission ErrorCode = "permission_denied"
 	ErrReadOnly   ErrorCode = "read_only"
 	ErrTooLarge   ErrorCode = "too_large"
 	ErrInvalid    ErrorCode = "invalid"
@@ -116,7 +117,7 @@ func (e *Error) Unwrap() error {
 		return fs.ErrNotExist
 	case ErrExist:
 		return fs.ErrExist
-	case ErrReadOnly:
+	case ErrPermission, ErrReadOnly:
 		return fs.ErrPermission
 	case ErrInvalid, ErrEscape, ErrCrossMount, ErrIsDir, ErrNotDir:
 		return fs.ErrInvalid

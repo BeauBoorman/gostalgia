@@ -26,6 +26,7 @@ type VFS struct {
 	mu       sync.RWMutex
 	mounts   map[string]FS // fs-style mount point ("tmp") -> fs
 	trashDir string
+	grants   *GrantStore
 }
 
 func New(root FS) *VFS {
@@ -33,6 +34,40 @@ func New(root FS) *VFS {
 		root:     root,
 		mounts:   map[string]FS{},
 		trashDir: DefaultTrashDir,
+		grants:   NewGrantStore(),
+	}
+}
+
+// Grants returns the grant store associated with this VFS.
+func (v *VFS) Grants() *GrantStore {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.grants
+}
+
+// SetGrants configures the grant store used by this VFS.
+func (v *VFS) SetGrants(gs *GrantStore) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.grants = gs
+}
+
+// CheckAccess checks whether appID is authorized to perform mode on envPath.
+func (v *VFS) CheckAccess(appID, envPath string, mode AccessMode) error {
+	v.mu.RLock()
+	gs := v.grants
+	v.mu.RUnlock()
+	if gs == nil {
+		return nil
+	}
+	return gs.CheckAccess(appID, envPath, mode)
+}
+
+// ForApp returns an application-scoped view of this VFS.
+func (v *VFS) ForApp(appID string) *ScopedVFS {
+	return &ScopedVFS{
+		vfs:   v,
+		appID: appID,
 	}
 }
 
