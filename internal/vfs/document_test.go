@@ -2,7 +2,6 @@ package vfs
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 )
 
@@ -110,9 +109,9 @@ func TestHostFSDocumentOps(t *testing.T) {
 		t.Fatalf("original file altered after rename failure: %q", string(data))
 	}
 	// Recover file should contain new content
-	recoverRel := filepath.Clean(vfsErr.RecoverPath)
-	if recoverRel[0] == '/' {
-		recoverRel = recoverRel[1:]
+	recoverRel, err := Normalize(vfsErr.RecoverPath)
+	if err != nil {
+		t.Fatalf("Normalize(RecoverPath) = %v", err)
 	}
 	recData, err := h.ReadFile(recoverRel)
 	if err != nil || string(recData) != "recovery data" {
@@ -222,9 +221,9 @@ func TestMemFSDocumentOps(t *testing.T) {
 	if vfsErr.RecoverPath == "" {
 		t.Fatal("expected RecoverPath")
 	}
-	recRel := vfsErr.RecoverPath
-	if recRel[0] == '/' {
-		recRel = recRel[1:]
+	recRel, err := Normalize(vfsErr.RecoverPath)
+	if err != nil {
+		t.Fatalf("Normalize(RecoverPath) = %v", err)
 	}
 	recData, err := m.ReadFile(recRel)
 	if err != nil || string(recData) != "recovery mem" {
