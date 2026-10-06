@@ -297,6 +297,18 @@ The Charm shell supports both owned (in-process boot) and attached (connected to
   bar and adjust keybinding help hints to `Ctrl-C: DETACH`. Exiting via `exit`, `quit`, or `Ctrl-C` / `Ctrl-D`
   detaches cleanly without stopping the headless environment.
 
+### Personal Workspace Profiles & Profile Switching
+
+The Charm shell provides interactive profile management and workspace scoping:
+- **Active Profile & User Badge**: The status bar and prompt display the active user identity (e.g. `[GUEST]`, `[ALICE]`), updated dynamically when switching profiles.
+- **Commands**:
+  - `profile` / `profile list`: Lists all profiles, displaying ID, display name, and marking the currently active profile.
+  - `profile switch <id>`: Activates the specified profile, updates the shell user context, switches current working directory (CWD) to `/users/<id>`, re-scopes recent documents, and reloads personal settings.
+  - `profile create <id> [name]`: Creates a new profile with initialized personal folders (`documents`, `downloads`, `desktop`, `config`, `.trash`).
+  - `profile delete <id>`: Removes an existing profile and its workspace tree (cannot delete active profile).
+- **Command Palette (`Ctrl-P`) & Tab Completion**: The `profile` command is integrated into the command palette and tab auto-completion with subcommand hints (`list`, `switch`, `create`, `delete`).
+- **Profile-Scoped Home Dashboard**: The Home Dashboard displays recent documents scoped to the active profile (`/users/<user>/documents`).
+
 ## Layout and external text
 
 All sizes are terminal **cells**, not byte/rune counts. The kit uses Charm's ANSI

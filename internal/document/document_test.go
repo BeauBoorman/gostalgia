@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -537,5 +538,67 @@ func TestHandoffIsolationAndScoping(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected permission error when caller lacks document access")
+	}
+}
+
+func TestDocumentStoreProfileSwitch(t *testing.T) {
+	v := vfs.New(vfs.NewMem())
+	_ = v.MkdirAll("/users/guest/documents")
+	_ = v.MkdirAll("/users/guest/config")
+	_ = v.MkdirAll("/users/alice/documents")
+	_ = v.MkdirAll("/users/alice/config")
+
+	_ = v.SaveAtomic("/users/guest/documents/guest_note.txt", []byte("guest"), 0o644)
+	_ = v.SaveAtomic("/users/alice/documents/alice_note.txt", []byte("alice"), 0o644)
+
+	store := NewStore(v, v.Grants(), nil, nil)
+	if err := store.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add recent for guest
+	if _, err := store.Recents().Add("/users/guest/documents/guest_note.txt", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.Recents().List("", false)) != 1 {
+		t.Fatalf("expected 1 recent for guest")
+	}
+
+	// Switch to alice
+	if err := store.SwitchProfile("alice"); err != nil {
+		t.Fatal(err)
+	}
+	// Alice must have 0 recents initially
+	if len(store.Recents().List("", false)) != 0 {
+		t.Fatalf("expected 0 recents for alice initially")
+	}
+
+	// Add recent for alice
+	if _, err := store.Recents().Add("/users/alice/documents/alice_note.txt", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.Recents().List("", false)) != 1 {
+		t.Fatalf("expected 1 recent for alice")
+	}
+
+	// Switch back to guest: guest recent must still be 1, not alice's
+	if err := store.SwitchProfile("guest"); err != nil {
+		t.Fatal(err)
+	}
+	guestRecents := store.Recents().List("", false)
+	if len(guestRecents) != 1 || guestRecents[0].Path != "/users/guest/documents/guest_note.txt" {
+		t.Fatalf("expected guest's own recent, got: %+v", guestRecents)
+	}
+
+	// Verify Searcher scoping by caller profile
+	aliceCaller := security.OperatorPrincipal(security.User{Name: "alice"})
+	res, err := store.Searcher().Search(context.Background(), aliceCaller, sdk.DocumentSearchQuery{Query: "note"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, match := range res.Results {
+		if strings.Contains(match.Path, "/users/guest") {
+			t.Fatalf("alice's search leaked guest document: %s", match.Path)
+		}
 	}
 }

@@ -104,6 +104,12 @@ func (m *Model) paletteItems() []paletteItem {
 		},
 		paletteItem{
 			Tag:    "CMD",
+			Title:  "profile",
+			Detail: "List and manage personal workspace profiles",
+			Action: func(m *Model) tea.Cmd { return m.submit("profile") },
+		},
+		paletteItem{
+			Tag:    "CMD",
 			Title:  "dir",
 			Detail: "Directory contents of current drive",
 			Action: func(m *Model) tea.Cmd { return m.submit("dir") },

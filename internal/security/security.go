@@ -111,6 +111,17 @@ func (s *TokenStore) RegisterOperator(token string, user User) error {
 	return nil
 }
 
+// SetOperatorUser updates the user for all operator credentials.
+func (s *TokenStore) SetOperatorUser(user User) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, cred := range s.credentials {
+		if cred.Principal.IsOperator() {
+			cred.Principal.User = user
+		}
+	}
+}
+
 // IssueAppToken generates a launch-bound credential for an application with
 // its approved capability grants.
 func (s *TokenStore) IssueAppToken(appID string, procID int32, sessionID string, user User, caps ...string) (string, error) {
@@ -261,6 +272,8 @@ const (
 	CapNetEgress      = sdk.CapNetEgress
 	CapSessionRead    = sdk.CapSessionRead
 	CapSessionWrite   = sdk.CapSessionWrite
+	CapProfileRead    = sdk.CapProfileRead
+	CapProfileWrite   = sdk.CapProfileWrite
 	CapPackageRead    = sdk.CapPackageRead
 	CapPackageWrite   = sdk.CapPackageWrite
 	CapAdmin          = "admin"
@@ -321,6 +334,7 @@ func AdminCapabilities() *Capabilities {
 		CapHostFSRead, CapHostFSWrite,
 		CapNetEgress,
 		CapSessionRead, CapSessionWrite,
+		CapProfileRead, CapProfileWrite,
 		CapPackageRead, CapPackageWrite,
 		CapAdmin,
 	)

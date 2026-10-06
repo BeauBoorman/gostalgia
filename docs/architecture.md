@@ -54,9 +54,10 @@ gostalgia
 │   ├── vfs/            # virtual filesystem, mounts, memfs  (leaf)
 │   ├── process/        # environment process manager
 │   ├── security/       # users, capabilities                (leaf)
+│   ├── profile/        # workspace profiles and isolation   (leaf)
 │   ├── session/        # user sessions
 │   ├── service/        # service lifecycle framework
-│   ├── services/       # concrete core services (sys, process, fs, ipc)
+│   ├── services/       # concrete core services (sys, process, fs, ipc, profile)
 │   ├── experience/     # Charm shell (imports IPC client contracts only)
 │   ├── app/            # application model, manifests, launcher
 │   └── runtime/        # boot, wiring, shutdown
@@ -219,12 +220,32 @@ Security model:
 permissions; they are attached to the IPC context and enforced at handler
 boundaries (`security.Capabilities.Has`). Read/write VFS methods, process
 listing/stopping, app listing/launching/stopping, session management (`session.read`, `session.write`),
+profile management (`profile.read`, `profile.write`),
 and shutdown check their individual grants; app route publication/invocation checks `ipc`. App SDK
 `Call` and `Handle` adapters replace caller capabilities with the app's manifest
 grant, enforcing capability scoping and preventing confused-deputy attacks.
 Calls attempting undeclared capabilities fail in production. Trusted operator
 clients (`gctl`, shell) connect over the local socket with an admin token.
 See the complete permission table in [applications.md](applications.md).
+
+### 3.8a Personal workspace profiles (`internal/profile`)
+
+Personal profiles provide multi-user directory isolation, live identity switching,
+and personal workspace separation under `/users/<profile_id>/`:
+- **Directory isolation**: Each profile seeds a standard directory tree upon creation:
+  `/users/<profile_id>/{documents,downloads,desktop,config,.trash}`. Documents, recents,
+  favorites, and workspace states are partitioned per user directory.
+- **Profile registry**: Profiles are recorded in `/config/profiles.json` and managed
+  via `profile.Manager`. A default `guest` profile is seeded at initial environment boot.
+- **Dynamic profile switching**: Calling `Switch(profileID)` publishes transition
+  events (`profile.switched`), dynamically reconfigures the layered configuration store
+  (`LayeredStore.SetUserStore`), points document search, recents, and favorites to the
+  new profile (`Store.SwitchProfile`), binds application launch tokens and process
+  attribution to the active profile's `security.User`, ensures an active session exists,
+  and updates operator IPC tokens.
+- **IPC profile service**: Endpoints under `profile/*` (`list`, `get`, `active`, `create`,
+  `update`, `switch`, `delete`) enable programmatic profile administration, guarded by
+  `profile.read` and `profile.write` capabilities.
 
 **Honesty clause:** this is *logical* isolation only while applications run
 in-process. The auth token on the socket protects against accidental

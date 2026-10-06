@@ -153,6 +153,18 @@ type Model struct {
 	attached     bool
 	sessionID    string
 	attachmentID string
+	user         string
+}
+
+func (m *Model) SetUser(user string) {
+	m.user = user
+}
+
+func (m *Model) User() string {
+	if m.user == "" {
+		return "guest"
+	}
+	return m.user
 }
 
 func (m *Model) SetAttached(attached bool) {
@@ -231,6 +243,7 @@ func NewWithTheme(ctx context.Context, c Caller, closed <-chan struct{}, t theme
 		notifs:    notifications.NewManager(100, 3, 8),
 		receipts:  receipts.NewStore(50),
 		lastProcs: make(map[int32]procTracking),
+		user:      "guest",
 	}
 }
 
@@ -524,6 +537,11 @@ func (m *Model) Init() tea.Cmd {
 			msg.hasStatus = true
 		}
 
+		userForDocs := "guest"
+		if msg.hasStatus && msg.status.User != "" {
+			userForDocs = msg.status.User
+		}
+
 		var dir struct {
 			Entries []struct {
 				Name  string `json:"name"`
@@ -531,13 +549,14 @@ func (m *Model) Init() tea.Cmd {
 				Size  int64  `json:"size"`
 			} `json:"entries"`
 		}
-		if fErr := m.client.Call(ctx, "fs/list", map[string]string{"path": "/users/guest/documents"}, &dir); fErr == nil {
+		docsPath := fmt.Sprintf("/users/%s/documents", userForDocs)
+		if fErr := m.client.Call(ctx, "fs/list", map[string]string{"path": docsPath}, &dir); fErr == nil {
 			var docs []docShortcut
 			for _, e := range dir.Entries {
 				if !e.IsDir {
 					docs = append(docs, docShortcut{
 						Name: e.Name,
-						Path: "/users/guest/documents/" + e.Name,
+						Path: docsPath + "/" + e.Name,
 						Size: e.Size,
 					})
 				}
@@ -725,6 +744,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case resultMsg:
 		m.busy = false
 		m.initExperience()
+		if msg.switchedUser != "" {
+			m.user = msg.switchedUser
+		} else if msg.status.User != "" && (m.user == "" || m.user == "guest") {
+			m.user = msg.status.User
+		}
 		if msg.cwd != "" {
 			m.cwd = msg.cwd
 		}
@@ -1212,15 +1236,17 @@ func (m *Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) complete() {
 	prefix := string(m.input)
-	choices := []string{"help", "apps", "pkg", "package", "launch", "run", "stop", "echo", "call", "dir", "ls", "cd", "type", "cat", "ps", "logs", "log", "status", "cls", "exit", "shutdown", "home", "palette", "tasks", "taskmanager", "notifications", "alerts", "receipt", "reap", "dnd", "theme", "motion", "settings", "preferences"}
+	choices := []string{"help", "apps", "pkg", "package", "launch", "run", "stop", "echo", "call", "dir", "ls", "cd", "type", "cat", "ps", "logs", "log", "status", "cls", "exit", "shutdown", "home", "palette", "tasks", "taskmanager", "notifications", "alerts", "receipt", "reap", "dnd", "theme", "motion", "settings", "preferences", "profile", "profiles"}
 	if verb, partial, ok := strings.Cut(prefix, " "); ok {
-		if verb != "launch" && verb != "run" && verb != "stop" && verb != "theme" && verb != "motion" {
+		if verb != "launch" && verb != "run" && verb != "stop" && verb != "theme" && verb != "motion" && verb != "profile" {
 			return
 		}
 		if verb == "theme" {
 			choices = []string{"theme nostalgia", "theme midnight", "theme monochrome", "theme high-contrast", "theme high-contrast-light"}
 		} else if verb == "motion" {
 			choices = []string{"motion on", "motion off"}
+		} else if verb == "profile" {
+			choices = []string{"profile list", "profile switch", "profile create", "profile delete"}
 		} else {
 			choices = nil
 			for _, a := range m.apps {
@@ -1379,7 +1405,11 @@ func (m *Model) View() string {
 	if m.attached {
 		statusLabel = "ATTACHED"
 	}
-	badge := m.kit.Badge(statusLabel, theme.Success, w) + m.kit.Muted("   guest · C: environment drive")
+	userName := m.user
+	if userName == "" {
+		userName = "guest"
+	}
+	badge := m.kit.Badge(statusLabel, theme.Success, w) + m.kit.Muted(fmt.Sprintf("   %s · C: environment drive", userName))
 
 	toastView := ""
 	toastLines := 0

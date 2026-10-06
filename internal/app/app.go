@@ -209,6 +209,7 @@ type Manager struct {
 	tokens      *security.TokenStore
 	grants      *vfs.GrantStore
 	policy      *security.PolicyStore
+	user        security.User
 	log         *slog.Logger
 	mu          sync.Mutex
 	running     map[string]*runningApp
@@ -293,6 +294,23 @@ func (m *Manager) AppToken(id string) (string, bool) {
 	return ra.token, true
 }
 
+// SetUser configures the active user for issued app tokens and IPC context.
+func (m *Manager) SetUser(user security.User) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.user = user
+}
+
+// User returns the configured user identity (or guest fallback).
+func (m *Manager) User() security.User {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.user.Name == "" {
+		return security.User{Name: "guest"}
+	}
+	return m.user
+}
+
 // invoke turns lifecycle panics into process/launch errors, never success.
 func invoke(phase string, fn func() error) (err error) {
 	defer func() {
@@ -367,7 +385,7 @@ func (m *Manager) launchInProc(ctx context.Context, man Manifest, ra *runningApp
 	caps := append([]string(nil), man.Permissions...)
 	if m.tokens != nil {
 		var tokErr error
-		appToken, tokErr = m.tokens.IssueAppToken(id, 0, "", security.User{Name: "guest"}, caps...)
+		appToken, tokErr = m.tokens.IssueAppToken(id, 0, "", m.User(), caps...)
 		if tokErr != nil {
 			forget()
 			return nil, fmt.Errorf("app: issue token for %s: %w", id, tokErr)
@@ -394,7 +412,7 @@ func (m *Manager) launchInProc(ctx context.Context, man Manifest, ra *runningApp
 		m.mu.Lock()
 		curPID := ra.pid
 		m.mu.Unlock()
-		c = ipc.WithPrincipal(c, security.AppPrincipal(id, curPID, "", security.User{Name: "guest"}))
+		c = ipc.WithPrincipal(c, security.AppPrincipal(id, curPID, "", m.User()))
 		return c, func() { detach(); stop() }
 	}
 	call := func(parent context.Context, method string, params, out any) error {
@@ -502,6 +520,7 @@ func (m *Manager) launchInProc(ctx context.Context, man Manifest, ra *runningApp
 	ready := make(chan struct{})
 	proc, err := m.procs.StartInProc(life, process.Spec{
 		Name: id,
+		User: m.User().Name,
 		Caps: caps,
 		Policy: platform.ExecutionPolicy{
 			Isolation: platform.IsolationInProc,
@@ -571,7 +590,7 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 	var appToken string
 	if m.tokens != nil {
 		var tokErr error
-		appToken, tokErr = m.tokens.IssueAppToken(man.ID, 0, "", security.User{Name: "guest"}, caps...)
+		appToken, tokErr = m.tokens.IssueAppToken(man.ID, 0, "", m.User(), caps...)
 		if tokErr != nil {
 			forget()
 			return nil, fmt.Errorf("app: issue token for %s: %w", man.ID, tokErr)
@@ -639,6 +658,7 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 
 	spec := process.Spec{
 		Name:   man.ID,
+		User:   m.User().Name,
 		Args:   append([]string{execPath}, childArgs...),
 		Caps:   caps,
 		Env:    childEnv,
@@ -896,7 +916,7 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 		m.mu.Lock()
 		curPID := ra.pid
 		m.mu.Unlock()
-		c = ipc.WithPrincipal(c, security.AppPrincipal(man.ID, curPID, "", security.User{Name: "guest"}))
+		c = ipc.WithPrincipal(c, security.AppPrincipal(man.ID, curPID, "", m.User()))
 		return c, func() { detach(); stop() }
 	}
 
@@ -1022,7 +1042,7 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 					m.mu.Lock()
 					curPID := ra.pid
 					m.mu.Unlock()
-					childCtx = ipc.WithPrincipal(childCtx, security.AppPrincipal(man.ID, curPID, "", security.User{Name: "guest"}))
+					childCtx = ipc.WithPrincipal(childCtx, security.AppPrincipal(man.ID, curPID, "", m.User()))
 					resp := m.router.Dispatch(childCtx, ipc.Request{ID: req.ID, Method: req.Method, Params: req.Params})
 					_ = writeWireMessage(conn, &writeMu, rpcWireMessage{
 						ID:    resp.ID,

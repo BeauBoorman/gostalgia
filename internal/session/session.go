@@ -289,3 +289,17 @@ func (m *Manager) Active() []*Session {
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
+
+// ForUser lists open sessions for a specific user name, sorted by ID.
+func (m *Manager) ForUser(userName string) []*Session {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]*Session, 0)
+	for _, s := range m.sessions {
+		if s.Active() && s.User.Name == userName {
+			out = append(out, s)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}

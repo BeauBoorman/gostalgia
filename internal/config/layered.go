@@ -114,6 +114,28 @@ func (ls *LayeredStore) UserStore() *Store {
 	return ls.userStore
 }
 
+// SetUserStore switches the user-layer configuration file to newUserPath.
+// If the file is missing, an empty user store is initialized at that path.
+// If the file is corrupt, the error is recorded in corruptLayers rather than overwritten.
+func (ls *LayeredStore) SetUserStore(newUserPath string) error {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+
+	delete(ls.corruptLayers, LayerUser)
+	if newUserPath != "" {
+		usr, err := Load(newUserPath)
+		if err != nil {
+			ls.corruptLayers[LayerUser] = err
+			ls.userStore = &Store{path: newUserPath, data: map[string]any{}}
+		} else {
+			ls.userStore = usr
+		}
+	} else {
+		ls.userStore = &Store{data: map[string]any{}}
+	}
+	return nil
+}
+
 // OnChange registers a listener for configuration change events.
 func (ls *LayeredStore) OnChange(fn func(ChangeEvent)) {
 	ls.mu.Lock()

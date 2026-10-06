@@ -7,6 +7,7 @@ import (
 
 	"gostalgia/internal/document"
 	"gostalgia/internal/ipc"
+	"gostalgia/internal/profile"
 	"gostalgia/internal/security"
 	"gostalgia/internal/service"
 	"gostalgia/internal/vfs"
@@ -57,6 +58,14 @@ func (s *DocumentService) Init(ctx *service.Context) error {
 		for _, st := range ctx.Apps.List() {
 			s.store.Associations().RegisterFromManifest(st.Manifest)
 		}
+	}
+
+	if ctx.Profiles != nil {
+		act := ctx.Profiles.Active()
+		_ = s.store.SwitchProfile(act.ID)
+		ctx.Profiles.OnSwitch(func(prev, next profile.Profile) {
+			_ = s.store.SwitchProfile(next.ID)
+		})
 	}
 
 	// Initialize persistent stores and index

@@ -29,6 +29,7 @@ runtime (`gostalgia boot --root /tmp/gs`). Shell attachment is not implemented.
 | `dir [PATH]`, `ls [PATH]` | List the current/given VFS directory |
 | `cd PATH` | Validate and change the current directory |
 | `type PATH`, `cat PATH` | Read a VFS file |
+| `profile [list|switch|create|delete]` | Manage workspace profiles and switch active user |
 | `ps`, `status` | Process table with capability grants / runtime status |
 | `cls`, `clear` | Clear transcript |
 | `exit`, `quit` | Leave shell and shut down owned runtime |

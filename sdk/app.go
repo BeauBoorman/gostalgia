@@ -34,6 +34,8 @@ const (
 	CapNetEgress      = "net.egress"
 	CapSessionRead    = "session.read"
 	CapSessionWrite   = "session.write"
+	CapProfileRead    = "profile.read"
+	CapProfileWrite   = "profile.write"
 	CapPackageRead    = "package.read"
 	CapPackageWrite   = "package.write"
 
@@ -131,7 +133,9 @@ func (m Manifest) Validate() error {
 		case CapIPC, CapFileRead, CapFileWrite, CapProcList, CapProcStop, CapAppList, CapAppLaunch, CapShutdown,
 			CapConfigRead, CapConfigWrite,
 			CapClipboardRead, CapClipboardWrite, CapHostFSRead, CapHostFSWrite, CapNetEgress,
-			CapSessionRead, CapSessionWrite, CapPackageRead, CapPackageWrite:
+			CapSessionRead, CapSessionWrite,
+			CapProfileRead, CapProfileWrite,
+			CapPackageRead, CapPackageWrite:
 		default:
 			return fmt.Errorf("app: manifest %s: unknown or reserved permission %q", m.ID, cap)
 		}

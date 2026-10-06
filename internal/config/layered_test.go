@@ -296,3 +296,48 @@ func TestChangeEvents(t *testing.T) {
 		t.Fatalf("unexpected cancel event: %+v", events[2])
 	}
 }
+
+func TestSetUserStore(t *testing.T) {
+	dir := t.TempDir()
+	sysPath := filepath.Join(dir, "system.json")
+	user1Path := filepath.Join(dir, "user1.json")
+	user2Path := filepath.Join(dir, "user2.json")
+
+	ls, err := NewLayeredStore(sysPath, user1Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Set preference for user 1
+	if err := ls.Set(LayerUser, "theme", "midnight", QueryOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if theme := ls.String("theme", "", QueryOpts{}); theme != "midnight" {
+		t.Fatalf("user 1 theme = %q, want midnight", theme)
+	}
+
+	// Switch to user 2
+	if err := ls.SetUserStore(user2Path); err != nil {
+		t.Fatal(err)
+	}
+	// user 2 has no preference, falls back to default nostalgia
+	if theme := ls.String("theme", "", QueryOpts{}); theme != "nostalgia" {
+		t.Fatalf("user 2 theme = %q, want default nostalgia", theme)
+	}
+
+	// Set preference for user 2
+	if err := ls.Set(LayerUser, "theme", "monochrome", QueryOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if theme := ls.String("theme", "", QueryOpts{}); theme != "monochrome" {
+		t.Fatalf("user 2 theme = %q, want monochrome", theme)
+	}
+
+	// Switch back to user 1
+	if err := ls.SetUserStore(user1Path); err != nil {
+		t.Fatal(err)
+	}
+	if theme := ls.String("theme", "", QueryOpts{}); theme != "midnight" {
+		t.Fatalf("user 1 restored theme = %q, want midnight", theme)
+	}
+}

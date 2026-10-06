@@ -41,6 +41,7 @@ type Searcher struct {
 	grants    *vfs.GrantStore
 	recents   *RecentsStore
 	favorites *FavoritesStore
+	profileID string
 
 	indexMu sync.RWMutex
 	index   map[string]*IndexEntry
@@ -55,6 +56,13 @@ func NewSearcher(dfs vfs.DocumentFS, grants *vfs.GrantStore, recents *RecentsSto
 		favorites: favorites,
 		index:     make(map[string]*IndexEntry),
 	}
+}
+
+// SetProfile sets the active profile for standard indexing roots.
+func (s *Searcher) SetProfile(profileID string) {
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+	s.profileID = profileID
 }
 
 // IndexDocument indexes a single document path into the in-memory lookup index.
@@ -108,7 +116,18 @@ func (s *Searcher) RebuildIndex(ctx context.Context) error {
 		return nil
 	}
 
-	roots := []string{"/users/guest/documents", "/users/guest/desktop", "/users/guest/downloads"}
+	profile := "guest"
+	s.indexMu.RLock()
+	if s.profileID != "" {
+		profile = s.profileID
+	}
+	s.indexMu.RUnlock()
+
+	roots := []string{
+		fmt.Sprintf("/users/%s/documents", profile),
+		fmt.Sprintf("/users/%s/desktop", profile),
+		fmt.Sprintf("/users/%s/downloads", profile),
+	}
 	for _, root := range roots {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -215,7 +234,18 @@ func (s *Searcher) Search(ctx context.Context, caller security.Principal, req sd
 				return &sdk.DocumentSearchResponse{Query: req.Query}, nil
 			}
 		} else {
-			roots = []string{"/users/guest"}
+			user := caller.User.Name
+			if user == "" {
+				s.indexMu.RLock()
+				if s.profileID != "" {
+					user = s.profileID
+				}
+				s.indexMu.RUnlock()
+			}
+			if user == "" {
+				user = "guest"
+			}
+			roots = []string{"/users/" + user}
 		}
 	}
 

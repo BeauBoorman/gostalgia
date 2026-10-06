@@ -582,3 +582,163 @@ func TestExternalDataSanitizationInShell(t *testing.T) {
 		t.Fatalf("echo output lost words: %q", res.text)
 	}
 }
+
+type fakeProfileCaller struct {
+	noopCaller
+	profiles []struct {
+		ID          string `json:"id"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	active string
+}
+
+func (f *fakeProfileCaller) Call(ctx context.Context, method string, in, out any) error {
+	switch method {
+	case "profile/list":
+		res, _ := out.(*struct {
+			Profiles []struct {
+				ID          string `json:"id"`
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			} `json:"profiles"`
+			Active string `json:"active"`
+		})
+		if res != nil {
+			res.Profiles = f.profiles
+			res.Active = f.active
+		}
+		return nil
+	case "profile/create":
+		inMap, _ := in.(map[string]string)
+		id := inMap["id"]
+		name := inMap["name"]
+		f.profiles = append(f.profiles, struct {
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		}{ID: id, Name: name, Description: "Workspace"})
+		res, _ := out.(*struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		})
+		if res != nil {
+			res.ID = id
+			res.Name = name
+		}
+		return nil
+	case "profile/switch":
+		inMap, _ := in.(map[string]string)
+		f.active = inMap["id"]
+		res, _ := out.(*struct {
+			ID string `json:"id"`
+		})
+		if res != nil {
+			res.ID = f.active
+		}
+		return nil
+	case "profile/delete":
+		inMap, _ := in.(map[string]string)
+		id := inMap["id"]
+		var next []struct {
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		}
+		for _, p := range f.profiles {
+			if p.ID != id {
+				next = append(next, p)
+			}
+		}
+		f.profiles = next
+		return nil
+	case "app/list":
+		return nil
+	case "sys/status":
+		res, _ := out.(*struct {
+			UptimeSeconds float64 `json:"uptime_seconds"`
+			User          string  `json:"user"`
+			Processes     []any   `json:"processes"`
+			Services      []any   `json:"services"`
+		})
+		if res != nil {
+			res.User = f.active
+		}
+		return nil
+	case "fs/list":
+		return nil
+	}
+	return nil
+}
+
+func TestShellProfileCommandsAndSwitching(t *testing.T) {
+	client := &fakeProfileCaller{
+		profiles: []struct {
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		}{
+			{ID: "guest", Name: "Guest User", Description: "Default guest"},
+		},
+		active: "guest",
+	}
+
+	m := New(context.Background(), client, nil)
+	if m.User() != "guest" {
+		t.Fatalf("expected initial user guest, got %s", m.User())
+	}
+
+	// 1. List profiles
+	res := execute(context.Background(), client, m.cwd, "profile list")
+	if res.err != nil {
+		t.Fatalf("profile list failed: %v", res.err)
+	}
+	if !strings.Contains(res.text, "* guest (Guest User) [active]") {
+		t.Fatalf("expected active guest indicator, got: %q", res.text)
+	}
+
+	// 2. Create profile
+	res = execute(context.Background(), client, m.cwd, "profile create developer Lead Dev")
+	if res.err != nil {
+		t.Fatalf("profile create failed: %v", res.err)
+	}
+	if !strings.Contains(res.text, "Profile developer (Lead Dev) created") {
+		t.Fatalf("unexpected create response: %q", res.text)
+	}
+
+	// 3. Switch profile
+	res = execute(context.Background(), client, m.cwd, "profile switch developer")
+	if res.err != nil {
+		t.Fatalf("profile switch failed: %v", res.err)
+	}
+	if res.switchedUser != "developer" {
+		t.Fatalf("expected switchedUser developer, got %s", res.switchedUser)
+	}
+	if res.cwd != "/users/developer" {
+		t.Fatalf("expected cwd /users/developer, got %s", res.cwd)
+	}
+
+	// Apply result to Model
+	m.Update(res)
+	if m.User() != "developer" {
+		t.Fatalf("expected model user developer, got %s", m.User())
+	}
+	if m.cwd != "/users/developer" {
+		t.Fatalf("expected model cwd /users/developer, got %s", m.cwd)
+	}
+
+	// Verify View reflects active profile in badge
+	view := m.View()
+	if !strings.Contains(view, "developer · C: environment drive") {
+		t.Fatalf("expected developer in badge view, got: %s", view)
+	}
+
+	// 4. Delete profile
+	res = execute(context.Background(), client, m.cwd, "profile delete developer")
+	if res.err != nil {
+		t.Fatalf("profile delete failed: %v", res.err)
+	}
+	if !strings.Contains(res.text, "Profile developer deleted") {
+		t.Fatalf("unexpected delete response: %q", res.text)
+	}
+}

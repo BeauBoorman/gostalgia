@@ -133,6 +133,12 @@ func (s *SysService) status(ctx context.Context, req ipc.Request) (any, error) {
 }
 
 func (s *SysService) defaultUser() security.User {
+	if s.ctx.Profiles != nil {
+		p := s.ctx.Profiles.Active()
+		if p.ID != "" {
+			return security.User{ID: p.ID, Name: p.ID}
+		}
+	}
 	if sess := s.defaultSession(); sess != nil {
 		return sess.User
 	}
@@ -140,6 +146,18 @@ func (s *SysService) defaultUser() security.User {
 }
 
 func (s *SysService) defaultSession() *session.Session {
+	if s.ctx.Sessions == nil {
+		return nil
+	}
+	if s.ctx.Profiles != nil {
+		p := s.ctx.Profiles.Active()
+		if p.ID != "" {
+			userSessions := s.ctx.Sessions.ForUser(p.ID)
+			if len(userSessions) > 0 {
+				return userSessions[len(userSessions)-1]
+			}
+		}
+	}
 	active := s.ctx.Sessions.Active()
 	if len(active) == 0 {
 		return nil

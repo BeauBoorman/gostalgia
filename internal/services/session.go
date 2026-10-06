@@ -105,6 +105,15 @@ func (s *SessionService) resolveSession(sessionID string) (*session.Session, err
 		}
 		return sess, nil
 	}
+	if s.ctx.Profiles != nil {
+		p := s.ctx.Profiles.Active()
+		if p.ID != "" {
+			userSessions := s.ctx.Sessions.ForUser(p.ID)
+			if len(userSessions) > 0 {
+				return userSessions[len(userSessions)-1], nil
+			}
+		}
+	}
 	active := s.ctx.Sessions.Active()
 	if len(active) == 0 {
 		return nil, fmt.Errorf("session: no active sessions")
@@ -213,6 +222,7 @@ type SessionAttachResponse struct {
 	ClientType   string                 `json:"client_type"`
 	ActiveCount  int                    `json:"active_count"`
 	Workspace    session.WorkspaceState `json:"workspace"`
+	User         security.User          `json:"user"`
 }
 
 func (s *SessionService) attach(ctx context.Context, req ipc.Request) (any, error) {
@@ -247,6 +257,7 @@ func (s *SessionService) attach(ctx context.Context, req ipc.Request) (any, erro
 		ClientType:   att.ClientType,
 		ActiveCount:  sess.AttachmentCount(),
 		Workspace:    wsState,
+		User:         sess.User,
 	}, nil
 }
 
