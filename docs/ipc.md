@@ -88,6 +88,7 @@ sandbox enforcement is implemented — see security.md.
 | `fs/*` (`list`, `read`, `write`, `mkdir`, `remove`) | fs service |
 | `doc/*` (`search`, `lookup`, `recents`, `favorites`, `associations`, `handoff`) | doc service |
 | `session/*` (`list`, `get`, `create`, `close`, `attach`, `detach`, `workspace/get`, `workspace/set`, `workspace/clear`) | session service |
+| `profile/*` (`list`, `get`, `active`, `create`, `update`, `switch`, `delete`) | profile service |
 | `app/list`, `app/launch`, `app/stop`, `session/whoami` | sys service |
 | `app/<app-id>/<method>` | the application instance |
 | `events/v1/*` (`subscribe`, `unsubscribe`, `history`) | ipc service |
@@ -97,7 +98,9 @@ app's manifest grant (not the caller's grant). SDK service calls likewise
 replace capabilities. `app/stop` checks `proc.stop`; `app/launch` uses the
 runtime lifetime, not the request lifetime. `session/*` read endpoints require
 `session.read`; mutation endpoints (`create`, `close`, `attach`, `detach`,
-`workspace/set`, `workspace/clear`) require `session.write`. The app contract includes the
+`workspace/set`, `workspace/clear`) require `session.write`. `profile/*` read
+endpoints (`list`, `get`, `active`) require `profile.read`; mutation endpoints
+(`create`, `update`, `switch`, `delete`) require `profile.write`. The app contract includes the
 [complete method schemas and capability table](applications.md#5-routes-and-scoped-service-calls).
 
 ## Endpoints per platform

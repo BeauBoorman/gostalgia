@@ -18,6 +18,7 @@ import (
 	"gostalgia/internal/events"
 	"gostalgia/internal/ipc"
 	"gostalgia/internal/process"
+	"gostalgia/internal/profile"
 	"gostalgia/internal/security"
 	"gostalgia/internal/session"
 	"gostalgia/internal/vfs"
@@ -61,6 +62,7 @@ type Context struct {
 	Procs    *process.Manager      // process manager
 	Apps     *app.Manager          // application manager
 	Sessions *session.Manager      // session manager
+	Profiles *profile.Manager      // profile manager
 	Tokens   *security.TokenStore  // credential store for IPC authentication
 	Policy   *security.PolicyStore // operator policy store
 

@@ -2,6 +2,8 @@ package document
 
 import (
 	"context"
+	"fmt"
+	"sync"
 
 	"gostalgia/internal/vfs"
 )
@@ -9,6 +11,7 @@ import (
 // Store coordinates document management, recents, favorites, associations,
 // permission-aware search, and open-with handoffs.
 type Store struct {
+	mu           sync.RWMutex
 	vfs          vfs.DocumentFS
 	grants       *vfs.GrantStore
 	recents      *RecentsStore
@@ -59,25 +62,58 @@ func (s *Store) SetLifetimeContext(ctx context.Context) {
 
 // Recents returns the recents store.
 func (s *Store) Recents() *RecentsStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.recents
 }
 
 // Favorites returns the favorites store.
 func (s *Store) Favorites() *FavoritesStore {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.favorites
 }
 
 // Associations returns the document type association table.
 func (s *Store) Associations() *AssociationTable {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.associations
 }
 
 // Searcher returns the permission-aware searcher and index.
 func (s *Store) Searcher() *Searcher {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.searcher
 }
 
 // Handoff returns the open-with handoff manager.
 func (s *Store) Handoff() *HandoffManager {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.handoff
+}
+
+// SwitchProfile updates the persistent recents, favorites, and search paths for the new profile.
+func (s *Store) SwitchProfile(profileID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	recentsPath := fmt.Sprintf("/users/%s/config/recents.json", profileID)
+	favoritesPath := fmt.Sprintf("/users/%s/config/favorites.json", profileID)
+
+	s.recents = NewRecentsStore(s.vfs, s.grants, recentsPath)
+	s.favorites = NewFavoritesStore(s.vfs, s.grants, favoritesPath)
+	_ = s.recents.Load()
+	_ = s.favorites.Load()
+
+	s.searcher = NewSearcher(s.vfs, s.grants, s.recents, s.favorites)
+	s.searcher.SetProfile(profileID)
+	_ = s.searcher.RebuildIndex(context.Background())
+
+	if s.handoff != nil {
+		s.handoff.recents = s.recents
+	}
+	return nil
 }

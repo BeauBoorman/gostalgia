@@ -135,6 +135,16 @@ hex strings (256 bits of entropy).
   immediately disconnected, and subsequent calls fail with `unauthorized:
   credential revoked`.
 
+### Workspace Profiles and Identity Attribution
+
+Personal workspace profiles (`internal/profile`) provide multi-user isolation within Gostalgia:
+- **Principal User Binding:** When an application is launched, its process specification (`process.Spec.User`), token credentials (`security.Credential.User`), and session ownership (`session.Session.User`) are strictly bound to the active profile's `security.User`.
+- **Operator Identity Synchronization:** When an operator switches profiles via `profile/switch`, `TokenStore.SetOperatorUser` updates the operator credential's user identity in-place. Active IPC connections dynamically re-evaluate the connection principal on each dispatch, ensuring live profile switches update active operator sessions and context without requiring socket reconnection.
+- **Profile Capabilities:** Access to profile management endpoints is guarded by capability checks:
+  - `profile.read`: Required for `profile/list`, `profile/get`, and `profile/active`.
+  - `profile.write`: Required for `profile/create`, `profile/update`, `profile/switch`, and `profile/delete`.
+- **Workspace Directory Isolation:** Each profile receives a segregated directory hierarchy rooted at `/users/<profile_id>/` with subdirectories for `documents`, `downloads`, `desktop`, `config`, and `.trash`. Document search indexing and recent/favorite lists are partitioned per profile.
+
 ---
 
 ## Isolation Levels

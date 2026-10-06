@@ -17,6 +17,7 @@ import (
 	"gostalgia/internal/events"
 	"gostalgia/internal/ipc"
 	"gostalgia/internal/process"
+	"gostalgia/internal/profile"
 	"gostalgia/internal/security"
 	"gostalgia/internal/service"
 	"gostalgia/internal/session"
@@ -59,6 +60,8 @@ func newTestEnv(t *testing.T) *testEnv {
 	procs := process.NewManager(bus, log)
 	sessions := session.NewManager(bus, log)
 	sessions.SetVFS(env)
+	profilesMgr, err := profile.NewManager(env, "", bus, log)
+	must(t, err)
 	registry := app.NewRegistry()
 	must(t, apps.Register(registry))
 	appMgr := app.NewManager(registry, procs, router, bus, log)
@@ -76,6 +79,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		Procs:    procs,
 		Apps:     appMgr,
 		Sessions: sessions,
+		Profiles: profilesMgr,
 		Token:    "test-token",
 		Policy:   policyStore,
 		BootedAt: time.Now(),
@@ -90,6 +94,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	must(t, sm.Register(NewClipboard()))
 	must(t, sm.Register(NewNet()))
 	must(t, sm.Register(NewSession()))
+	must(t, sm.Register(NewProfile()))
 	must(t, sm.StartAll(context.Background()))
 	t.Cleanup(func() { _ = sm.StopAll(context.Background()) })
 	// Mirror the runtime: a default user session exists.
@@ -153,8 +158,8 @@ func TestSysStatus(t *testing.T) {
 	if status.Version != "test" {
 		t.Errorf("version = %q, want test", status.Version)
 	}
-	if len(status.Services) != 7 {
-		t.Errorf("services = %d, want 7", len(status.Services))
+	if len(status.Services) != 8 {
+		t.Errorf("services = %d, want 8", len(status.Services))
 	}
 	if len(status.Apps) != len(apps.Manifests()) {
 		t.Errorf("apps count = %d, want %d", len(status.Apps), len(apps.Manifests()))

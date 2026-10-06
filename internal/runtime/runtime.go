@@ -24,6 +24,7 @@ import (
 	"gostalgia/internal/events"
 	"gostalgia/internal/ipc"
 	"gostalgia/internal/process"
+	"gostalgia/internal/profile"
 	"gostalgia/internal/security"
 	"gostalgia/internal/service"
 	"gostalgia/internal/services"
@@ -61,7 +62,9 @@ type Runtime struct {
 	Apps       *app.Manager
 	//nolint:unused // reserved for multi-session support
 	Sessions *session.Manager
+	Profiles *profile.Manager
 	Services *service.Manager
+	Tokens   *security.TokenStore
 	Policy   *security.PolicyStore
 	User     security.User
 
@@ -151,6 +154,28 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		return nil, err
 	}
 
+	profilesMgr, err := profile.NewManager(rt.VFS, "", rt.Bus, log)
+	if err != nil {
+		logFile.Close()
+		return nil, err
+	}
+	rt.Profiles = profilesMgr
+	activeProfile := rt.Profiles.Active()
+	rt.User = activeProfile.User()
+
+	rt.Profiles.OnSwitch(func(prev, next profile.Profile) {
+		rt.User = next.User()
+		if rt.Apps != nil {
+			rt.Apps.SetUser(next.User())
+		}
+		if rt.LayeredCfg != nil {
+			_ = rt.LayeredCfg.SetUserStore(filepath.Join(root, "vfs", "users", next.ID, "config", "settings.json"))
+		}
+		if rt.Tokens != nil {
+			rt.Tokens.SetOperatorUser(next.User())
+		}
+	})
+
 	rt.Procs = process.NewManager(rt.Bus, log)
 	rt.Sessions = session.NewManager(rt.Bus, log)
 	rt.Sessions.SetVFS(rt.VFS)
@@ -169,6 +194,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		return nil, err
 	}
 	rt.Apps = app.NewManager(registry, rt.Procs, rt.Router, rt.Bus, log)
+	rt.Apps.SetUser(rt.User)
 
 	token, err := newToken()
 	if err != nil {
@@ -180,6 +206,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		logFile.Close()
 		return nil, err
 	}
+	rt.Tokens = tokens
 	rt.Apps.SetTokenStore(tokens)
 	rt.Apps.SetGrantStore(rt.VFS.Grants())
 
@@ -199,6 +226,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		Procs:    rt.Procs,
 		Apps:     rt.Apps,
 		Sessions: rt.Sessions,
+		Profiles: rt.Profiles,
 		Tokens:   tokens,
 		Policy:   policyStore,
 		Token:    token,
@@ -223,6 +251,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		services.NewClipboard(),
 		services.NewNet(),
 		services.NewSession(),
+		services.NewProfile(),
 	} {
 		if err := sm.Register(s); err != nil {
 			logFile.Close()
@@ -300,6 +329,7 @@ func InitRoot(root string) error {
 		"/users/guest/.trash",
 		"/apps/manifests",
 		"/apps/data",
+		"/config",
 		"/data",
 		"/mounts",
 	} {

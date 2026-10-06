@@ -62,6 +62,7 @@ type resultMsg struct {
 	activeCount      int
 	workspaceHistory []string
 	initialView      string
+	switchedUser     string
 }
 
 const helpText = `COMMAND CENTER
@@ -85,6 +86,7 @@ const helpText = `COMMAND CENTER
   motion [on|off]           toggle or set reduced-motion mode
   settings / preferences    interactive system preferences and themes
   history [clear]           view or clear command history
+  profile [list|switch|create|delete] manage workspace profiles and switch active user
   session                   view session and client attachment info
   detach                    detach shell (runtime remains running)
   ps · status               processes · system dashboard
@@ -192,6 +194,11 @@ func execute(ctx context.Context, c Caller, cwd, line string) resultMsg {
 	} else if result.text == "__TOGGLE_MOTION__" {
 		result.toggleMotion = true
 		result.text = ""
+	} else if strings.HasPrefix(result.text, "__SWITCH_PROFILE__:") {
+		targetID := strings.TrimPrefix(result.text, "__SWITCH_PROFILE__:")
+		result.switchedUser = targetID
+		result.cwd = "/users/" + targetID
+		result.text = fmt.Sprintf("Switched to profile %s", targetID)
 	}
 	if !quit {
 		var apps []appStatus
@@ -219,6 +226,13 @@ func execute(ctx context.Context, c Caller, cwd, line string) resultMsg {
 			result.hasStatus = true
 		}
 
+		userForDocs := "guest"
+		if result.switchedUser != "" {
+			userForDocs = result.switchedUser
+		} else if result.status.User != "" {
+			userForDocs = result.status.User
+		}
+
 		var dir struct {
 			Entries []struct {
 				Name  string `json:"name"`
@@ -226,13 +240,14 @@ func execute(ctx context.Context, c Caller, cwd, line string) resultMsg {
 				Size  int64  `json:"size"`
 			} `json:"entries"`
 		}
-		if err := c.Call(ctx, "fs/list", map[string]string{"path": "/users/guest/documents"}, &dir); err == nil {
+		docsPath := fmt.Sprintf("/users/%s/documents", userForDocs)
+		if err := c.Call(ctx, "fs/list", map[string]string{"path": docsPath}, &dir); err == nil {
 			var docs []docShortcut
 			for _, e := range dir.Entries {
 				if !e.IsDir {
 					docs = append(docs, docShortcut{
 						Name: e.Name,
-						Path: "/users/guest/documents/" + e.Name,
+						Path: docsPath + "/" + e.Name,
 						Size: e.Size,
 					})
 				}
@@ -320,6 +335,80 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 			lines = append(lines, fmt.Sprintf("%4d  %s", i+1, safe(h)))
 		}
 		return ok(strings.Join(lines, "\n"))
+	case "profile", "profiles":
+		if len(args) == 0 || (len(args) == 1 && strings.EqualFold(args[0], "list")) {
+			var resp struct {
+				Profiles []struct {
+					ID          string `json:"id"`
+					Name        string `json:"name"`
+					Description string `json:"description"`
+				} `json:"profiles"`
+				Active string `json:"active"`
+			}
+			if err := c.Call(ctx, "profile/list", nil, &resp); err != nil {
+				return fail(err)
+			}
+			var lines []string
+			lines = append(lines, "PROFILES")
+			for _, p := range resp.Profiles {
+				marker := " "
+				activeTag := ""
+				if p.ID == resp.Active {
+					marker = "*"
+					activeTag = " [active]"
+				}
+				desc := ""
+				if p.Description != "" {
+					desc = " - " + p.Description
+				}
+				lines = append(lines, fmt.Sprintf("%s %s (%s)%s%s", marker, p.ID, p.Name, activeTag, desc))
+			}
+			return ok(strings.Join(lines, "\n"))
+		}
+		sub := strings.ToLower(args[0])
+		switch sub {
+		case "switch":
+			if len(args) != 2 {
+				return fail(fmt.Errorf("usage: profile switch ID"))
+			}
+			target := strings.TrimSpace(args[1])
+			var switched struct {
+				ID string `json:"id"`
+			}
+			if err := c.Call(ctx, "profile/switch", map[string]string{"id": target}, &switched); err != nil {
+				return fail(err)
+			}
+			return "__SWITCH_PROFILE__:" + target, cwd, false, nil
+		case "create":
+			if len(args) < 2 {
+				return fail(fmt.Errorf("usage: profile create ID [NAME]"))
+			}
+			id := args[1]
+			name := id
+			if len(args) > 2 {
+				name = strings.Join(args[2:], " ")
+			}
+			var created struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			}
+			if err := c.Call(ctx, "profile/create", map[string]string{"id": id, "name": name}, &created); err != nil {
+				return fail(err)
+			}
+			return ok(fmt.Sprintf("Profile %s (%s) created", created.ID, created.Name))
+		case "delete":
+			if len(args) != 2 {
+				return fail(fmt.Errorf("usage: profile delete ID"))
+			}
+			id := args[1]
+			var delResp map[string]any
+			if err := c.Call(ctx, "profile/delete", map[string]string{"id": id}, &delResp); err != nil {
+				return fail(err)
+			}
+			return ok(fmt.Sprintf("Profile %s deleted", id))
+		default:
+			return fail(fmt.Errorf("usage: profile [list|switch|create|delete]"))
+		}
 	case "session":
 		if len(args) != 0 {
 			return fail(fmt.Errorf("usage: session"))

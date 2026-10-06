@@ -346,7 +346,11 @@ func (s *Server) handleConn(conn net.Conn) {
 				reply.response = Response{ID: req.ID, Error: "unauthorized: credential revoked"}
 				reply.disconnect = true
 			} else {
-				reply.response = s.router.Dispatch(authCtx, req)
+				reqCtx := authCtx
+				if curPrincipal, _, err := s.auth.Authenticate(token); err == nil {
+					reqCtx = WithPrincipal(reqCtx, curPrincipal)
+				}
+				reply.response = s.router.Dispatch(reqCtx, req)
 			}
 			select {
 			case responses <- reply:
