@@ -254,6 +254,13 @@ func (m *Manager) ensureDirsLocked(id string) error {
 	return nil
 }
 
+// Reload re-reads profile definitions and active profile from VFS.
+func (m *Manager) Reload() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.load()
+}
+
 // EnsureDirectories ensures that the user directory structure for profile id exists.
 func (m *Manager) EnsureDirectories(id string) error {
 	m.mu.Lock()

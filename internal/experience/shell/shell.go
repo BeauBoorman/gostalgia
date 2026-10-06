@@ -1236,9 +1236,9 @@ func (m *Model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *Model) complete() {
 	prefix := string(m.input)
-	choices := []string{"help", "apps", "pkg", "package", "launch", "run", "stop", "echo", "call", "dir", "ls", "cd", "type", "cat", "ps", "logs", "log", "status", "cls", "exit", "shutdown", "home", "palette", "tasks", "taskmanager", "notifications", "alerts", "receipt", "reap", "dnd", "theme", "motion", "settings", "preferences", "profile", "profiles"}
+	choices := []string{"help", "apps", "pkg", "package", "backup", "launch", "run", "stop", "echo", "call", "dir", "ls", "cd", "type", "cat", "ps", "logs", "log", "status", "cls", "exit", "shutdown", "home", "palette", "tasks", "taskmanager", "notifications", "alerts", "receipt", "reap", "dnd", "theme", "motion", "settings", "preferences", "profile", "profiles"}
 	if verb, partial, ok := strings.Cut(prefix, " "); ok {
-		if verb != "launch" && verb != "run" && verb != "stop" && verb != "theme" && verb != "motion" && verb != "profile" {
+		if verb != "launch" && verb != "run" && verb != "stop" && verb != "theme" && verb != "motion" && verb != "profile" && verb != "backup" {
 			return
 		}
 		if verb == "theme" {
@@ -1247,6 +1247,8 @@ func (m *Model) complete() {
 			choices = []string{"motion on", "motion off"}
 		} else if verb == "profile" {
 			choices = []string{"profile list", "profile switch", "profile create", "profile delete"}
+		} else if verb == "backup" {
+			choices = []string{"backup export", "backup inspect", "backup preview", "backup restore"}
 		} else {
 			choices = nil
 			for _, a := range m.apps {

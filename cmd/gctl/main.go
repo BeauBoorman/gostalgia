@@ -24,6 +24,7 @@ import (
 
 	"gostalgia/internal/ipc"
 	"gostalgia/internal/pkg"
+	"gostalgia/internal/recovery"
 	"gostalgia/internal/runtime"
 	"gostalgia/platform"
 )
@@ -38,6 +39,7 @@ Usage:
   gctl [--root DIR] logs PID [TAIL]     view child process logs and diagnostics
   gctl [--root DIR] apps                installed applications
   gctl [--root DIR] pkg SUBCOMMAND      inspect/install/update/rollback packages
+  gctl [--root DIR] backup SUBCOMMAND   export/inspect/preview/restore portable backups
   gctl [--root DIR] echo MESSAGE        send a message to the echo app
   gctl [--root DIR] ls [PATH]           list a directory in the VFS
   gctl [--root DIR] cat PATH            print a file from the VFS
@@ -51,6 +53,12 @@ Packages (archive paths are VFS paths):
   pkg update VFS-PATH [--confirm-permissions]
   pkg rollback APP-ID [--confirm-permissions]
   pkg uninstall APP-ID
+
+Backups (archive paths are VFS paths):
+  backup export [PATH] [--profile ID] [--no-system] [--description DESC]
+  backup inspect PATH
+  backup preview PATH
+  backup restore PATH [--strategy abort|overwrite|skip] [--profile ID]
 `
 
 func main() {
@@ -115,6 +123,16 @@ func run(ctx context.Context, client *ipc.Client, cmd string, args []string) err
 	switch cmd {
 	case "pkg", "package":
 		method, params, err := pkg.ParseCommand(args)
+		if err != nil {
+			return err
+		}
+		var raw json.RawMessage
+		if err := client.Call(ctx, method, params, &raw); err != nil {
+			return err
+		}
+		return pretty(raw)
+	case "backup", "recovery":
+		method, params, err := recovery.ParseCommand(args)
 		if err != nil {
 			return err
 		}

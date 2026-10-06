@@ -95,6 +95,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	must(t, sm.Register(NewNet()))
 	must(t, sm.Register(NewSession()))
 	must(t, sm.Register(NewProfile()))
+	must(t, sm.Register(NewRecovery()))
 	must(t, sm.StartAll(context.Background()))
 	t.Cleanup(func() { _ = sm.StopAll(context.Background()) })
 	// Mirror the runtime: a default user session exists.
@@ -158,8 +159,8 @@ func TestSysStatus(t *testing.T) {
 	if status.Version != "test" {
 		t.Errorf("version = %q, want test", status.Version)
 	}
-	if len(status.Services) != 8 {
-		t.Errorf("services = %d, want 8", len(status.Services))
+	if len(status.Services) != 9 {
+		t.Errorf("services = %d, want 9", len(status.Services))
 	}
 	if len(status.Apps) != len(apps.Manifests()) {
 		t.Errorf("apps count = %d, want %d", len(status.Apps), len(apps.Manifests()))
