@@ -389,12 +389,29 @@ func (m *Model) viewLines(height int) []string {
 }
 
 func (m *Model) selectedView() tea.Cmd {
-	if len(m.apps) == 0 || !m.apps[m.selected].Running {
-		m.append(entry{"Launch an app before opening its view.", "error"})
-		return nil
-	}
 	if m.busy {
 		return nil
 	}
-	return m.openView(m.apps[m.selected])
+	if m.currentMode() == modeLauncher {
+		filtered := m.filteredApps()
+		if len(filtered) > 0 && m.selected < len(filtered) && filtered[m.selected].Running {
+			return m.openView(filtered[m.selected])
+		}
+	}
+	if m.currentMode() == modeHome {
+		items := m.homeItems()
+		if len(items) > 0 && m.homeSelected < len(items) && items[m.homeSelected].kind == homeItemApp {
+			return m.openView(items[m.homeSelected].app)
+		}
+	}
+	if len(m.apps) > 0 && m.selected < len(m.apps) && m.apps[m.selected].Running {
+		return m.openView(m.apps[m.selected])
+	}
+	for _, a := range m.apps {
+		if a.Running {
+			return m.openView(a)
+		}
+	}
+	m.append(entry{"Launch an app before opening its view.", "error"})
+	return nil
 }
