@@ -18,7 +18,10 @@ const (
 	Plain ColorMode = iota
 	ANSI256
 	TrueColor
+	ANSI16
 )
+
+const ANSI = ANSI16
 
 // Kit owns an isolated renderer and a value copy of its theme. It can be reused
 // concurrently; its rendering methods do not mutate either.
@@ -31,6 +34,8 @@ type Kit struct {
 func New(t theme.Theme, mode ColorMode) Kit {
 	profile := termenv.Ascii
 	switch mode {
+	case ANSI16:
+		profile = termenv.ANSI
 	case ANSI256:
 		profile = termenv.ANSI256
 	case TrueColor:
@@ -42,6 +47,16 @@ func New(t theme.Theme, mode ColorMode) Kit {
 	r.SetColorProfile(profile)
 	r.SetHasDarkBackground(false)
 	return Kit{theme: t, mode: mode, renderer: r}
+}
+
+// Theme returns the kit's theme tokens.
+func (k Kit) Theme() theme.Theme {
+	return k.theme
+}
+
+// Mode returns the kit's explicit color capability mode.
+func (k Kit) Mode() ColorMode {
+	return k.mode
 }
 
 func (k Kit) paint(text string, fg, bg lipgloss.Color, bold bool) string {

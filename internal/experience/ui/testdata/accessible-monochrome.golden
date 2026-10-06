@@ -1,0 +1,103 @@
+PANEL
++------------------------------+
+| Welcome home                 |
+| Cream, amber, and slate.     |
+| A place to make things.      |
+|                              |
++------------------------------+
+
+FOCUS
++------------------------------+
+| > Notes                      |
+| A familiar workspace.        |
+|                              |
++------------------------------+
+
+TABS
+ Home  [Apps] (Settings)
+
+APP CARD
++----------------------------------+
+| > Notes                          |
+| [OK] LIVE / PID 7                |
+| com.gostalgia.notes  v0.1.0      |
+| Keep a thought close to home.    |
+|                                  |
++----------------------------------+
+
+DIALOG
+
+
+
++--------------------------------------+
+| > Leave workspace?                   |
+| Your apps will stop.                 |
+|                                      |
+| [Cancel]  Leave  (Save)              |
++--------------------------------------+
+
+
+
+
+PROGRESS
+Copy [##########----------]  50%
+
+BUSY PROGRESS (REDUCED MOTION)
+Discover [----------------] BUSY
+
+HELP
+Esc back · Enter open · (F3) stop
+
+NORMAL
+[READY]
++----------------------------------+
+| [READY] READY                    |
+| Ready when you are.              |
+|                                  |
+|                                  |
++----------------------------------+
+
+DISABLED
+[DISABLED]
++----------------------------------+
+| [DISABLED] DISABLED              |
+| This action is unavailable.      |
+|                                  |
+|                                  |
++----------------------------------+
+
+BUSY
+[BUSY]
++----------------------------------+
+| [BUSY] BUSY                      |
+| Working on your request…         |
+|                                  |
+|                                  |
++----------------------------------+
+
+SUCCESS
+[OK]
++----------------------------------+
+| [OK] OK                          |
+| All set.                         |
+|                                  |
+|                                  |
++----------------------------------+
+
+ERROR
+[FAIL]
++----------------------------------+
+| [FAIL] FAIL                      |
+| Something went wrong. Try again. |
+|                                  |
+|                                  |
++----------------------------------+
+
+EMPTY
+[EMPTY]
++----------------------------------+
+| [EMPTY] EMPTY                    |
+| Nothing here yet.                |
+|                                  |
+|                                  |
++----------------------------------+

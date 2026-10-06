@@ -411,7 +411,7 @@ func (m *Model) renderTable(kit ui.Kit, bounds ui.Bounds) string {
 			p.ID, nameStr, stateStr, p.RestartCount, cpuStr, memStr)
 
 		if focused {
-			line = kit.Selection(ui.Truncate("› "+line, w))
+			line = kit.Selection(ui.Truncate(kit.Theme().Focus.Marker+" "+line, w))
 		} else {
 			line = kit.Text(ui.Truncate("  "+line, w))
 		}
@@ -425,9 +425,17 @@ func (m *Model) renderTable(kit ui.Kit, bounds ui.Bounds) string {
 
 	// Status / Error message
 	if m.errorMsg != "" {
-		rows = append(rows, kit.StatusText(ui.Truncate("! "+m.errorMsg, w), theme.Error))
+		sym := kit.Theme().Status(theme.Error).Symbol
+		if sym != "" {
+			sym += " "
+		}
+		rows = append(rows, kit.StatusText(ui.Truncate(sym+m.errorMsg, w), theme.Error))
 	} else if m.statusMsg != "" {
-		rows = append(rows, kit.StatusText(ui.Truncate("✓ "+m.statusMsg, w), theme.Success))
+		sym := kit.Theme().Status(theme.Success).Symbol
+		if sym != "" {
+			sym += " "
+		}
+		rows = append(rows, kit.StatusText(ui.Truncate(sym+m.statusMsg, w), theme.Success))
 	} else {
 		liveCount := 0
 		for _, p := range m.procs {
