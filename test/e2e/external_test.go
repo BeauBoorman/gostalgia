@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goRuntime "runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -32,6 +33,9 @@ func getExternalBinary(t *testing.T) string {
 			return
 		}
 		bin := filepath.Join(tmpDir, "external-app")
+		if goRuntime.GOOS == "windows" {
+			bin += ".exe"
+		}
 		cmd := exec.Command("go", "build", "-o", bin, "gostalgia/test/testapps/external")
 		out, err := cmd.CombinedOutput()
 		if err != nil {

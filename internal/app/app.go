@@ -13,7 +13,10 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
+	"os"
 	"path"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -534,9 +537,15 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest) (*process.Pr
 		"GOSTALGIA_APP_ID=" + man.ID,
 		fmt.Sprintf("GOSTALGIA_PROTOCOL_VERSION=%d", sdk.ProtocolVersion),
 	}
+	execPath := man.Executable
+	if runtime.GOOS == "windows" && filepath.Ext(execPath) == "" {
+		if _, err := os.Stat(execPath + ".exe"); err == nil {
+			execPath += ".exe"
+		}
+	}
 	spec := process.Spec{
 		Name: man.ID,
-		Args: append([]string{man.Executable}, childArgs...),
+		Args: append([]string{execPath}, childArgs...),
 		Caps: caps,
 		Env:  childEnv,
 	}
