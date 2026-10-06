@@ -87,8 +87,9 @@ func (c *Counter) Run(ctx context.Context) error {
 func (c *Counter) Stop(ctx context.Context) error { return nil }
 ```
 
-`apps/echo` is the sole installed exemplar. Its `identity` method also shows a
-system-service call using `Context.Call`.
+`apps/echo` and `apps/notes` are the installed exemplars. Echo demonstrates
+basic IPC operations and presentation stats, while Notes demonstrates a complete
+document editor with safe saving, dirty state, and crash recovery.
 
 ## 3. Register and seed (both required)
 
@@ -103,7 +104,7 @@ Edit `apps/apps.go`:
    }
    ```
 
-3. Add `counter.Manifest()` to the `[]sdk.Manifest{echo.Manifest()}` slice in
+3. Add `counter.Manifest()` to the `[]sdk.Manifest{echo.Manifest(), notes.Manifest()}` slice in
    `apps.Manifests`. The runtime passes these declarations to
    `app.SeedManifests`, which creates
    `/apps/manifests/com.example.counter.json` in the environment VFS, only if
@@ -419,3 +420,92 @@ Capability scoping is enforced at the SDK/service boundary but is **not an OS
 sandbox**. Trusted in-process Go could deliberately import host APIs or forge
 an internal capability context. Do not run untrusted apps. See
 [security.md](security.md) and [architecture.md §4.1](architecture.md#41-dependency-policy).
+
+## 9. Notes: document model, safe saving, dirty state, and crash recovery
+
+`apps/notes` is Gostalgia's standard document editor application. It proves the
+document and presentation architecture using the visual language kit, safe VFS
+document operations, and the presentation contract.
+
+### Manifest and permissions
+
+```json
+{
+  "id": "com.gostalgia.notes",
+  "name": "Notes",
+  "version": "0.1.0",
+  "entrypoint": "notes",
+  "permissions": ["ipc", "fs.read", "fs.write"],
+  "description": "Text editor with safe saving, dirty state, and crash recovery."
+}
+```
+
+Notes requires `ipc` for service communication and route handling, `fs.read` to
+open notes, and `fs.write` to perform safe atomic saves and manage recovery staging.
+
+### Document model and dirty state
+
+- **Explicit document identity:** Notes tracks the target VFS path (or `[Untitled]`
+  when unsaved), the loaded/saved disk content, and the disk modification timestamp
+  (`mod_time`) and file size at load/save time.
+- **Dirty state tracking:** Content buffer modifications mark the document dirty.
+  The presentation view updates with a dirty indicator (`*` in the title and
+  `[modified]` in the document info item). Reverting the buffer back to disk content
+  clears the dirty state.
+- **Character and rune metrics:** Tracks both UTF-8 rune counts and byte counts for
+  accurate Unicode display.
+
+### Safe saving and conflict detection
+
+- **Atomic document saving:** Notes calls `fs/save` with base64-encoded payload,
+  ensuring documents are written safely via temporary staging files and atomic replacement.
+- **External modification detection:** Before writing, Notes calls `fs/stat` on the
+  target path. If the file exists and its disk `mod_time` or size differs from when
+  Notes loaded it, Notes enters `PromptConflict` (`Notes - Save Conflict*`) without
+  overwriting the disk copy.
+- **Conflict actions:** The user can select `force_save` (overwriting the disk file),
+  `save_as` (saving to a different path), or `cancel` (preserving local dirty edits).
+- **Save failure preservation:** If a save fails (e.g. permission denied or disk full),
+  Notes displays an error banner while preserving the dirty buffer and recovery draft.
+
+### Crash recovery in app-private storage
+
+- **App-private staging:** On any edit, Notes stages an unsaved draft to its private
+  partition at `/apps/data/com.gostalgia.notes/recovery.json`. Other applications cannot
+  access or tamper with this partition.
+- **Launch detection:** When Notes boots, it inspects its private storage for an
+  unsaved draft. If found, Notes presents `PromptRecovery` (`Notes - Crash Recovery Draft Found`),
+  displaying the file path, staging timestamp, and a content preview.
+- **Restoration options:** The user can invoke `restore` to reinstate the unsaved draft
+  buffer and dirty state, or `discard_recovery` to remove the draft and open a clean note.
+- **Draft cleanup:** Once a document is cleanly saved or changes are discarded, the
+  staged recovery draft is automatically removed from app-private storage via `fs/remove`.
+
+### Unsaved changes prompts
+
+When a document has unsaved edits (`dirty == true`), attempting to open another file
+or create a new document transitions Notes to `PromptUnsaved` (`Notes - Unsaved Changes*`).
+The user can select:
+- `save_and_proceed`: Saves the active document to disk, then completes the pending action.
+- `discard_and_proceed`: Discards unsaved edits and completes the pending action.
+- `cancel`: Cancels the pending action and returns to the current dirty buffer.
+
+Programmatic IPC calls to `open` and `new` similarly require `force: true` when dirty.
+
+### Presentation actions and programmatic routes
+
+Notes exposes semantic actions over the Presentation Contract (rendered in the shell
+via F4):
+- Normal mode: `save`, `save_as`, `open`, `new`
+- Recovery mode: `restore`, `discard_recovery`
+- Unsaved changes mode: `save_and_proceed`, `discard_and_proceed`, `cancel`
+- Conflict mode: `force_save`, `save_as`, `cancel`
+
+Notes also provides programmatic IPC routes under `app/com.gostalgia.notes/`:
+- `doc`: Returns `{path, content, dirty, mod_time, size, recovery_available, prompt}`
+- `open`: Opens a document `{path, force?}`
+- `save`: Saves the document `{path?, content?, force?, overwrite?}`
+- `save_as`: Saves to a new path `{path, content?, overwrite?}`
+- `new`: Creates a new note `{force?}`
+- `edit`: Updates content `{content}`
+- `recover`: Restores or discards staged draft `{restore: bool}`
