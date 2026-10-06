@@ -35,6 +35,7 @@ Rules for touching this file:
 | Event bus (typed, synchronous, wildcard) | ✅ working | `internal/events` tests |
 | Config store (dotted paths, atomic persist) | ✅ working | `internal/config` tests |
 | Capability scoping: app Call/Handle adapters enforce manifest grants | ✅ working | SDK adapters replace caller grants; IPC methods reject unauthorized app calls; admin tokens remain trusted operator clients — see `docs/security.md` |
+| App identity & scoped grants: distinct per-app tokens, manifest capability grants, lifecycle revocation | ✅ working | `internal/security`, `internal/ipc`, `internal/app` unit + socket integration + `test/e2e` |
 | Cross-platform compile (darwin/linux/windows) | ✅ compiles | `GOOS=` builds in CI matrix |
 | Cross-platform behavior: CI runs the full test suite on ubuntu, macOS, and Windows runners | ✅ CI-green (Windows: full fstest skipped — see `docs/filesystem.md` metadata caveat; structural checks run everywhere) | `.github/workflows/ci.yml` |
 
@@ -51,12 +52,14 @@ go run ./cmd/gctl --root /tmp/gs status      # terminal 2
 
 ## Known gaps (honest list)
 
-- **No OS sandbox.** SDK calls and routes enforce manifest capability scoping
-  and prevent borrowing caller permissions, but apps still run in-process;
-  malicious Go code could bypass in-process checks. The socket token provides
-  local operator authentication, not an isolation boundary. Arbitrary external
-  apps remain trusted-only until platform sandboxing is implemented (Milestone 4,
-  issues [#35](https://github.com/drawmeanelephant/gostalgia/issues/35)–[#39](https://github.com/drawmeanelephant/gostalgia/issues/39)).
+- **No OS sandbox.** While distinct authenticated app identities, scoped
+  manifest capability grants, and lifecycle revocation are implemented at the
+  IPC transport layer ([#35](https://github.com/drawmeanelephant/gostalgia/issues/35)),
+  apps still run in-process; malicious Go code could bypass in-process checks.
+  The socket token provides local operator authentication, not an isolation
+  boundary. Arbitrary external apps remain trusted-only until platform
+  sandboxing is implemented (Milestone 4, issues
+  [#36](https://github.com/drawmeanelephant/gostalgia/issues/36)–[#39](https://github.com/drawmeanelephant/gostalgia/issues/39)).
 - **No process supervision or log capture yet:** `proc/list` returns
   `process.Info` snapshots (including `exit_code`, timing, and error state) over
   IPC, but `gctl ps` and shell `ps` do not yet render exit codes; exited
@@ -114,7 +117,7 @@ SDK are merged and verified (`test/e2e`, `internal/experience/shell`,
 
 ### Milestone 4: 04: Application isolation and trust
 
-- [ ] **[#35 Security: give external apps distinct authenticated identities and scoped grants](https://github.com/drawmeanelephant/gostalgia/issues/35)** — separate operator authority from app principals; lifecycle-bound tokens.
+- [x] **[#35 Security: give external apps distinct authenticated identities and scoped grants](https://github.com/drawmeanelephant/gostalgia/issues/35)** — separate operator authority from app principals; lifecycle-bound tokens.
 - [ ] **[#36 Apps: launch external Go applications over the environment protocol](https://github.com/drawmeanelephant/gostalgia/issues/36)** — external Go app execution, protocol compatibility, process tracking.
 - [ ] **[#37 Security: add app-private storage and scoped VFS grants](https://github.com/drawmeanelephant/gostalgia/issues/37)** — per-app private storage roots, scoped file-selection grants.
 - [ ] **[#38 Security: enforce platform-specific app execution and resource policies](https://github.com/drawmeanelephant/gostalgia/issues/38)** — host enforcement on macOS and Linux; honest unsupported reporting.
@@ -134,6 +137,7 @@ SDK are merged and verified (`test/e2e`, `internal/experience/shell`,
 
 | Date | Check | Result |
 |---|---|---|
+| 2026-10-06 | Security: distinct authenticated app identities and scoped grants (#35): Principal/TokenStore, operator vs app tokens, per-request validation, revocation on app exit/stop, CleanEnv secret scrubbing, socket e2e tests | Full gate green (vet, gofmt, -race, e2e); denied undeclared methods, stale token replay rejected, confused-deputy protection verified |
 | 2026-10-05 | Charm shell + public capability-scoped SDK; one embedded-manifest Echo demo; spec read against implementation | Build/vet/gofmt/race green; pure-Go and Windows/Linux builds OK; real Bubble Tea socket integration + compiled CLI PTY smoke (echo, scoped identity, stop/relaunch, F2 shelf, exit/terminal restoration/runtime cleanup); no second demo built |
 | 2026-10-05 | FIFO regression (#16): `HostFS.Stat`/`ReadDir` no longer `os.Root.Open` special files — Lstat fallback for FIFOs, sockets, devices, symlinks; regression tests for `Stat`, `ReadDir`, and `ipc.Server.Close` with a `fs/list` handler in flight over a real socket | repro tests fail unfixed, pass fixed; full gate green (`vet`, `gofmt`, `-race`) |
 | 2026-10-05 | Docs drift (#17): `status.md` "Last verified" no longer hardcodes test counts (CI is the source of truth); `security.md`/`ipc.md` scope the `runtime.json` 0600 mode to unix — Windows inherits directory ACLs | docs match the code |

@@ -167,6 +167,12 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		logFile.Close()
 		return nil, err
 	}
+	tokens := security.NewTokenStore()
+	if err := tokens.RegisterOperator(token, rt.User); err != nil {
+		logFile.Close()
+		return nil, err
+	}
+	rt.Apps.SetTokenStore(tokens)
 
 	svcCtx := &service.Context{
 		Root:     root,
@@ -179,6 +185,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		Procs:    rt.Procs,
 		Apps:     rt.Apps,
 		Sessions: rt.Sessions,
+		Tokens:   tokens,
 		Token:    token,
 		BootedAt: time.Now(),
 	}

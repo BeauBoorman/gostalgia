@@ -53,7 +53,11 @@ func (s *IPCService) Start(ctx context.Context) error {
 	s.listener = ln
 	s.endpoint = endpoint
 
-	srv := ipc.NewServer(ln, s.ctx.Router, s.ctx.Token, s.log)
+	var auth any = s.ctx.Token
+	if s.ctx.Tokens != nil {
+		auth = s.ctx.Tokens
+	}
+	srv := ipc.NewServer(ln, s.ctx.Router, auth, s.log)
 	s.server = srv
 	// Serve from a local: the unwind path below nils s.server, and the
 	// goroutine must not race that write.

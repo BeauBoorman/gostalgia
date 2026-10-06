@@ -143,6 +143,7 @@ type Manager struct {
 	procs   *process.Manager
 	router  *ipc.Router
 	bus     *events.Bus
+	tokens  *security.TokenStore
 	log     *slog.Logger
 	mu      sync.Mutex
 	running map[string]*runningApp
@@ -150,11 +151,45 @@ type Manager struct {
 
 type runningApp struct {
 	pid        int32 // zero while initializing
+	token      string
 	cleanupErr error // written before process Done closes
 }
 
 func NewManager(reg *Registry, procs *process.Manager, router *ipc.Router, bus *events.Bus, log *slog.Logger) *Manager {
-	return &Manager{reg: reg, procs: procs, router: router, bus: bus, log: log, running: map[string]*runningApp{}}
+	return &Manager{
+		reg:     reg,
+		procs:   procs,
+		router:  router,
+		bus:     bus,
+		tokens:  security.NewTokenStore(),
+		log:     log,
+		running: map[string]*runningApp{},
+	}
+}
+
+// SetTokenStore configures the token store used for application credentials.
+func (m *Manager) SetTokenStore(tokens *security.TokenStore) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tokens = tokens
+}
+
+// TokenStore returns the token store.
+func (m *Manager) TokenStore() *security.TokenStore {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.tokens
+}
+
+// AppToken returns the launch-bound credential issued for a running app.
+func (m *Manager) AppToken(id string) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ra, ok := m.running[id]
+	if !ok || ra.token == "" {
+		return "", false
+	}
+	return ra.token, true
 }
 
 // invoke turns lifecycle panics into process/launch errors, never success.
@@ -203,20 +238,36 @@ func (m *Manager) Launch(ctx context.Context, id string) (*process.Process, erro
 		return nil, fmt.Errorf("app: %s: factory returned nil", id)
 	}
 
-	life, cancel := context.WithCancel(ctx)
+	var appToken string
 	caps := append([]string(nil), man.Permissions...)
+	if m.tokens != nil {
+		var tokErr error
+		appToken, tokErr = m.tokens.IssueAppToken(id, 0, "", security.User{Name: "guest"}, caps...)
+		if tokErr != nil {
+			forget()
+			return nil, fmt.Errorf("app: issue token for %s: %w", id, tokErr)
+		}
+		ra.token = appToken
+	}
+
+	life, cancel := context.WithCancel(ctx)
 	base := "app/" + id + "/"
 	var mu sync.Mutex
 	initializing, active := true, true
 	registered := false
 	routes := map[string]ipc.Handler{}
 	var inflight sync.WaitGroup
-	// Always replace incoming caps: an operator calling this app must not
-	// lend the app operator privileges (the confused-deputy boundary).
+
+	// Always replace incoming caps and principal: an operator calling this app
+	// must not lend the app operator privileges (the confused-deputy boundary).
 	scope := func(parent context.Context) (context.Context, func()) {
 		c, stop := context.WithCancel(parent)
 		detach := context.AfterFunc(life, stop)
 		c = ipc.WithCapabilities(c, security.NewCapabilities(caps...))
+		m.mu.Lock()
+		curPID := ra.pid
+		m.mu.Unlock()
+		c = ipc.WithPrincipal(c, security.AppPrincipal(id, curPID, "", security.User{Name: "guest"}))
 		return c, func() { detach(); stop() }
 	}
 	call := func(parent context.Context, method string, params, out any) error {
@@ -283,6 +334,9 @@ func (m *Manager) Launch(ctx context.Context, id string) (*process.Process, erro
 		active, initializing = false, false
 		mu.Unlock()
 		cancel()
+		if m.tokens != nil && ra.token != "" {
+			m.tokens.Revoke(ra.token)
+		}
 		if registered {
 			for method := range routes {
 				m.router.Unhandle(method)
@@ -341,6 +395,9 @@ func (m *Manager) Launch(ctx context.Context, id string) (*process.Process, erro
 	m.mu.Lock()
 	ra.pid = proc.ID()
 	m.mu.Unlock()
+	if m.tokens != nil && appToken != "" {
+		m.tokens.BindProcess(appToken, proc.ID())
+	}
 	// Release Run before publishing: event subscribers may synchronously Stop.
 	close(ready)
 	m.bus.Publish("app", Event{ID: id, PID: proc.ID(), State: "launched"})

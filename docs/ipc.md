@@ -35,14 +35,31 @@ synchronously retract its own route.
 
 ## Authentication
 
-The first request on every connection must be `auth` with the environment
-token (`{"method":"auth","params":{"token":"..."}}`). The token lives in
-`runtime.json` (mode 0600 on unix; on Windows the mode does not map to an
-ACL — the file inherits the environment directory's permissions) under the
-environment root. Authenticated connections receive the admin capability set.
+The first request on every connection must be `auth` with either the operator
+environment token or a scoped application token
+(`{"method":"auth","params":{"token":"..."}}`).
 
-This protects against accidental cross-user access only. It is local trust,
-not a security boundary — see security.md.
+- **Operator connections:** The operator token lives in `runtime.json` (mode
+  0600 on unix; on Windows the mode does not map to an ACL — the file inherits
+  the environment directory's permissions) under the environment root.
+  Authenticated operator connections receive the `admin` capability set and
+  operator principal identity.
+- **Application connections:** When an application is launched, the runtime
+  generates a distinct, cryptographically random token bound to the application
+  identity, process ID, session ID, and declared manifest capability grants.
+  App tokens are never written to `runtime.json`, leaked to process listings,
+  or exposed in child environments.
+- **Continuous validation & lifecycle revocation:** The IPC server continuously
+  validates connection credentials against the token store on each request. When
+  an application stops or exits, its credentials are immediately revoked.
+  In-flight or subsequent requests on existing connections are rejected with
+  `unauthorized: credential revoked` and the connection is closed; new
+  connection attempts with stale tokens fail handshake with `unauthorized: token
+  revoked`.
+
+This protects against accidental cross-user access and enforces least-privilege
+grants between applications. Arbitrary external code remains untrusted until OS
+sandbox enforcement is implemented — see security.md.
 
 ## Method namespaces
 
