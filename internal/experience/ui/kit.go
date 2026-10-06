@@ -87,3 +87,7 @@ func (k Kit) Selection(text string) string {
 	f := k.theme.Focus
 	return k.paint(text, f.Text, f.Fill, k.theme.Typography.HeadingBold)
 }
+
+func (k Kit) FocusText(text string) string {
+	return k.Selection(k.theme.Focus.Marker + " " + text)
+}

@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"gostalgia/internal/experience/theme"
 	"gostalgia/internal/experience/ui"
+	"gostalgia/sdk"
 )
 
 const maxTranscript = 400
@@ -74,9 +75,9 @@ type Model struct {
 	shelf         bool
 	busy          bool
 	scroll        int
+	kit           ui.Kit
 	presentation  *appView
 	viewEpoch     uint64
-	kit           ui.Kit
 
 	mode            viewMode
 	homeData        homeData
@@ -496,7 +497,12 @@ func (m *Model) View() string {
 	case modePrompt:
 		active = 2
 	}
-	tabs := m.kit.Tabs([]ui.Tab{{Label: "Home"}, {Label: "Apps"}, {Label: "Prompt"}}, active, w)
+	tabItems := []ui.Tab{{Label: "Home"}, {Label: "Apps"}, {Label: "Prompt"}}
+	if m.presentation != nil {
+		tabItems = append(tabItems, ui.Tab{Label: viewText(m.presentation.data.Title)})
+		active = 3
+	}
+	tabs := m.kit.Tabs(tabItems, active, w)
 	badge := m.kit.Badge("ONLINE", theme.Success, w) + m.kit.Muted("   guest · C: environment drive")
 	bodyHeight := max(1, m.height-9)
 	var lines []string
@@ -506,7 +512,7 @@ func (m *Model) View() string {
 	} else if m.presentation != nil {
 		lines = m.viewLines(bodyHeight)
 		for i, line := range lines {
-			lines[i] = lipgloss.NewStyle().MaxWidth(w).MaxHeight(1).Render(line)
+			lines[i] = ui.Truncate(line, w)
 		}
 	} else {
 		switch m.currentMode() {
@@ -575,7 +581,6 @@ func (m *Model) View() string {
 		after := ui.Fit(string(m.input[m.cursor:]), ui.Bounds{Width: room - lipgloss.Width(before), Height: 1})
 		prompt += m.kit.Text(before) + m.kit.Selection(" ") + m.kit.Text(after)
 	}
-
 	var bindings []ui.Binding
 	if m.paletteOpen {
 		items := m.filteredPaletteItems()
@@ -586,9 +591,14 @@ func (m *Model) View() string {
 			{Key: "Ctrl-C", Help: "EXIT"},
 		}
 	} else if m.presentation != nil {
+		v := m.presentation
+		blocked := v.busy || v.instance == "" || v.data.State == sdk.ViewLoading
+		action := max(0, v.focus-len(v.data.Fields))
+		actionBlocked := blocked || action >= len(v.data.Actions) || v.data.Actions[action].Disabled
 		bindings = []ui.Binding{
-			{Key: "Esc", Help: "PROMPT"},
-			{Key: "Ctrl-C", Help: "EXIT"},
+			{Key: "Esc", Help: "CANCEL/BACK"}, {Key: "Ctrl-C", Help: "EXIT"},
+			{Key: "Tab", Help: "FOCUS", Disabled: blocked}, {Key: "Enter", Help: "ACTION", Disabled: actionBlocked},
+			{Key: "↑↓", Help: "ITEM", Disabled: blocked}, {Key: "F2", Help: "APPS"},
 		}
 	} else if m.currentMode() == modeLauncher {
 		filtered := m.filteredApps()

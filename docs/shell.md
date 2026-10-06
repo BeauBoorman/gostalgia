@@ -45,6 +45,10 @@ JSON is preserved, not passed through path/quote parsing.
 - **F2**: switch between prompt and app shelf. **↑/↓** selects an app;
   **Enter** launches it; **F3** stops it; **Esc** returns to the prompt. The
   shelf displays description and manifest permissions.
+- **F4**: open the selected running app's data/action view. Tab/Shift-Tab moves
+  focus, Enter invokes an enabled action, and ↑/↓ selects an item. Esc cancels
+  busy work or returns to the prompt. F2 returns to the shelf. See
+  [the presentation contract](applications.md#7-dataaction-presentation-contract-version-1).
 - **↑/↓** at prompt: history (100 commands, current draft restored).
 - **Tab**: complete an unambiguous command or ID after launch/run/stop.
 - **Left/Right, Home/End, Ctrl-A/E**: move cursor. Backspace/Delete edits;

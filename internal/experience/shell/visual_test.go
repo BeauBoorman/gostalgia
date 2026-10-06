@@ -13,12 +13,13 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"gostalgia/internal/experience/theme"
 	"gostalgia/internal/experience/ui"
+	"gostalgia/sdk"
 )
 
 var updateVisual = flag.Bool("update-visual", false, "update shell visual golden snapshots")
 
 func TestShellVisualSnapshots(t *testing.T) {
-	for _, view := range []string{"home", "shelf", "empty", "busy", "error"} {
+	for _, view := range []string{"home", "shelf", "empty", "busy", "error", "app", "app-loading", "app-error", "app-disabled"} {
 		t.Run(view, func(t *testing.T) {
 			m := NewWithTheme(context.Background(), noopCaller{}, nil, theme.Nostalgia(), ui.Plain)
 			if view == "shelf" || view == "empty" {
@@ -37,6 +38,23 @@ func TestShellVisualSnapshots(t *testing.T) {
 			m.busy = view == "busy"
 			if view == "error" {
 				m.append(entry{"The app couldn't start. Try again.", "error"})
+			}
+			if strings.HasPrefix(view, "app") {
+				data := screenData()
+				m.presentation = &appView{
+					data: data, instance: data.Instance, values: map[string]string{"text": "A thought worth keeping."},
+				}
+				switch view {
+				case "app-loading":
+					m.presentation.data.State = sdk.ViewLoading
+					m.presentation.busy = true
+				case "app-error":
+					m.presentation.data.State = sdk.ViewError
+					m.presentation.data.Error = "Unable to send. Try again."
+				case "app-disabled":
+					m.presentation.data.Actions[0].Disabled = true
+					m.presentation.focus = 1
+				}
 			}
 			rendered := strings.Split(m.View(), "\n")
 			for i := range rendered {

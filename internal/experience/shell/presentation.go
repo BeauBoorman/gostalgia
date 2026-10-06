@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"gostalgia/internal/experience/theme"
+	"gostalgia/internal/experience/ui"
 	"gostalgia/sdk"
 )
 
@@ -334,7 +335,7 @@ func (m *Model) viewLines(height int) []string {
 	v := m.presentation
 	lines := []string{m.kit.Heading(viewText(v.data.Title)), m.kit.Muted("Tab focus · Enter action · ↑↓ item · Esc cancel/back")}
 	if v.busy || v.data.State == sdk.ViewLoading {
-		lines = append(lines, m.kit.Muted("Loading…"))
+		lines = append(lines, m.kit.Badge("Loading…", theme.Busy, max(0, m.width-4)))
 	}
 	if v.banner != "" {
 		lines = append(lines, m.kit.StatusText(viewText(v.banner), theme.Error))
@@ -346,30 +347,33 @@ func (m *Model) viewLines(height int) []string {
 	for i, item := range v.data.Items {
 		text := viewText(item.Label + ": " + item.Detail)
 		if i == v.item {
-			text = m.kit.Selection("› " + text)
+			text = m.kit.FocusText(text)
+		} else {
+			text = m.kit.Text(text)
 		}
 		rows = append(rows, text)
 	}
 	for i, field := range v.data.Fields {
 		label := viewText(field.Label) + ": "
-		value := []rune(viewText(v.values[field.ID]))
+		value := viewText(v.values[field.ID])
 		room := max(1, m.width-8-lipgloss.Width(label))
-		for len(value) > 0 && lipgloss.Width(string(value)) > room {
-			value = value[1:]
-		}
-		text := label + string(value)
+		text := label + ui.Tail(value, room)
 		if i == v.focus {
-			text = m.kit.Selection("› " + text + " ")
+			text = m.kit.FocusText(text + " ")
+		} else {
+			text = m.kit.Text(text)
 		}
 		rows = append(rows, text)
 	}
 	for i, action := range v.data.Actions {
 		text := "[" + viewText(action.Label) + "]"
-		if action.Disabled {
+		if action.Disabled || v.busy || v.data.State == sdk.ViewLoading {
 			text += " (disabled)"
-		}
-		if len(v.data.Fields)+i == v.focus {
-			text = m.kit.Selection("› " + text)
+			text = m.kit.StatusText(text, theme.Disabled)
+		} else if len(v.data.Fields)+i == v.focus {
+			text = m.kit.FocusText(text)
+		} else {
+			text = m.kit.Text(text)
 		}
 		rows = append(rows, text)
 	}
