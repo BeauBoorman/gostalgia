@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -120,10 +121,15 @@ func (c *Client) call(ctx context.Context, method string, params, out any, buffe
 		return nil, errors.New("ipc: connection closed")
 	}
 	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	case result := <-pending.result:
 		if result.err != nil {
 			if err := ctx.Err(); err != nil {
 				return nil, err
+			}
+			if d, ok := ctx.Deadline(); ok && (errors.Is(result.err, os.ErrDeadlineExceeded) || !time.Now().Before(d)) {
+				return nil, context.DeadlineExceeded
 			}
 			return nil, result.err
 		}
@@ -154,7 +160,7 @@ func (c *Client) writeLoop() {
 		if item.ctx.Err() != nil {
 			continue
 		}
-		deadline, _ := item.ctx.Deadline()
+		deadline, hasDeadline := item.ctx.Deadline()
 		_ = c.conn.SetWriteDeadline(deadline)
 		fired := make(chan struct{})
 		stop := context.AfterFunc(item.ctx, func() {
@@ -166,8 +172,14 @@ func (c *Client) writeLoop() {
 			<-fired
 		}
 		if err != nil {
-			// A partial write cannot be safely resumed as another frame.
-			c.fail(fmt.Errorf("ipc: write: %w", err))
+			if item.ctx.Err() != nil {
+				c.fail(fmt.Errorf("ipc: write: %w", item.ctx.Err()))
+			} else if hasDeadline && (errors.Is(err, os.ErrDeadlineExceeded) || !time.Now().Before(deadline)) {
+				c.fail(fmt.Errorf("ipc: write: %w", context.DeadlineExceeded))
+			} else {
+				// A partial write cannot be safely resumed as another frame.
+				c.fail(fmt.Errorf("ipc: write: %w", err))
+			}
 			return
 		}
 	}

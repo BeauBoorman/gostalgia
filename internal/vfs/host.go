@@ -9,6 +9,8 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync/atomic"
+	"time"
 )
 
 // validFSName enforces the io/fs name contract on the raw backends:
@@ -34,6 +36,9 @@ func validFSName(op, name string) error {
 type HostFS struct {
 	root     *os.Root
 	rootPath string
+
+	saveStageHook  func(stageName string) error
+	saveRenameHook func(stageName, targetName string) error
 }
 
 // NewHost opens dir as the backing directory for a HostFS.
@@ -191,4 +196,136 @@ func (h *HostFS) Remove(name string) error {
 		return &fs.PathError{Op: "remove", Path: name, Err: errors.New("cannot remove the root")}
 	}
 	return h.root.Remove(name)
+}
+
+func (h *HostFS) Rename(oldName, newName string) error {
+	if err := validFSName("rename", oldName); err != nil {
+		return err
+	}
+	if err := validFSName("rename", newName); err != nil {
+		return err
+	}
+	if oldName == "." || newName == "." {
+		return &fs.PathError{Op: "rename", Path: oldName, Err: errors.New("cannot rename the root")}
+	}
+	return h.root.Rename(oldName, newName)
+}
+
+func (h *HostFS) RemoveAll(name string) error {
+	if err := validFSName("removeall", name); err != nil {
+		return err
+	}
+	if name == "." {
+		return &fs.PathError{Op: "removeall", Path: name, Err: errors.New("cannot remove the root")}
+	}
+	return h.root.RemoveAll(name)
+}
+
+var hostSaveSeq atomic.Uint64
+
+func (h *HostFS) SaveAtomic(name string, data []byte, perm fs.FileMode) error {
+	if err := validFSName("save", name); err != nil {
+		return err
+	}
+	if name == "." {
+		return &fs.PathError{Op: "save", Path: name, Err: errors.New("cannot save to root")}
+	}
+	if int64(len(data)) > MaxDocumentSize {
+		return &Error{
+			Op:      "save",
+			Path:    "/" + name,
+			Code:    ErrTooLarge,
+			Message: fmt.Sprintf("document size %d exceeds limit of %d bytes", len(data), MaxDocumentSize),
+		}
+	}
+	// If destination exists and is a directory, refuse to overwrite with a file.
+	if info, err := h.root.Lstat(name); err == nil && info.IsDir() {
+		return &Error{
+			Op:      "save",
+			Path:    "/" + name,
+			Code:    ErrIsDir,
+			Message: "destination is a directory",
+		}
+	}
+
+	dir := path.Dir(name)
+	if dir != "." {
+		if err := h.root.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	if perm == 0 {
+		perm = 0o644
+	}
+
+	// Staging file in the same directory guarantees it shares the filesystem mount.
+	seq := hostSaveSeq.Add(1)
+	stageName := fmt.Sprintf("%s.tmp.%d.%d", name, time.Now().UnixNano(), seq)
+	f, err := h.root.OpenFile(stageName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+
+	if h.saveStageHook != nil {
+		if hookErr := h.saveStageHook(stageName); hookErr != nil {
+			_ = f.Close()
+			_ = h.root.Remove(stageName)
+			return hookErr
+		}
+	}
+
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = h.root.Remove(stageName)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = h.root.Remove(stageName)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = h.root.Remove(stageName)
+		return err
+	}
+
+	if h.saveRenameHook != nil {
+		if hookErr := h.saveRenameHook(stageName, name); hookErr != nil {
+			recoverName := fmt.Sprintf("%s.recover", name)
+			if rErr := h.root.Rename(stageName, recoverName); rErr != nil {
+				recoverName = stageName
+			}
+			return &Error{
+				Op:          "save",
+				Path:        "/" + name,
+				RecoverPath: "/" + recoverName,
+				Code:        ErrIO,
+				Err:         hookErr,
+				Message:     fmt.Sprintf("atomic replacement failed: %v", hookErr),
+			}
+		}
+	}
+
+	if err := h.root.Rename(stageName, name); err != nil {
+		// Preserve staged data as a recoverable artifact rather than silently losing it.
+		recoverName := fmt.Sprintf("%s.recover", name)
+		if rErr := h.root.Rename(stageName, recoverName); rErr != nil {
+			recoverName = stageName
+		}
+		return &Error{
+			Op:          "save",
+			Path:        "/" + name,
+			RecoverPath: "/" + recoverName,
+			Code:        ErrIO,
+			Err:         err,
+			Message:     fmt.Sprintf("atomic replacement failed: %v", err),
+		}
+	}
+	return nil
+}
+
+// SetSaveHooks sets hooks for testing failure injection during atomic saves.
+func (h *HostFS) SetSaveHooks(stageHook func(string) error, renameHook func(string, string) error) {
+	h.saveStageHook = stageHook
+	h.saveRenameHook = renameHook
 }

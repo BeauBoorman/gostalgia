@@ -29,7 +29,7 @@ Rules for touching this file:
 | IPC: in-proc + socket transports, token handshake, NDJSON | ✅ working | `internal/ipc` tests + `gctl` manual/e2e |
 | IPC: concurrent calls, versioned subscriptions, bounded metadata-only audit history | working | `internal/ipc` race stress (slow clients, floods, malformed frames, reconnect/epochs, permissions); `test/e2e` real runtime lifecycle notifications and secret/document redaction |
 | Process model: in-proc lifecycle, child spawn/kill/exit-status | ✅ working | `internal/process` tests (self-exec child helper); `proc/list` returns `exit_code` over IPC |
-| VFS: env paths, host backend confined via `os.Root`, memfs `/tmp`, mounts | ✅ working | `testing/fstest` + escape/mount tests |
+| VFS: safe doc ops, atomic save + recovery fallback, copy/move, trash/restore, host/memfs backends, mounts | ✅ working | unit tests + e2e + failure injection + fstest |
 | App SDK: embedded JSON manifest, Init/Run/Stop, scoped calls/routes, launch/stop | ✅ working | `sdk`, `internal/app`, services + shell socket lifecycle tests |
 | Charm shell: DOS-style prompt, app shelf, history/completion, VFS/process commands | ✅ working | `internal/experience/shell` (real Bubble Tea + authenticated IPC) |
 | Charm baseline & dependency fences: Bubble Tea v1.3.10, Lip Gloss v1.1.0, Bubbles v1.0.0 | ✅ working | `test/e2e` dependency fences (`TestCoreDependencyBoundary`, `TestCharmRestrictedToExperienceShell`, `TestApprovedCharmBaseline`, `TestNoStandaloneHostExecutables`) |
@@ -105,7 +105,7 @@ SDK are merged and verified (`test/e2e`, `internal/experience/shell`,
 
 ### Milestone 2: 02: Everyday apps and documents
 
-- [ ] **[#25 Filesystem: add safe VFS document operations and recoverable saves](https://github.com/drawmeanelephant/gostalgia/issues/25)** — atomic saves, copy/move, trash/restore, bounded reads/writes.
+- [x] **[#25 Filesystem: add safe VFS document operations and recoverable saves](https://github.com/drawmeanelephant/gostalgia/issues/25)** — atomic saves, copy/move, trash/restore, bounded reads/writes.
 - [ ] **[#26 Apps: define a data/action presentation contract with one terminal owner](https://github.com/drawmeanelephant/gostalgia/issues/26)** — typed/versioned data and action contracts; shell alone owns rendering.
 - [ ] **[#27 Apps: build a VFS-backed Files browser](https://github.com/drawmeanelephant/gostalgia/issues/27)** — keyboard browsing, sorting, previews, file operations.
 - [ ] **[#28 Apps: build Notes with safe saving, dirty state, and crash recovery](https://github.com/drawmeanelephant/gostalgia/issues/28)** — editor, save/save-as, dirty indicator, crash recovery.

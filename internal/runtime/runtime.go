@@ -277,6 +277,7 @@ func InitRoot(root string) error {
 		"/users/guest/downloads",
 		"/users/guest/desktop",
 		"/users/guest/config",
+		"/users/guest/.trash",
 		"/apps/manifests",
 		"/data",
 		"/mounts",
