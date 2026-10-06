@@ -197,6 +197,7 @@ type Process struct {
 	runCancel    context.CancelFunc
 	done         chan struct{}
 	cmd          *exec.Cmd // child only
+	pid          int       // child host PID
 	stdout       *RingBuffer
 	stderr       *RingBuffer
 	combined     *RingBuffer
@@ -227,10 +228,10 @@ func (p *Process) Info() Info {
 	defer p.mu.Unlock()
 	info := p.info
 	info.Caps = append([]string(nil), info.Caps...)
-	if p.cmd != nil {
-		info.Resources = platform.SampleProcessResources(p.cmd)
-	} else {
-		info.Resources = platform.ResourceUsage{Supported: false}
+	if info.State == StateRunning && p.pid > 0 {
+		if res := platform.SampleProcessResources(p.pid); res.Supported {
+			info.Resources = res
+		}
 	}
 	return info
 }
@@ -662,6 +663,7 @@ func (m *Manager) StartChild(ctx context.Context, spec Spec) (*Process, error) {
 	p.runCtx = runCtx
 	p.runCancel = runCancel
 	p.cmd = cmd
+	p.pid = cmd.Process.Pid
 	p.info.State = StateRunning
 	m.add(p)
 	m.publish(p) // starting
@@ -694,6 +696,8 @@ func (m *Manager) superviseChild(p *Process) {
 			cmd := m.buildChildCmd(runCtx, p.spec, p.info.ID, p.stdout, p.stderr, p.combined)
 			if err := cmd.Start(); err != nil {
 				runCancel()
+				p.cmd = nil
+				p.pid = 0
 				p.info.State = StateFailed
 				p.info.Err = fmt.Sprintf("restart failed: %v", err)
 				p.mu.Unlock()
@@ -704,6 +708,7 @@ func (m *Manager) superviseChild(p *Process) {
 			p.runCtx = runCtx
 			p.runCancel = runCancel
 			p.cmd = cmd
+			p.pid = cmd.Process.Pid
 			p.info.State = StateRunning
 			p.info.StartedAt = time.Now()
 			p.mu.Unlock()
@@ -726,7 +731,7 @@ func (m *Manager) superviseChild(p *Process) {
 		p.info.ExitedAt = now
 		if cmd.ProcessState != nil {
 			p.info.ExitCode = cmd.ProcessState.ExitCode()
-			p.info.Resources = platform.SampleProcessResources(cmd)
+			p.info.Resources = platform.SampleProcessState(cmd.ProcessState)
 		}
 
 		userStopped := p.userStopped || m.isShuttingDown()

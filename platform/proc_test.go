@@ -5,16 +5,20 @@ import (
 	"testing"
 )
 
-func TestSampleProcessResourcesNil(t *testing.T) {
-	u := SampleProcessResources(nil)
+func TestSampleProcessResources(t *testing.T) {
+	u := SampleProcessResources(-1)
 	if u.Supported {
-		t.Errorf("expected Supported=false for nil cmd, got true")
+		t.Errorf("expected Supported=false for negative pid, got true")
 	}
 
-	cmd := &exec.Cmd{}
-	u = SampleProcessResources(cmd)
+	u = SampleProcessResources(0)
 	if u.Supported {
-		t.Errorf("expected Supported=false for cmd without running process, got true")
+		t.Errorf("expected Supported=false for zero pid, got true")
+	}
+
+	stateUsage := SampleProcessState(nil)
+	if stateUsage.Supported {
+		t.Errorf("expected Supported=false for nil ProcessState, got true")
 	}
 }
 

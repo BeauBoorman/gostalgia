@@ -34,22 +34,9 @@ func KillProcessTree(cmd *exec.Cmd) error {
 	return cmd.Process.Kill()
 }
 
-// SampleProcessResources samples resource usage for an active or exited child process.
+// SampleProcessResources samples resource usage for an active process by PID.
 // Unsupported metrics or platforms return Supported: false.
-func SampleProcessResources(cmd *exec.Cmd) ResourceUsage {
-	if cmd == nil || cmd.Process == nil {
-		return ResourceUsage{Supported: false}
-	}
-	// If the process has exited, return CPU usage from ProcessState if available.
-	if cmd.ProcessState != nil {
-		return ResourceUsage{
-			Supported: true,
-			CPUUserMs: cmd.ProcessState.UserTime().Milliseconds(),
-			CPUSysMs:  cmd.ProcessState.SystemTime().Milliseconds(),
-		}
-	}
-
-	pid := cmd.Process.Pid
+func SampleProcessResources(pid int) ResourceUsage {
 	if pid <= 0 {
 		return ResourceUsage{Supported: false}
 	}
