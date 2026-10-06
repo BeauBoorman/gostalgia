@@ -1,14 +1,17 @@
 package e2e
 
 import (
+	"bufio"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestCoreDependencyBoundary(t *testing.T) {
 	cmd := exec.Command("go", "list", "-deps", "-f", "{{if not .Standard}}{{.ImportPath}}{{end}}",
-		"gostalgia/internal/runtime", "gostalgia/sdk", "gostalgia/apps/echo", "gostalgia/cmd/gctl")
+		"gostalgia/internal/runtime", "gostalgia/sdk", "gostalgia/apps/...", "gostalgia/cmd/gctl")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("inspect dependency graph: %v\n%s", err, out)
@@ -17,5 +20,107 @@ func TestCoreDependencyBoundary(t *testing.T) {
 		if !strings.HasPrefix(pkg, "gostalgia/") {
 			t.Errorf("core/SDK dependency escaped stdlib boundary: %s", pkg)
 		}
+		if strings.Contains(pkg, "charmbracelet") || strings.Contains(pkg, "charm.land") {
+			t.Errorf("core/SDK dependency includes Charm package: %s", pkg)
+		}
+	}
+}
+
+func TestCharmRestrictedToExperienceShell(t *testing.T) {
+	cmd := exec.Command("go", "list", "-f", "{{.ImportPath}}|{{join .Imports \",\"}}", "gostalgia/...")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("list imports: %v\n%s", err, out)
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.SplitN(line, "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		pkgPath := parts[0]
+		imports := strings.Split(parts[1], ",")
+
+		for _, imp := range imports {
+			imp = strings.TrimSpace(imp)
+			if strings.Contains(imp, "charmbracelet") || strings.Contains(imp, "charm.land") {
+				if pkgPath != "gostalgia/internal/experience/shell" {
+					t.Errorf("package %s imports Charm library %s (restricted to internal/experience/shell)", pkgPath, imp)
+				}
+			}
+		}
+	}
+}
+
+func TestApprovedCharmBaseline(t *testing.T) {
+	cmd := exec.Command("go", "list", "-m", "-f", "{{if not .Indirect}}{{.Path}} {{.Version}}{{end}}", "all")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("list direct modules: %v\n%s", err, out)
+	}
+
+	expectedDirect := map[string]string{
+		"gostalgia":                          "",
+		"github.com/charmbracelet/bubbles":   "v1.0.0",
+		"github.com/charmbracelet/bubbletea": "v1.3.10",
+		"github.com/charmbracelet/lipgloss":  "v1.1.0",
+	}
+
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Fields(line)
+		modPath := parts[0]
+		version := ""
+		if len(parts) > 1 {
+			version = parts[1]
+		}
+
+		expectedVer, allowed := expectedDirect[modPath]
+		if !allowed {
+			t.Errorf("unexpected direct dependency in go.mod: %s %s", modPath, version)
+			continue
+		}
+		if expectedVer != "" && version != expectedVer {
+			t.Errorf("module %s pinned to %s, want %s", modPath, version, expectedVer)
+		}
+	}
+}
+
+func TestNoStandaloneHostExecutables(t *testing.T) {
+	// Standalone Charm executables (gum, glow, vhs) or host shells must not be runtime dependencies.
+	root := filepath.Join("..", "..")
+	forbiddenBinaries := []string{"gum", "glow", "vhs"}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if info.Name() == ".git" || info.Name() == "docs" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		text := string(content)
+		for _, bin := range forbiddenBinaries {
+			if strings.Contains(text, `"`+bin+`"`) {
+				t.Errorf("%s references forbidden standalone tool %q", path, bin)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scan codebase: %v", err)
 	}
 }

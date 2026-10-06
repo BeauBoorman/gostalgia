@@ -5,7 +5,7 @@ honestly missing, and the itemized milestone list. This is the **canonical
 tracker** — `docs/architecture.md` §5 summarizes the milestone arc and points
 here.
 
-- **Current position:** Milestone 1 in progress (Charm experience + capability-scoped app SDK merged; active item: [#20](https://github.com/drawmeanelephant/gostalgia/issues/20) documentation and security claims reconciliation) · foundation unblocks Milestones 1–5.
+- **Current position:** Milestone 1 in progress (Charm baseline pinned: Bubble Tea v1.3.10, Lip Gloss v1.1.0, Bubbles v1.0.0; automated dependency fences enforced; active item: [#22](https://github.com/drawmeanelephant/gostalgia/issues/22) reusable visual language and component kit) · foundation unblocks Milestones 1–5.
 - **Last verified:** 2026-10-05 (`go build` / `go vet` / `gofmt` clean · `go test -race ./...` green · test/package counts are CI's to report · pure-Go + Windows/Linux cross-builds OK · compiled Charm CLI exercised in a real PTY; terminal restored and runtime cleaned up · **CI green on ubuntu, macOS, and Windows** · repo: `drawmeanelephant/gostalgia`, private)
 
 Rules for touching this file:
@@ -31,6 +31,7 @@ Rules for touching this file:
 | VFS: env paths, host backend confined via `os.Root`, memfs `/tmp`, mounts | ✅ working | `testing/fstest` + escape/mount tests |
 | App SDK: embedded JSON manifest, Init/Run/Stop, scoped calls/routes, launch/stop | ✅ working | `sdk`, `internal/app`, services + shell socket lifecycle tests |
 | Charm shell: DOS-style prompt, app shelf, history/completion, VFS/process commands | ✅ working | `internal/experience/shell` (real Bubble Tea + authenticated IPC) |
+| Charm baseline & dependency fences: Bubble Tea v1.3.10, Lip Gloss v1.1.0, Bubbles v1.0.0 | ✅ working | `test/e2e` dependency fences (`TestCoreDependencyBoundary`, `TestCharmRestrictedToExperienceShell`, `TestApprovedCharmBaseline`, `TestNoStandaloneHostExecutables`) |
 | Event bus (typed, synchronous, wildcard) | ✅ working | `internal/events` tests |
 | Config store (dotted paths, atomic persist) | ✅ working | `internal/config` tests |
 | Capability scoping: app Call/Handle adapters enforce manifest grants | ✅ working | SDK adapters replace caller grants; IPC methods reject unauthorized app calls; admin tokens remain trusted operator clients — see `docs/security.md` |
@@ -89,9 +90,9 @@ SDK are merged and verified (`test/e2e`, `internal/experience/shell`,
 
 ### Milestone 1: 01: A welcoming terminal workspace
 
-- [ ] **[#20 Docs: reconcile the roadmap and security claims with the current implementation](https://github.com/drawmeanelephant/gostalgia/issues/20)** (active) — reconcile status.md, security.md, processes.md, and guides against merged SDK and process services.
-- [ ] **[#21 Experience: establish a coordinated Charm version and dependency baseline](https://github.com/drawmeanelephant/gostalgia/issues/21)** — evaluate coordinated Bubble Tea/Lip Gloss/Bubbles baseline without cgo.
-- [ ] **[#22 Experience: build a reusable Gostalgia visual language and component kit](https://github.com/drawmeanelephant/gostalgia/issues/22)** — tokens, panel borders, headers, tabs, dialogs, badges.
+- [x] **[#20 Docs: reconcile the roadmap and security claims with the current implementation](https://github.com/drawmeanelephant/gostalgia/issues/20)** — reconcile status.md, security.md, processes.md, and guides against merged SDK and process services.
+- [x] **[#21 Experience: establish a coordinated Charm version and dependency baseline](https://github.com/drawmeanelephant/gostalgia/issues/21)** — evaluate coordinated Bubble Tea/Lip Gloss/Bubbles baseline without cgo; pinned v1.3.10/v1.1.0/v1.0.0 with automated dependency fences.
+- [ ] **[#22 Experience: build a reusable Gostalgia visual language and component kit](https://github.com/drawmeanelephant/gostalgia/issues/22)** (active) — tokens, panel borders, headers, tabs, dialogs, badges.
 - [ ] **[#23 Experience: add a home screen, searchable launcher, and command palette](https://github.com/drawmeanelephant/gostalgia/issues/23)** — home screen, searchable app cards, keyboard command palette.
 - [ ] **[#24 Experience: add accessible terminal modes and layout regression coverage](https://github.com/drawmeanelephant/gostalgia/issues/24)** — monochrome, high-contrast, reduced-motion, Unicode/layout regression tests.
 

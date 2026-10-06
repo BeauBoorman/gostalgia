@@ -244,20 +244,23 @@ arrive, their host bits get adapters here.
 ### 4.1 Dependency policy
 
 **Core and SDK: standard library only. Experience: approved Charm family.**
-Bubble Tea v1.3.10 and Lip Gloss v1.1.0 are direct dependencies only in
-`internal/experience/shell`. They buy terminal lifecycle/event handling and
-styling; no alternate UI framework or unrelated direct dependency is added.
-Their required transitive dependencies (terminal, ANSI, Unicode width,
-color/input helpers and `golang.org/x/*`) are pinned by go.mod/go.sum and are
-part of this explicit exception, not hand-added runtime dependencies.
+Bubble Tea v1.3.10, Lip Gloss v1.1.0, and Bubbles v1.0.0 are direct dependencies
+only in `internal/experience/shell` (Issue #21). They provide terminal
+lifecycle/event handling, styling, and reusable TUI components; no alternate UI
+framework or unrelated direct dependency is added. Their required transitive
+dependencies (terminal, ANSI, Unicode width, color/input helpers, and
+`golang.org/x/*`) are pinned by go.mod/go.sum and are part of this explicit
+exception, not hand-added runtime dependencies.
 
 `go list -deps gostalgia/internal/runtime gostalgia/sdk` contains only Gostalgia
-and standard-library packages. An automated test enforces that boundary.
-`gctl` and the SDK/demo dependency closures likewise remain stdlib-only.
-The repository shares one module, so module downloads include Charm, but
-headless runtime packages never import it. No cgo requirement; verify with
-`CGO_ENABLED=0 go build ./...`. JSON manifests and stdlib command parsing remain
-intentional. Early VirelaiOS bring-up (toolchain, guest runner, kernel
+and standard-library packages. Automated tests in `test/e2e/dependencies_test.go`
+enforce that boundary, verify that Charm is confined to `internal/experience/shell`,
+ensure no standalone executables (e.g. gum, glow, vhs) are used, and lock the
+approved direct baseline. `gctl` and the SDK/demo dependency closures likewise
+remain stdlib-only. The repository shares one module, so module downloads include
+Charm, but headless runtime packages never import it. No cgo requirement; verify
+with `CGO_ENABLED=0 go build ./...`. JSON manifests and stdlib command parsing
+remain intentional. Early VirelaiOS bring-up (toolchain, guest runner, kernel
 integration) is separately owned by the repository owner and tracked outside
 this roadmap; no guest port is treated as implemented here.
 
