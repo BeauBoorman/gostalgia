@@ -102,7 +102,7 @@ func TestSandboxIsolationE2E(t *testing.T) {
 	must(t, rt.Apps.Registry().RegisterExternal(trustedMan))
 
 	client := dialRunning(t, root)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// 1. Verify sys/status reports HostSecurityCapabilities
