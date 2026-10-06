@@ -20,6 +20,31 @@ func startIdleProcess(t *testing.T, m *Manager, name string) *Process {
 	return p
 }
 
+// Supervisors check shutdown while holding a process lock. Table operations
+// acquire the manager lock before process locks, so this check must not acquire
+// the manager lock and create an inverse dependency.
+func TestShutdownCheckDoesNotAcquireManagerLock(t *testing.T) {
+	m, _ := newTestManager(t)
+	func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		checked := make(chan bool, 1)
+		go func() { checked <- m.isShuttingDown() }()
+		select {
+		case shuttingDown := <-checked:
+			if shuttingDown {
+				t.Fatal("new manager is already shutting down")
+			}
+		case <-time.After(time.Second):
+			t.Fatal("shutdown check blocked on the manager lock")
+		}
+	}()
+	m.StopAll(time.Second)
+	if !m.isShuttingDown() {
+		t.Fatal("shutdown check did not observe StopAll")
+	}
+}
+
 // TestStopAlreadyStoppedProcess: Stop on a process that already exited on
 // its own returns cleanly instead of erroring or hanging.
 func TestStopAlreadyStoppedProcess(t *testing.T) {
