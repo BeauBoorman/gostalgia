@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +35,7 @@ type Echo struct {
 	started time.Time
 	mu      sync.Mutex
 	count   int64
+	last    string
 }
 
 func Factory() (sdk.Instance, error) { return &Echo{}, nil }
@@ -50,7 +52,7 @@ func (e *Echo) Init(app *sdk.Context) error {
 			return err
 		}
 	}
-	return nil
+	return app.Present(e.view, e.act)
 }
 
 func (e *Echo) Run(ctx context.Context) error {
@@ -72,11 +74,59 @@ func (e *Echo) echo(ctx context.Context, raw json.RawMessage) (any, error) {
 	if p.Msg == "" {
 		return nil, fmt.Errorf("params.msg is required")
 	}
-	e.mu.Lock()
-	e.count++
-	n := e.count
-	e.mu.Unlock()
+	n, err := e.record(ctx, p.Msg)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{"msg": p.Msg, "echoes": n}, nil
+}
+
+func (e *Echo) record(ctx context.Context, msg string) (int64, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	e.count++
+	e.last = msg
+	return e.count, nil
+}
+
+func (e *Echo) view(ctx context.Context) (sdk.View, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.viewLocked(), nil
+}
+
+func (e *Echo) viewLocked() sdk.View {
+	v := sdk.View{
+		Title: "Echo", State: sdk.ViewReady,
+		Fields:  []sdk.Field{{ID: "msg", Label: "Message", Required: true}},
+		Actions: []sdk.Action{{ID: "echo", Label: "Echo message"}},
+		Status:  fmt.Sprintf("%d echoes this launch", e.count),
+	}
+	if e.last != "" {
+		detail := e.last
+		// Legacy operation clients can send larger messages than a view item.
+		// Bound presentation without changing their echo response.
+		if len(detail) > 4096 {
+			detail = strings.ToValidUTF8(detail[:4093], "") + "..."
+		}
+		v.Items = []sdk.Item{{ID: "last", Label: "Last echo", Detail: detail}}
+	}
+	return v
+}
+
+// Both the legacy echo route and this presentation action use the same
+// operation. Neither path needs a terminal or a rendered UI.
+func (e *Echo) act(ctx context.Context, p sdk.ActionRequest) (sdk.View, error) {
+	if p.Action != "echo" {
+		return sdk.View{}, fmt.Errorf("unknown action %q", p.Action)
+	}
+	if _, err := e.record(ctx, p.Values["msg"]); err != nil {
+		return sdk.View{}, err
+	}
+	return e.view(ctx)
 }
 
 func (e *Echo) stats(ctx context.Context, raw json.RawMessage) (any, error) {

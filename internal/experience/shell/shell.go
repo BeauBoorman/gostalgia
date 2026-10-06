@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"gostalgia/internal/experience/theme"
 	"gostalgia/internal/experience/ui"
+	"gostalgia/sdk"
 )
 
 const maxTranscript = 400
@@ -42,6 +43,8 @@ type Model struct {
 	busy          bool
 	scroll        int
 	kit           ui.Kit
+	presentation  *appView
+	viewEpoch     uint64
 }
 
 func New(ctx context.Context, c Caller, closed <-chan struct{}) *Model {
@@ -114,7 +117,13 @@ func (m *Model) append(e entry) {
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case viewMsg, viewTickMsg, viewCheckMsg, viewCancelMsg:
+		return m, m.updatePresentation(msg)
 	case closedMsg:
+		if m.presentation != nil && m.presentation.cancel != nil {
+			m.presentation.cancel()
+		}
+		m.presentation = nil
 		return m, tea.Quit
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -141,10 +150,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "ctrl+d":
 			return m, tea.Quit
 		case "f2":
+			cancel := m.dismissView()
 			m.shelf = !m.shelf
 			m.scroll = 0
+			return m, cancel
+		case "f4":
+			if m.presentation == nil {
+				return m, m.selectedView()
+			}
 			return m, nil
 		case "esc":
+			if m.presentation != nil {
+				return m, m.viewKey(msg)
+			}
 			m.shelf = false
 			return m, nil
 		case "pgup":
@@ -156,6 +174,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.busy {
 			return m, nil
+		}
+		if m.presentation != nil {
+			return m, m.viewKey(msg)
 		}
 		if m.shelf {
 			switch msg.String() {
@@ -289,7 +310,12 @@ func (m *Model) View() string {
 	if m.shelf {
 		active = 1
 	}
-	tabs := m.kit.Tabs([]ui.Tab{{Label: "Home / Prompt"}, {Label: "App Shelf"}}, active, w)
+	tabItems := []ui.Tab{{Label: "Home / Prompt"}, {Label: "App Shelf"}}
+	if m.presentation != nil {
+		tabItems = append(tabItems, ui.Tab{Label: viewText(m.presentation.data.Title)})
+		active = 2
+	}
+	tabs := m.kit.Tabs(tabItems, active, w)
 	badge := m.kit.Badge("ONLINE", theme.Success, w) + m.kit.Muted("   guest · C: environment drive")
 	bodyHeight := max(1, m.height-9)
 	var lines []string
@@ -324,6 +350,11 @@ func (m *Model) View() string {
 			lines = append(lines, m.kit.Muted(ui.Truncate(safe(a.Manifest.Description), w)),
 				m.kit.Muted(ui.Truncate("GRANT  "+safe(strings.Join(a.Manifest.Permissions, " · ")), w)))
 		}
+	} else if m.presentation != nil {
+		lines = m.viewLines(bodyHeight)
+		for i, line := range lines {
+			lines[i] = ui.Truncate(line, w)
+		}
 	} else {
 		for _, e := range m.transcript {
 			line := ui.Wrap(e.text, w)
@@ -342,7 +373,7 @@ func (m *Model) View() string {
 			lines = append(lines, strings.Split(line, "\n")...)
 		}
 	}
-	if m.shelf {
+	if m.shelf || m.presentation != nil {
 		if len(lines) > bodyHeight {
 			lines = lines[:bodyHeight]
 		}
@@ -357,7 +388,9 @@ func (m *Model) View() string {
 		promptPath = "C:…" + ui.Tail(promptPath, max(1, w/2-3))
 	}
 	prompt := m.kit.Heading(promptPath + "> ")
-	if m.busy {
+	if m.presentation != nil {
+		prompt += m.kit.Muted("App view owns focus. Esc returns to prompt.")
+	} else if m.busy {
 		prompt += m.kit.Badge("", theme.Busy, max(0, w-lipgloss.Width(prompt)))
 	} else {
 		// Show a cursor-centered slice rather than allowing long pasted input to
@@ -367,16 +400,30 @@ func (m *Model) View() string {
 		after := ui.Fit(string(m.input[m.cursor:]), ui.Bounds{Width: room - lipgloss.Width(before), Height: 1})
 		prompt += m.kit.Text(before) + m.kit.Selection(" ") + m.kit.Text(after)
 	}
+	canView := m.selected >= 0 && m.selected < len(m.apps) && m.apps[m.selected].Running
 	bindings := []ui.Binding{
 		{Key: "Ctrl-C", Help: "EXIT"}, {Key: "F2", Help: "APPS"},
+		{Key: "F4", Help: "VIEW", Disabled: m.busy || !canView},
 		{Key: "Tab", Help: "COMPLETE", Disabled: m.busy},
 		{Key: "↑↓", Help: "HISTORY", Disabled: m.busy}, {Key: "PgUp", Help: "SCROLL"},
 	}
 	if m.shelf {
 		bindings = []ui.Binding{
 			{Key: "Esc", Help: "PROMPT"}, {Key: "Enter", Help: "LAUNCH", Disabled: m.busy || len(m.apps) == 0},
-			{Key: "F3", Help: "STOP", Disabled: m.busy || len(m.apps) == 0}, {Key: "↑↓", Help: "SELECT", Disabled: m.busy},
+			{Key: "F3", Help: "STOP", Disabled: m.busy || len(m.apps) == 0},
+			{Key: "F4", Help: "VIEW", Disabled: m.busy || !canView},
+			{Key: "↑↓", Help: "SELECT", Disabled: m.busy},
 			{Key: "Ctrl-C", Help: "EXIT"},
+		}
+	} else if m.presentation != nil {
+		v := m.presentation
+		blocked := v.busy || v.instance == "" || v.data.State == sdk.ViewLoading
+		action := max(0, v.focus-len(v.data.Fields))
+		actionBlocked := blocked || action >= len(v.data.Actions) || v.data.Actions[action].Disabled
+		bindings = []ui.Binding{
+			{Key: "Esc", Help: "CANCEL/BACK"}, {Key: "Ctrl-C", Help: "EXIT"},
+			{Key: "Tab", Help: "FOCUS", Disabled: blocked}, {Key: "Enter", Help: "ACTION", Disabled: actionBlocked},
+			{Key: "↑↓", Help: "ITEM", Disabled: blocked}, {Key: "F2", Help: "APPS"},
 		}
 	}
 	content := strings.Join([]string{tabs, ui.Truncate(badge, w), "", body, "", ui.Truncate(prompt, w)}, "\n")
@@ -391,7 +438,11 @@ func Run(ctx context.Context, c Caller, closed <-chan struct{}, options ...tea.P
 	defer cancel()
 	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithContext(ctx)}
 	opts = append(opts, options...)
-	_, err := tea.NewProgram(New(ctx, c, closed), opts...).Run()
+	model := New(ctx, c, closed)
+	_, err := tea.NewProgram(model, opts...).Run()
+	if cleanup := model.dismissView(); cleanup != nil {
+		cleanup()
+	}
 	return err
 }
 

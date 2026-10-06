@@ -31,20 +31,23 @@ func (s *FSService) Init(ctx *service.Context) error {
 
 func (s *FSService) Start(ctx context.Context) error {
 	for method, h := range map[string]ipc.Handler{
-		"fs/list":        s.list,
-		"fs/stat":        s.stat,
-		"fs/read":        s.read,
-		"fs/write":       s.write,
-		"fs/save":        s.save,
-		"fs/mkdir":       s.mkdir,
-		"fs/remove":      s.remove,
-		"fs/rename":      s.rename,
-		"fs/copy":        s.copy,
-		"fs/move":        s.move,
-		"fs/trash":       s.trash,
-		"fs/restore":     s.restore,
-		"fs/trash/list":  s.trashList,
-		"fs/trash/empty": s.trashEmpty,
+		"fs/list":         s.list,
+		"fs/stat":         s.stat,
+		"fs/read":         s.read,
+		"fs/write":        s.write,
+		"fs/save":         s.save,
+		"fs/mkdir":        s.mkdir,
+		"fs/remove":       s.remove,
+		"fs/rename":       s.rename,
+		"fs/copy":         s.copy,
+		"fs/move":         s.move,
+		"fs/trash":        s.trash,
+		"fs/restore":      s.restore,
+		"fs/trash/list":   s.trashList,
+		"fs/trash/empty":  s.trashEmpty,
+		"fs/grant":        s.grant,
+		"fs/grant/revoke": s.grantRevoke,
+		"fs/grant/list":   s.grantList,
 	} {
 		if err := s.ctx.Router.Handle(method, h); err != nil {
 			return err
@@ -58,11 +61,66 @@ func (s *FSService) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (s *FSService) docFS() vfs.DocumentFS {
-	if dfs, ok := s.ctx.VFS.(vfs.DocumentFS); ok {
-		return dfs
+func (s *FSService) targetFS(ctx context.Context) (vfs.DocumentFS, error) {
+	principal := ipc.CallerPrincipal(ctx)
+	caps := ipc.Capabilities(ctx)
+	if principal.IsOperator() || (caps != nil && caps.Has(security.CapAdmin)) {
+		if dfs, ok := s.ctx.VFS.(vfs.DocumentFS); ok {
+			return dfs, nil
+		}
+		return nil, fmt.Errorf("underlying filesystem does not support document operations")
 	}
-	return nil
+	if principal.IsApp() {
+		if v, ok := s.ctx.VFS.(*vfs.VFS); ok {
+			return v.ForApp(principal.AppID), nil
+		}
+		if dfs, ok := s.ctx.VFS.(vfs.DocumentFS); ok {
+			return dfs, nil
+		}
+	}
+	if dfs, ok := s.ctx.VFS.(vfs.DocumentFS); ok {
+		return dfs, nil
+	}
+	return nil, &vfs.Error{Op: "access", Code: vfs.ErrPermission, Message: "permission denied: caller not authorized"}
+}
+
+func (s *FSService) grantStore() (*vfs.GrantStore, error) {
+	if v, ok := s.ctx.VFS.(*vfs.VFS); ok {
+		if gs := v.Grants(); gs != nil {
+			return gs, nil
+		}
+	}
+	return nil, fmt.Errorf("grant store is not available on this filesystem")
+}
+
+func (s *FSService) requireReadAccess(ctx context.Context, envPath string) error {
+	principal := ipc.CallerPrincipal(ctx)
+	if principal.IsApp() {
+		if vfs.IsAppPrivatePath(principal.AppID, envPath) {
+			return nil
+		}
+		if v, ok := s.ctx.VFS.(*vfs.VFS); ok && v.Grants() != nil {
+			if _, ok := v.Grants().FindMatchingGrant(principal.AppID, envPath); ok {
+				return nil
+			}
+		}
+	}
+	return ipc.RequireCap(ctx, security.CapFileRead)
+}
+
+func (s *FSService) requireWriteAccess(ctx context.Context, envPath string) error {
+	principal := ipc.CallerPrincipal(ctx)
+	if principal.IsApp() {
+		if vfs.IsAppPrivatePath(principal.AppID, envPath) {
+			return nil
+		}
+		if v, ok := s.ctx.VFS.(*vfs.VFS); ok && v.Grants() != nil {
+			if g, ok := v.Grants().FindMatchingGrant(principal.AppID, envPath); ok && g.Access == vfs.AccessReadWrite {
+				return nil
+			}
+		}
+	}
+	return ipc.RequireCap(ctx, security.CapFileWrite)
 }
 
 type fsEntry struct {
@@ -73,9 +131,6 @@ type fsEntry struct {
 }
 
 func (s *FSService) list(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapFileRead); err != nil {
-		return nil, err
-	}
 	var p struct {
 		Path string `json:"path"`
 	}
@@ -85,7 +140,14 @@ func (s *FSService) list(ctx context.Context, req ipc.Request) (any, error) {
 	if p.Path == "" {
 		p.Path = "/"
 	}
-	entries, err := s.ctx.VFS.ReadDir(p.Path)
+	if err := s.requireReadAccess(ctx, p.Path); err != nil {
+		return nil, err
+	}
+	target, err := s.targetFS(ctx)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := target.ReadDir(p.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -104,9 +166,6 @@ func (s *FSService) list(ctx context.Context, req ipc.Request) (any, error) {
 }
 
 func (s *FSService) stat(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapFileRead); err != nil {
-		return nil, err
-	}
 	var p struct {
 		Path string `json:"path"`
 	}
@@ -116,7 +175,14 @@ func (s *FSService) stat(ctx context.Context, req ipc.Request) (any, error) {
 	if p.Path == "" {
 		return nil, fmt.Errorf("params.path is required")
 	}
-	info, err := s.ctx.VFS.Stat(p.Path)
+	if err := s.requireReadAccess(ctx, p.Path); err != nil {
+		return nil, err
+	}
+	target, err := s.targetFS(ctx)
+	if err != nil {
+		return nil, err
+	}
+	info, err := target.Stat(p.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -131,9 +197,6 @@ func (s *FSService) stat(ctx context.Context, req ipc.Request) (any, error) {
 }
 
 func (s *FSService) read(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapFileRead); err != nil {
-		return nil, err
-	}
 	var p struct {
 		Path   string `json:"path"`
 		Offset int64  `json:"offset"`
@@ -145,8 +208,15 @@ func (s *FSService) read(ctx context.Context, req ipc.Request) (any, error) {
 	if p.Path == "" {
 		return nil, fmt.Errorf("params.path is required")
 	}
+	if err := s.requireReadAccess(ctx, p.Path); err != nil {
+		return nil, err
+	}
+	target, err := s.targetFS(ctx)
+	if err != nil {
+		return nil, err
+	}
 
-	info, err := s.ctx.VFS.Stat(p.Path)
+	info, err := target.Stat(p.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +234,7 @@ func (s *FSService) read(ctx context.Context, req ipc.Request) (any, error) {
 				Message: fmt.Sprintf("file size %d exceeds default read limit of %d bytes; use bounded read with offset and limit", totalSize, vfs.MaxIPCReadLimit),
 			}
 		}
-		data, err := s.ctx.VFS.ReadFile(p.Path)
+		data, err := target.ReadFile(p.Path)
 		if err != nil {
 			return nil, err
 		}
@@ -181,7 +251,7 @@ func (s *FSService) read(ctx context.Context, req ipc.Request) (any, error) {
 	if limit <= 0 || limit > vfs.MaxIPCReadLimit {
 		limit = vfs.MaxIPCReadLimit
 	}
-	f, err := s.ctx.VFS.Open(p.Path)
+	f, err := target.Open(p.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -216,9 +286,6 @@ func (s *FSService) read(ctx context.Context, req ipc.Request) (any, error) {
 }
 
 func (s *FSService) write(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapFileWrite); err != nil {
-		return nil, err
-	}
 	var p struct {
 		Path string `json:"path"`
 		Data string `json:"data_base64"`
@@ -228,6 +295,13 @@ func (s *FSService) write(ctx context.Context, req ipc.Request) (any, error) {
 	}
 	if p.Path == "" {
 		return nil, fmt.Errorf("params.path is required")
+	}
+	if err := s.requireWriteAccess(ctx, p.Path); err != nil {
+		return nil, err
+	}
+	target, err := s.targetFS(ctx)
+	if err != nil {
+		return nil, err
 	}
 	var data []byte
 	if p.Data != "" {
@@ -245,16 +319,13 @@ func (s *FSService) write(ctx context.Context, req ipc.Request) (any, error) {
 			Message: fmt.Sprintf("payload size %d exceeds write limit of %d bytes", len(data), vfs.MaxIPCWriteLimit),
 		}
 	}
-	if err := s.ctx.VFS.WriteFile(p.Path, data, 0o644); err != nil {
+	if err := target.WriteFile(p.Path, data, 0o644); err != nil {
 		return nil, err
 	}
 	return map[string]any{"path": p.Path, "written": len(data)}, nil
 }
 
 func (s *FSService) save(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapFileWrite); err != nil {
-		return nil, err
-	}
 	var p struct {
 		Path      string `json:"path"`
 		Data      string `json:"data_base64"`
@@ -266,6 +337,13 @@ func (s *FSService) save(ctx context.Context, req ipc.Request) (any, error) {
 	}
 	if p.Path == "" {
 		return nil, fmt.Errorf("params.path is required")
+	}
+	if err := s.requireWriteAccess(ctx, p.Path); err != nil {
+		return nil, err
+	}
+	target, err := s.targetFS(ctx)
+	if err != nil {
+		return nil, err
 	}
 	var data []byte
 	if p.Data != "" {
@@ -294,7 +372,7 @@ func (s *FSService) save(ctx context.Context, req ipc.Request) (any, error) {
 	}
 
 	if !overwrite {
-		if _, err := s.ctx.VFS.Stat(p.Path); err == nil {
+		if _, err := target.Stat(p.Path); err == nil {
 			return nil, &vfs.Error{
 				Op:      "save",
 				Path:    p.Path,
@@ -304,16 +382,13 @@ func (s *FSService) save(ctx context.Context, req ipc.Request) (any, error) {
 		}
 	}
 
-	if err := s.ctx.VFS.SaveAtomic(p.Path, data, perm); err != nil {
+	if err := target.SaveAtomic(p.Path, data, perm); err != nil {
 		return nil, err
 	}
 	return map[string]any{"path": p.Path, "written": len(data), "saved": true}, nil
 }
 
 func (s *FSService) mkdir(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapFileWrite); err != nil {
-		return nil, err
-	}
 	var p struct {
 		Path string `json:"path"`
 	}
@@ -323,16 +398,20 @@ func (s *FSService) mkdir(ctx context.Context, req ipc.Request) (any, error) {
 	if p.Path == "" {
 		return nil, fmt.Errorf("params.path is required")
 	}
-	if err := s.ctx.VFS.MkdirAll(p.Path); err != nil {
+	if err := s.requireWriteAccess(ctx, p.Path); err != nil {
+		return nil, err
+	}
+	target, err := s.targetFS(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := target.MkdirAll(p.Path); err != nil {
 		return nil, err
 	}
 	return map[string]any{"path": p.Path, "created": true}, nil
 }
 
 func (s *FSService) remove(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapFileWrite); err != nil {
-		return nil, err
-	}
 	var p struct {
 		Path      string `json:"path"`
 		Recursive bool   `json:"recursive"`
@@ -343,11 +422,17 @@ func (s *FSService) remove(ctx context.Context, req ipc.Request) (any, error) {
 	if p.Path == "" {
 		return nil, fmt.Errorf("params.path is required")
 	}
-	var err error
+	if err := s.requireWriteAccess(ctx, p.Path); err != nil {
+		return nil, err
+	}
+	target, err := s.targetFS(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if p.Recursive {
-		err = s.ctx.VFS.RemoveAll(p.Path)
+		err = target.RemoveAll(p.Path)
 	} else {
-		err = s.ctx.VFS.Remove(p.Path)
+		err = target.Remove(p.Path)
 	}
 	if err != nil {
 		return nil, err
@@ -356,9 +441,6 @@ func (s *FSService) remove(ctx context.Context, req ipc.Request) (any, error) {
 }
 
 func (s *FSService) rename(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapFileWrite); err != nil {
-		return nil, err
-	}
 	var p struct {
 		Src       string `json:"src"`
 		Dst       string `json:"dst"`
@@ -370,13 +452,27 @@ func (s *FSService) rename(ctx context.Context, req ipc.Request) (any, error) {
 	if p.Src == "" || p.Dst == "" {
 		return nil, fmt.Errorf("params.src and params.dst are required")
 	}
-	if v, ok := s.ctx.VFS.(*vfs.VFS); ok {
+	if err := s.requireWriteAccess(ctx, p.Src); err != nil {
+		return nil, err
+	}
+	if err := s.requireWriteAccess(ctx, p.Dst); err != nil {
+		return nil, err
+	}
+	target, err := s.targetFS(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if scoped, ok := target.(*vfs.ScopedVFS); ok {
+		if err := scoped.RenameOpt(p.Src, p.Dst, p.Overwrite); err != nil {
+			return nil, err
+		}
+	} else if v, ok := target.(*vfs.VFS); ok {
 		if err := v.RenameOpt(p.Src, p.Dst, p.Overwrite); err != nil {
 			return nil, err
 		}
 	} else {
 		if !p.Overwrite {
-			if _, err := s.ctx.VFS.Stat(p.Dst); err == nil {
+			if _, err := target.Stat(p.Dst); err == nil {
 				return nil, &vfs.Error{
 					Op:      "rename",
 					Path:    p.Src,
@@ -386,7 +482,7 @@ func (s *FSService) rename(ctx context.Context, req ipc.Request) (any, error) {
 				}
 			}
 		}
-		if err := s.ctx.VFS.Rename(p.Src, p.Dst); err != nil {
+		if err := target.Rename(p.Src, p.Dst); err != nil {
 			return nil, err
 		}
 	}
@@ -394,12 +490,6 @@ func (s *FSService) rename(ctx context.Context, req ipc.Request) (any, error) {
 }
 
 func (s *FSService) copy(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapFileRead); err != nil {
-		return nil, err
-	}
-	if err := ipc.RequireCap(ctx, security.CapFileWrite); err != nil {
-		return nil, err
-	}
 	var p struct {
 		Src       string `json:"src"`
 		Dst       string `json:"dst"`
@@ -411,20 +501,23 @@ func (s *FSService) copy(ctx context.Context, req ipc.Request) (any, error) {
 	if p.Src == "" || p.Dst == "" {
 		return nil, fmt.Errorf("params.src and params.dst are required")
 	}
-	dfs := s.docFS()
-	if dfs == nil {
-		return nil, fmt.Errorf("underlying filesystem does not support copy")
+	if err := s.requireReadAccess(ctx, p.Src); err != nil {
+		return nil, err
 	}
-	if err := dfs.Copy(p.Src, p.Dst, p.Overwrite); err != nil {
+	if err := s.requireWriteAccess(ctx, p.Dst); err != nil {
+		return nil, err
+	}
+	target, err := s.targetFS(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := target.Copy(p.Src, p.Dst, p.Overwrite); err != nil {
 		return nil, err
 	}
 	return map[string]any{"src": p.Src, "dst": p.Dst, "copied": true}, nil
 }
 
 func (s *FSService) move(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapFileWrite); err != nil {
-		return nil, err
-	}
 	var p struct {
 		Src       string `json:"src"`
 		Dst       string `json:"dst"`
@@ -436,20 +529,23 @@ func (s *FSService) move(ctx context.Context, req ipc.Request) (any, error) {
 	if p.Src == "" || p.Dst == "" {
 		return nil, fmt.Errorf("params.src and params.dst are required")
 	}
-	dfs := s.docFS()
-	if dfs == nil {
-		return nil, fmt.Errorf("underlying filesystem does not support move")
+	if err := s.requireWriteAccess(ctx, p.Src); err != nil {
+		return nil, err
 	}
-	if err := dfs.Move(p.Src, p.Dst, p.Overwrite); err != nil {
+	if err := s.requireWriteAccess(ctx, p.Dst); err != nil {
+		return nil, err
+	}
+	target, err := s.targetFS(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := target.Move(p.Src, p.Dst, p.Overwrite); err != nil {
 		return nil, err
 	}
 	return map[string]any{"src": p.Src, "dst": p.Dst, "moved": true}, nil
 }
 
 func (s *FSService) trash(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapFileWrite); err != nil {
-		return nil, err
-	}
 	var p struct {
 		Path string `json:"path"`
 	}
@@ -459,11 +555,14 @@ func (s *FSService) trash(ctx context.Context, req ipc.Request) (any, error) {
 	if p.Path == "" {
 		return nil, fmt.Errorf("params.path is required")
 	}
-	dfs := s.docFS()
-	if dfs == nil {
-		return nil, fmt.Errorf("underlying filesystem does not support trash")
+	if err := s.requireWriteAccess(ctx, p.Path); err != nil {
+		return nil, err
 	}
-	entry, err := dfs.Trash(p.Path)
+	target, err := s.targetFS(ctx)
+	if err != nil {
+		return nil, err
+	}
+	entry, err := target.Trash(p.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -485,26 +584,31 @@ func (s *FSService) restore(ctx context.Context, req ipc.Request) (any, error) {
 	if p.ID == "" {
 		return nil, fmt.Errorf("params.id is required")
 	}
-	dfs := s.docFS()
-	if dfs == nil {
-		return nil, fmt.Errorf("underlying filesystem does not support restore")
+	if p.Dst != "" {
+		if err := s.requireWriteAccess(ctx, p.Dst); err != nil {
+			return nil, err
+		}
 	}
-	target, err := dfs.Restore(p.ID, p.Dst, p.Overwrite)
+	target, err := s.targetFS(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"id": p.ID, "restored_path": target}, nil
+	resPath, err := target.Restore(p.ID, p.Dst, p.Overwrite)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"id": p.ID, "restored_path": resPath}, nil
 }
 
 func (s *FSService) trashList(ctx context.Context, req ipc.Request) (any, error) {
 	if err := ipc.RequireCap(ctx, security.CapFileRead); err != nil {
 		return nil, err
 	}
-	dfs := s.docFS()
-	if dfs == nil {
-		return nil, fmt.Errorf("underlying filesystem does not support trash")
+	target, err := s.targetFS(ctx)
+	if err != nil {
+		return nil, err
 	}
-	entries, err := dfs.ListTrash()
+	entries, err := target.ListTrash()
 	if err != nil {
 		return nil, err
 	}
@@ -518,13 +622,97 @@ func (s *FSService) trashEmpty(ctx context.Context, req ipc.Request) (any, error
 	if err := ipc.RequireCap(ctx, security.CapFileWrite); err != nil {
 		return nil, err
 	}
-	dfs := s.docFS()
-	if dfs == nil {
-		return nil, fmt.Errorf("underlying filesystem does not support trash")
+	target, err := s.targetFS(ctx)
+	if err != nil {
+		return nil, err
 	}
-	count, err := dfs.EmptyTrash()
+	count, err := target.EmptyTrash()
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"emptied": true, "count": count}, nil
+}
+
+func (s *FSService) grant(ctx context.Context, req ipc.Request) (any, error) {
+	if err := ipc.RequireCap(ctx, security.CapAdmin); err != nil {
+		return nil, err
+	}
+	gs, err := s.grantStore()
+	if err != nil {
+		return nil, err
+	}
+	var p struct {
+		AppID     string `json:"app_id"`
+		Path      string `json:"path"`
+		Access    string `json:"access"`
+		Recursive bool   `json:"recursive"`
+	}
+	if err := ipc.DecodeParams(req.Params, &p); err != nil {
+		return nil, err
+	}
+	if p.AppID == "" {
+		return nil, fmt.Errorf("params.app_id is required")
+	}
+	if p.Path == "" {
+		return nil, fmt.Errorf("params.path is required")
+	}
+	mode, err := vfs.NormalizeAccessMode(p.Access)
+	if err != nil {
+		return nil, err
+	}
+	g, err := gs.Issue(p.AppID, p.Path, mode, p.Recursive)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"grant": g}, nil
+}
+
+func (s *FSService) grantRevoke(ctx context.Context, req ipc.Request) (any, error) {
+	if err := ipc.RequireCap(ctx, security.CapAdmin); err != nil {
+		return nil, err
+	}
+	gs, err := s.grantStore()
+	if err != nil {
+		return nil, err
+	}
+	var p struct {
+		ID string `json:"id"`
+	}
+	if err := ipc.DecodeParams(req.Params, &p); err != nil {
+		return nil, err
+	}
+	if p.ID == "" {
+		return nil, fmt.Errorf("params.id is required")
+	}
+	if err := gs.Revoke(p.ID); err != nil {
+		return nil, err
+	}
+	return map[string]any{"revoked": true, "id": p.ID}, nil
+}
+
+func (s *FSService) grantList(ctx context.Context, req ipc.Request) (any, error) {
+	gs, err := s.grantStore()
+	if err != nil {
+		return nil, err
+	}
+	var p struct {
+		AppID string `json:"app_id"`
+	}
+	_ = ipc.DecodeParams(req.Params, &p)
+
+	principal := ipc.CallerPrincipal(ctx)
+	caps := ipc.Capabilities(ctx)
+	if principal.IsApp() {
+		if p.AppID != "" && p.AppID != principal.AppID {
+			return nil, &vfs.Error{Op: "grant/list", Code: vfs.ErrPermission, Message: "permission denied: cannot inspect another application's grants"}
+		}
+		p.AppID = principal.AppID
+	} else if !principal.IsOperator() && (caps == nil || !caps.Has(security.CapAdmin)) {
+		return nil, &vfs.Error{Op: "grant/list", Code: vfs.ErrPermission, Message: "permission denied: requires admin capability"}
+	}
+	grants := gs.List(p.AppID)
+	if grants == nil {
+		grants = []vfs.Grant{}
+	}
+	return map[string]any{"grants": grants}, nil
 }

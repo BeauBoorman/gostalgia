@@ -1,0 +1,207 @@
+package sdk
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func testView() View {
+	return View{
+		Title: "Test", State: ViewReady,
+		Items:   []Item{{ID: "one", Label: "One"}},
+		Fields:  []Field{{ID: "text", Label: "Text", Required: true}},
+		Actions: []Action{{ID: "submit", Label: "Submit"}, {ID: "off", Label: "Off", Disabled: true}},
+	}
+}
+
+func presentTest(t *testing.T, snapshot func(context.Context) (View, error), action func(context.Context, ActionRequest) (View, error)) map[string]Handler {
+	t.Helper()
+	routes := make(map[string]Handler)
+	c := NewContext(Manifest{}, nil, nil, func(name string, h Handler) error {
+		if routes[name] != nil {
+			return errors.New("duplicate")
+		}
+		routes[name] = h
+		return nil
+	})
+	if err := c.Present(snapshot, action); err != nil {
+		t.Fatal(err)
+	}
+	return routes
+}
+
+func invokePresentation(t *testing.T, h Handler, params any) (any, error) {
+	t.Helper()
+	raw, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h(context.Background(), raw)
+}
+
+func TestPresentationValidation(t *testing.T) {
+	good := testView()
+	good.Version, good.Instance = PresentationVersion, "launch"
+	if err := good.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []func(*View){
+		func(v *View) { v.Version++ },
+		func(v *View) { v.Instance = "" },
+		func(v *View) { v.Title = " " },
+		func(v *View) { v.State = "future" },
+		func(v *View) { v.State = ViewError },
+		func(v *View) { v.Items = append(v.Items, v.Items[0]) },
+		func(v *View) { v.Fields = append(v.Fields, v.Fields[0]) },
+		func(v *View) { v.Actions = append(v.Actions, v.Actions[0]) },
+		func(v *View) { v.Items = make([]Item, 101) },
+		func(v *View) { v.Fields = []Field{{ID: "text", Label: "Text", Value: strings.Repeat("x", 4097)}} },
+		func(v *View) { v.Actions = []Action{{ID: "bad/id", Label: "Bad"}} },
+	} {
+		v := good
+		change(&v)
+		if err := v.Validate(); err == nil {
+			t.Errorf("accepted invalid view: %+v", v)
+		}
+	}
+	for _, state := range []ViewState{ViewLoading, ViewError} {
+		v := good
+		v.State, v.Error = state, "recoverable failure"
+		if err := v.Validate(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestPresentationTypedRoutesAndInputs(t *testing.T) {
+	var calls atomic.Int32
+	routes := presentTest(t, func(context.Context) (View, error) { return testView(), nil },
+		func(ctx context.Context, p ActionRequest) (View, error) {
+			calls.Add(1)
+			v := testView()
+			v.Status = p.Values["text"] + ":" + p.ItemID
+			return v, nil
+		})
+	out, err := invokePresentation(t, routes["view"], ViewRequest{Version: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := out.(View)
+	p := ActionRequest{Version: 1, Instance: v.Instance, RequestID: "request", Action: "submit", ItemID: "one", Values: map[string]string{"text": "hello"}}
+	out, err = invokePresentation(t, routes["action"], p)
+	if err != nil || out.(View).Status != "hello:one" {
+		t.Fatalf("action: %v, %v", out, err)
+	}
+	for _, change := range []func(*ActionRequest){
+		func(p *ActionRequest) { p.Version = 2 },
+		func(p *ActionRequest) { p.Instance = "previous-launch" },
+		func(p *ActionRequest) { p.RequestID = "" },
+		func(p *ActionRequest) { p.Action = "missing" },
+		func(p *ActionRequest) { p.Action = "off" },
+		func(p *ActionRequest) { p.ItemID = "missing" },
+		func(p *ActionRequest) { p.Values = nil },
+		func(p *ActionRequest) { p.Values = map[string]string{"text": "yes", "extra": "no"} },
+		func(p *ActionRequest) { p.Values = map[string]string{"text": strings.Repeat("x", 4097)} },
+	} {
+		bad := p
+		change(&bad)
+		if _, err := invokePresentation(t, routes["action"], bad); err == nil {
+			t.Errorf("accepted bad action: %+v", bad)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatal("invalid input reached callback")
+	}
+	for _, raw := range []string{"", "null", `{"version":2}`, `{"version":1,"unknown":true}`, `{"version":1} {}`, `[]`} {
+		if _, err := routes["view"](context.Background(), json.RawMessage(raw)); err == nil {
+			t.Errorf("accepted params %q", raw)
+		}
+	}
+	if _, err := invokePresentation(t, routes["cancel"], CancelRequest{Version: 1, Instance: "stale", RequestID: "request"}); err == nil {
+		t.Fatal("stale instance cancellation accepted")
+	}
+}
+
+func TestPresentationCancellation(t *testing.T) {
+	started := make(chan struct{})
+	var calls atomic.Int32
+	routes := presentTest(t, func(context.Context) (View, error) { return testView(), nil },
+		func(ctx context.Context, p ActionRequest) (View, error) {
+			calls.Add(1)
+			close(started)
+			<-ctx.Done()
+			return View{}, ctx.Err()
+		})
+	out, err := invokePresentation(t, routes["view"], ViewRequest{Version: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := ActionRequest{Version: 1, Instance: out.(View).Instance, RequestID: "active", Action: "submit", Values: map[string]string{"text": "hello"}}
+	raw, _ := json.Marshal(p)
+	done := make(chan error, 1)
+	go func() { _, err := routes["action"](context.Background(), raw); done <- err }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("action did not start")
+	}
+	if _, err := invokePresentation(t, routes["action"], p); err == nil {
+		t.Fatal("duplicate active request accepted")
+	}
+	if _, err := invokePresentation(t, routes["cancel"], CancelRequest{Version: 1, Instance: p.Instance, RequestID: p.RequestID}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancel result: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("action was not canceled")
+	}
+	// Cancel may arrive first on a multiplexed socket.
+	p.RequestID = "early"
+	if _, err := invokePresentation(t, routes["cancel"], CancelRequest{Version: 1, Instance: p.Instance, RequestID: p.RequestID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invokePresentation(t, routes["action"], p); !errors.Is(err, context.Canceled) || calls.Load() != 1 {
+		t.Fatal("early cancellation reached action callback")
+	}
+	// Direct callback callers also preserve parent cancellation/deadlines.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	p.RequestID = "parent"
+	raw, _ = json.Marshal(p)
+	if _, err := routes["action"](ctx, raw); !errors.Is(err, context.Canceled) {
+		t.Fatalf("parent cancellation lost: %v", err)
+	}
+}
+
+func TestPresentationCallbackErrorsAndLoading(t *testing.T) {
+	for _, state := range []ViewState{ViewReady, ViewLoading, ViewError} {
+		t.Run(string(state), func(t *testing.T) {
+			routes := presentTest(t, func(context.Context) (View, error) {
+				v := testView()
+				v.State, v.Error = state, "error banner"
+				return v, nil
+			}, func(context.Context, ActionRequest) (View, error) { return View{}, errors.New("operation failed") })
+			out, err := invokePresentation(t, routes["view"], ViewRequest{Version: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := ActionRequest{Version: 1, Instance: out.(View).Instance, RequestID: "request", Action: "submit", Values: map[string]string{"text": "x"}}
+			if _, err := invokePresentation(t, routes["action"], p); err == nil {
+				t.Fatal("loading action or callback failure became success")
+			}
+		})
+	}
+	c := NewContext(Manifest{}, nil, nil, nil)
+	if err := c.Present(nil, nil); err == nil {
+		t.Fatal("nil callbacks accepted")
+	}
+}

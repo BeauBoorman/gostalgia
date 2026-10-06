@@ -76,8 +76,13 @@ animation loops.
 The current prompt/home and app shelf share panel/title, tabs, status badge,
 focus, and help vocabulary. Shelf app cards expose running PID vs. ready status;
 an empty shelf has a friendly notice. Busy requests use a static working badge
-and disabled editing hints. Dialogs and progress are reusable building blocks,
-not new shell commands. Home/launcher navigation is still the next issue (#23).
+and disabled editing hints. F4 app presentations from the data/action contract
+(#26) use the same theme, focus tokens, loading/error states, clipping, and
+contextual help. Disabled actions are not highlighted. The shell remains the
+only terminal owner; apps provide SDK data, not Charm views. Existing app
+snapshot/lifecycle polling is functional refresh, not decorative animation.
+Dialogs and progress are reusable building blocks, not new shell commands.
+Home/launcher navigation is still the next issue (#23).
 
 ## Layout and external text
 
@@ -139,7 +144,8 @@ Checked-in goldens cover the component vocabulary, focus and all named states,
 custom tokens, both palettes, and all three explicit color modes. ANSI snapshots
 spell escapes as `\x1b` for readable diffs. `.gitattributes` preserves LF endings
 in golden fixtures, including Windows checkouts with `core.autocrlf=true`.
-Shell goldens cover home, populated shelf, empty shelf, busy, and error views.
+Shell goldens cover home, populated shelf, empty shelf, busy/error, and app
+presentation ready/loading/error/disabled views.
 Snapshot comparisons ignore trailing spaces; separate unit tests check exact
 rectangular cell dimensions.
 

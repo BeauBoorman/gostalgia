@@ -57,6 +57,26 @@ func TestCharmRestrictedToExperience(t *testing.T) {
 	}
 }
 
+func TestAppsAndSDKUseOnlyPublicBoundary(t *testing.T) {
+	cmd := exec.Command("go", "list", "-f", "{{.ImportPath}}|{{join .Imports \",\"}}", "gostalgia/sdk/...", "gostalgia/apps/...")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("list app imports: %v\n%s", err, out)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		pkg, imports, _ := strings.Cut(line, "|")
+		for _, imp := range strings.Split(imports, ",") {
+			if strings.HasPrefix(imp, "gostalgia/") && imp != "gostalgia/sdk" && !strings.HasPrefix(imp, "gostalgia/apps/") {
+				t.Errorf("%s imports private runtime package %s", pkg, imp)
+			}
+			switch imp {
+			case "os", "os/exec", "syscall", "unsafe":
+				t.Errorf("%s imports host/terminal API %s", pkg, imp)
+			}
+		}
+	}
+}
+
 func TestApprovedCharmBaseline(t *testing.T) {
 	cmd := exec.Command("go", "list", "-m", "-f", "{{if not .Indirect}}{{.Path}} {{.Version}}{{end}}", "all")
 	out, err := cmd.CombinedOutput()
