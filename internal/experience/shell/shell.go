@@ -5,6 +5,7 @@ package shell
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -238,7 +239,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) complete() {
 	prefix := string(m.input)
-	choices := []string{"help", "apps", "launch", "run", "stop", "echo", "call", "dir", "ls", "cd", "type", "cat", "ps", "status", "cls", "exit", "shutdown"}
+	choices := []string{"help", "apps", "launch", "run", "stop", "echo", "call", "dir", "ls", "cd", "type", "cat", "ps", "logs", "log", "status", "cls", "exit", "shutdown"}
 	if verb, partial, ok := strings.Cut(prefix, " "); ok {
 		if verb != "launch" && verb != "run" && verb != "stop" {
 			return
@@ -263,7 +264,10 @@ func (m *Model) complete() {
 	}
 }
 
+var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?(\x07|\x1b\\)`)
+
 func safe(s string) string {
+	s = ansiRegex.ReplaceAllString(s, "")
 	return strings.Map(func(r rune) rune {
 		if r == '\n' {
 			return r

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -45,6 +46,7 @@ const helpText = `COMMAND CENTER
   cd PATH                   change directory (C: is the VFS)
   type / cat PATH           read a file
   ps · status               processes · system dashboard
+  logs / log PID [TAIL]     view child process logs and diagnostics
   cls / clear               clear the transcript
   exit                      leave shell (owned boot shuts down)
   shutdown                  shut down the environment
@@ -264,19 +266,103 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 			return fail(fmt.Errorf("usage: ps"))
 		}
 		var procs []struct {
-			ID    int32    `json:"id"`
-			Name  string   `json:"name"`
-			State string   `json:"state"`
-			Caps  []string `json:"caps"`
+			ID        int32     `json:"id"`
+			Name      string    `json:"name"`
+			Kind      string    `json:"kind"`
+			State     string    `json:"state"`
+			Caps      []string  `json:"caps"`
+			StartedAt time.Time `json:"started_at"`
+			ExitedAt  time.Time `json:"exited_at"`
+			ExitCode  int       `json:"exit_code"`
 		}
 		if err := c.Call(ctx, "proc/list", nil, &procs); err != nil {
 			return fail(err)
 		}
-		rows := []string{"PID   PROCESS                          STATE / GRANT"}
+		rows := []string{"PID   PROCESS                          STATE / STATUS     TIME     GRANT"}
 		for _, p := range procs {
-			rows = append(rows, fmt.Sprintf("%-5d %-32s %s [%s]", p.ID, p.Name, p.State, strings.Join(p.Caps, ",")))
+			stateDesc := p.State
+			if p.State == "stopped" || p.State == "failed" {
+				stateDesc = fmt.Sprintf("%s (exit %d)", p.State, p.ExitCode)
+			}
+			timeStr := "-"
+			if !p.StartedAt.IsZero() {
+				if !p.ExitedAt.IsZero() {
+					timeStr = formatDuration(p.ExitedAt.Sub(p.StartedAt))
+				} else {
+					timeStr = formatDuration(time.Since(p.StartedAt))
+				}
+			}
+			rows = append(rows, fmt.Sprintf("%-5d %-32s %-18s %-8s [%s]",
+				p.ID, safe(p.Name), stateDesc, timeStr, strings.Join(p.Caps, ",")))
 		}
 		return ok(strings.Join(rows, "\n"))
+	case "logs", "log":
+		if len(args) == 0 || len(args) > 2 {
+			return fail(fmt.Errorf("usage: logs PID [TAIL]"))
+		}
+		var pid int32
+		if _, err := fmt.Sscan(args[0], &pid); err != nil || pid <= 0 {
+			return fail(fmt.Errorf("invalid pid: %s", args[0]))
+		}
+		params := map[string]any{"id": pid}
+		if len(args) == 2 {
+			var tail int
+			if _, err := fmt.Sscan(args[1], &tail); err == nil && tail > 0 {
+				params["tail"] = tail
+			}
+		}
+		var logs struct {
+			ID        int32     `json:"id"`
+			Name      string    `json:"name"`
+			Kind      string    `json:"kind"`
+			State     string    `json:"state"`
+			ExitCode  int       `json:"exit_code"`
+			StartedAt time.Time `json:"started_at"`
+			ExitedAt  time.Time `json:"exited_at"`
+			Duration  string    `json:"duration"`
+			Stdout    struct {
+				TotalBytes    int64  `json:"total_bytes"`
+				BufferedBytes int    `json:"buffered_bytes"`
+				DroppedBytes  int64  `json:"dropped_bytes"`
+				Truncated     bool   `json:"truncated"`
+				Content       string `json:"content"`
+			} `json:"stdout"`
+			Stderr struct {
+				TotalBytes    int64  `json:"total_bytes"`
+				BufferedBytes int    `json:"buffered_bytes"`
+				DroppedBytes  int64  `json:"dropped_bytes"`
+				Truncated     bool   `json:"truncated"`
+				Content       string `json:"content"`
+			} `json:"stderr"`
+		}
+		if err := c.Call(ctx, "proc/logs", params, &logs); err != nil {
+			return fail(err)
+		}
+		exitStr := "-"
+		if logs.State == "stopped" || logs.State == "failed" {
+			exitStr = fmt.Sprintf("%d", logs.ExitCode)
+		}
+		durStr := logs.Duration
+		if durStr == "" {
+			durStr = "-"
+		}
+		var out []string
+		out = append(out, fmt.Sprintf("PROCESS %d (%s) · %s · %s (exit %s, time %s)",
+			logs.ID, safe(logs.Name), logs.Kind, logs.State, exitStr, durStr))
+		out = append(out, fmt.Sprintf("stdout: %dB (dropped %dB) · stderr: %dB (dropped %dB)",
+			logs.Stdout.TotalBytes, logs.Stdout.DroppedBytes, logs.Stderr.TotalBytes, logs.Stderr.DroppedBytes))
+		if logs.Stdout.Content != "" {
+			out = append(out, "--- STDOUT ---")
+			out = append(out, safe(strings.TrimRight(logs.Stdout.Content, "\r\n")))
+		}
+		if logs.Stderr.Content != "" {
+			out = append(out, "--- STDERR ---")
+			out = append(out, safe(strings.TrimRight(logs.Stderr.Content, "\r\n")))
+		}
+		if logs.Stdout.Content == "" && logs.Stderr.Content == "" {
+			out = append(out, "(no output recorded)")
+		}
+		return ok(strings.Join(out, "\n"))
 	case "status":
 		if len(args) != 0 {
 			return fail(fmt.Errorf("usage: status"))
@@ -301,4 +387,14 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 	default:
 		return fail(fmt.Errorf("unknown command %q — type help", cmd))
 	}
+}
+
+func formatDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	return d.Round(time.Second).String()
 }

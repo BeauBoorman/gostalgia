@@ -16,8 +16,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"regexp"
+	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"gostalgia/internal/ipc"
 	"gostalgia/internal/runtime"
@@ -29,6 +32,7 @@ const usageText = `gctl — control a running Gostalgia environment
 Usage:
   gctl [--root DIR] status              runtime status
   gctl [--root DIR] ps                  environment processes
+  gctl [--root DIR] logs PID [TAIL]     view child process logs and diagnostics
   gctl [--root DIR] apps                installed applications
   gctl [--root DIR] echo MESSAGE        send a message to the echo app
   gctl [--root DIR] ls [PATH]           list a directory in the VFS
@@ -106,20 +110,111 @@ func run(ctx context.Context, client *ipc.Client, cmd string, args []string) err
 
 	case "ps":
 		var procs []struct {
-			ID    int32  `json:"id"`
-			Name  string `json:"name"`
-			Kind  string `json:"kind"`
-			State string `json:"state"`
+			ID        int32     `json:"id"`
+			Name      string    `json:"name"`
+			Kind      string    `json:"kind"`
+			State     string    `json:"state"`
+			StartedAt time.Time `json:"started_at"`
+			ExitedAt  time.Time `json:"exited_at"`
+			ExitCode  int       `json:"exit_code"`
 		}
 		if err := client.Call(ctx, "proc/list", nil, &procs); err != nil {
 			return err
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "PID\tNAME\tKIND\tSTATE")
+		fmt.Fprintln(w, "PID\tNAME\tKIND\tSTATE\tEXIT\tTIME")
 		for _, p := range procs {
-			fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", p.ID, p.Name, p.Kind, p.State)
+			exitStr := "-"
+			if p.State == "stopped" || p.State == "failed" {
+				exitStr = fmt.Sprintf("%d", p.ExitCode)
+			}
+			timeStr := "-"
+			if !p.StartedAt.IsZero() {
+				if !p.ExitedAt.IsZero() {
+					timeStr = formatDuration(p.ExitedAt.Sub(p.StartedAt))
+				} else {
+					timeStr = formatDuration(time.Since(p.StartedAt))
+				}
+			}
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\n", p.ID, sanitizeTerminal(p.Name), p.Kind, p.State, exitStr, timeStr)
 		}
 		return w.Flush()
+
+	case "logs":
+		if len(args) == 0 {
+			return fmt.Errorf("usage: gctl logs PID [TAIL]")
+		}
+		var pid int32
+		if _, err := fmt.Sscan(args[0], &pid); err != nil || pid <= 0 {
+			return fmt.Errorf("invalid pid: %s", args[0])
+		}
+		params := map[string]any{"id": pid}
+		if len(args) > 1 {
+			var tail int
+			if _, err := fmt.Sscan(args[1], &tail); err == nil && tail > 0 {
+				params["tail"] = tail
+			}
+		}
+		var logs struct {
+			ID        int32     `json:"id"`
+			Name      string    `json:"name"`
+			Kind      string    `json:"kind"`
+			State     string    `json:"state"`
+			ExitCode  int       `json:"exit_code"`
+			StartedAt time.Time `json:"started_at"`
+			ExitedAt  time.Time `json:"exited_at"`
+			Duration  string    `json:"duration"`
+			Stdout    struct {
+				TotalBytes    int64  `json:"total_bytes"`
+				BufferedBytes int    `json:"buffered_bytes"`
+				DroppedBytes  int64  `json:"dropped_bytes"`
+				Truncated     bool   `json:"truncated"`
+				Content       string `json:"content"`
+			} `json:"stdout"`
+			Stderr struct {
+				TotalBytes    int64  `json:"total_bytes"`
+				BufferedBytes int    `json:"buffered_bytes"`
+				DroppedBytes  int64  `json:"dropped_bytes"`
+				Truncated     bool   `json:"truncated"`
+				Content       string `json:"content"`
+			} `json:"stderr"`
+		}
+		if err := client.Call(ctx, "proc/logs", params, &logs); err != nil {
+			return err
+		}
+		exitStr := "-"
+		if logs.State == "stopped" || logs.State == "failed" {
+			exitStr = fmt.Sprintf("%d", logs.ExitCode)
+		}
+		durStr := logs.Duration
+		if durStr == "" {
+			durStr = "-"
+		}
+		fmt.Printf("Process %d (%s) [%s] — %s (exit: %s, duration: %s)\n",
+			logs.ID, sanitizeTerminal(logs.Name), logs.Kind, logs.State, exitStr, durStr)
+		fmt.Printf("Stdout: %d bytes (buffered: %d, dropped: %d, truncated: %v)\n",
+			logs.Stdout.TotalBytes, logs.Stdout.BufferedBytes, logs.Stdout.DroppedBytes, logs.Stdout.Truncated)
+		fmt.Printf("Stderr: %d bytes (buffered: %d, dropped: %d, truncated: %v)\n",
+			logs.Stderr.TotalBytes, logs.Stderr.BufferedBytes, logs.Stderr.DroppedBytes, logs.Stderr.Truncated)
+
+		if logs.Stdout.Content != "" {
+			fmt.Println("--- stdout ---")
+			fmt.Print(sanitizeTerminal(logs.Stdout.Content))
+			if !strings.HasSuffix(logs.Stdout.Content, "\n") {
+				fmt.Println()
+			}
+		}
+		if logs.Stderr.Content != "" {
+			fmt.Println("--- stderr ---")
+			fmt.Print(sanitizeTerminal(logs.Stderr.Content))
+			if !strings.HasSuffix(logs.Stderr.Content, "\n") {
+				fmt.Println()
+			}
+		}
+		if logs.Stdout.Content == "" && logs.Stderr.Content == "" {
+			fmt.Println("(no output recorded)")
+		}
+		return nil
 
 	case "apps":
 		var apps []struct {
@@ -251,4 +346,29 @@ func pretty(raw json.RawMessage) error {
 	}
 	fmt.Println(buf.String())
 	return nil
+}
+
+var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?(\x07|\x1b\\)`)
+
+func sanitizeTerminal(s string) string {
+	s = ansiRegex.ReplaceAllString(s, "")
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if r < 32 || r == 127 || unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+func formatDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	return d.Round(time.Second).String()
 }

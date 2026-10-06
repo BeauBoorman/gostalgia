@@ -373,6 +373,114 @@ func TestFSMkdirAndRemoveDeniedWithoutCapability(t *testing.T) {
 	}
 }
 
+func TestProcLogsViaIPC(t *testing.T) {
+	env := newTestEnv(t)
+	admin := security.AdminCapabilities()
+
+	proc, err := env.ctx.Apps.Launch(context.Background(), "com.gostalgia.echo")
+	must(t, err)
+	defer func() { _ = env.ctx.Apps.Stop("com.gostalgia.echo", time.Second) }()
+
+	// 1. Full logs query with admin cap
+	resp := env.call(context.Background(), admin, "proc/logs", map[string]any{"id": proc.ID()})
+	if !resp.OK {
+		t.Fatalf("proc/logs failed: %s", resp.Error)
+	}
+	var logs process.Logs
+	must(t, json.Unmarshal(resp.Data, &logs))
+	if logs.ID != proc.ID() {
+		t.Fatalf("logs.ID = %d, want %d", logs.ID, proc.ID())
+	}
+	if logs.Name != "com.gostalgia.echo" {
+		t.Fatalf("logs.Name = %q, want com.gostalgia.echo", logs.Name)
+	}
+	if logs.State != process.StateRunning {
+		t.Fatalf("logs.State = %q, want running", logs.State)
+	}
+	if logs.Duration == "" {
+		t.Fatal("logs.Duration is empty")
+	}
+
+	// 2. Stream filtering
+	resp = env.call(context.Background(), admin, "proc/logs", map[string]any{
+		"id":     proc.ID(),
+		"stream": "stdout",
+	})
+	if !resp.OK {
+		t.Fatalf("proc/logs with stream failed: %s", resp.Error)
+	}
+	var stdoutResp struct {
+		ID     int32                      `json:"id"`
+		Stdout process.StreamDiagnostics  `json:"stdout"`
+		Stderr *process.StreamDiagnostics `json:"stderr"`
+	}
+	must(t, json.Unmarshal(resp.Data, &stdoutResp))
+	if stdoutResp.ID != proc.ID() || stdoutResp.Stderr != nil {
+		t.Fatalf("expected only stdout stream, got: %+v", stdoutResp)
+	}
+
+	// 3. Tail parameter
+	resp = env.call(context.Background(), admin, "proc/logs", map[string]any{
+		"id":   proc.ID(),
+		"tail": 5,
+	})
+	if !resp.OK {
+		t.Fatalf("proc/logs with tail failed: %s", resp.Error)
+	}
+
+	// 4. Missing capability check
+	noProcList := security.NewCapabilities(security.CapIPC)
+	resp = env.call(context.Background(), noProcList, "proc/logs", map[string]any{"id": proc.ID()})
+	if resp.OK {
+		t.Fatal("proc/logs succeeded without CapProcList capability")
+	}
+
+	// 5. Unknown PID
+	resp = env.call(context.Background(), admin, "proc/logs", map[string]any{"id": 99999})
+	if resp.OK {
+		t.Fatal("proc/logs succeeded for unknown PID, want error")
+	}
+
+	// 6. Missing PID parameter
+	resp = env.call(context.Background(), admin, "proc/logs", map[string]any{})
+	if resp.OK {
+		t.Fatal("proc/logs succeeded without PID, want error")
+	}
+}
+
+func TestProcInfoViaIPC(t *testing.T) {
+	env := newTestEnv(t)
+	admin := security.AdminCapabilities()
+
+	proc, err := env.ctx.Apps.Launch(context.Background(), "com.gostalgia.echo")
+	must(t, err)
+	defer func() { _ = env.ctx.Apps.Stop("com.gostalgia.echo", time.Second) }()
+
+	resp := env.call(context.Background(), admin, "proc/info", map[string]any{"id": proc.ID()})
+	if !resp.OK {
+		t.Fatalf("proc/info failed: %s", resp.Error)
+	}
+	var info process.Info
+	must(t, json.Unmarshal(resp.Data, &info))
+	if info.ID != proc.ID() {
+		t.Fatalf("info.ID = %d, want %d", info.ID, proc.ID())
+	}
+	if info.Name != "com.gostalgia.echo" {
+		t.Fatalf("info.Name = %s, want com.gostalgia.echo", info.Name)
+	}
+
+	noProcList := security.NewCapabilities(security.CapIPC)
+	resp = env.call(context.Background(), noProcList, "proc/info", map[string]any{"id": proc.ID()})
+	if resp.OK {
+		t.Fatal("proc/info succeeded without CapProcList capability")
+	}
+
+	resp = env.call(context.Background(), admin, "proc/info", map[string]any{"id": 99999})
+	if resp.OK {
+		t.Fatal("proc/info succeeded for unknown PID, want error")
+	}
+}
+
 func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {

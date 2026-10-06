@@ -27,8 +27,8 @@ Rules for touching this file:
 | Boot → services → session → app launch → IPC → clean shutdown | ✅ working | `test/e2e` (real socket, real auth, real shutdown) |
 | Service framework (dep-ordered start, rollback, reverse stop) | ✅ working | `internal/service` unit tests |
 | IPC: in-proc + socket transports, token handshake, NDJSON | ✅ working | `internal/ipc` tests + `gctl` manual/e2e |
-| IPC: concurrent calls, versioned subscriptions, bounded metadata-only audit history | working | `internal/ipc` race stress (slow clients, floods, malformed frames, reconnect/epochs, permissions); `test/e2e` real runtime lifecycle notifications and secret/document redaction |
-| Process model: in-proc lifecycle, child spawn/kill/exit-status | ✅ working | `internal/process` tests (self-exec child helper); `proc/list` returns `exit_code` over IPC |
+| IPC: concurrent calls, versioned subscriptions, bounded metadata-only audit history | ✅ working | `internal/ipc` race stress (slow clients, floods, malformed frames, reconnect/epochs, permissions); `test/e2e` real runtime lifecycle notifications and secret/document redaction |
+| Process model: in-proc lifecycle, child spawn/kill/exit-status, bounded output capture, diagnostics | ✅ working | `internal/process` tests (ring buffer, drop accounting, env sanitization); `proc/list`, `proc/info`, `proc/logs` over IPC; `gctl ps`/`logs` and shell `ps`/`logs` |
 | VFS: safe doc ops, atomic save + recovery fallback, copy/move, trash/restore, host/memfs backends, mounts | ✅ working | unit tests + e2e + failure injection + fstest |
 | App SDK: embedded JSON manifest, Init/Run/Stop, scoped calls/routes, launch/stop | ✅ working | `sdk`, `internal/app`, services + shell socket lifecycle tests |
 | Charm shell: DOS-style prompt, app shelf, history/completion, VFS/process commands | ✅ working | `internal/experience/shell` (real Bubble Tea + authenticated IPC) |
@@ -61,13 +61,14 @@ go run ./cmd/gctl --root /tmp/gs status      # terminal 2
   boundary. Arbitrary external apps remain trusted-only until platform
   sandboxing is implemented (Milestone 4, issues
   [#36](https://github.com/drawmeanelephant/gostalgia/issues/36)–[#39](https://github.com/drawmeanelephant/gostalgia/issues/39)).
-- **No process supervision or log capture yet:** `proc/list` returns
-  `process.Info` snapshots (including `exit_code`, timing, and error state) over
-  IPC, but `gctl ps` and shell `ps` do not yet render exit codes; exited
-  processes remain listed indefinitely (no reaping), restart policies and
-  crash-loop protection are not yet implemented, and child stdout/stderr output
-  is not captured into bounded buffers (Milestone 3, issues
-  [#30](https://github.com/drawmeanelephant/gostalgia/issues/30)–[#33](https://github.com/drawmeanelephant/gostalgia/issues/33)).
+- **No process supervision yet:** `proc/list` returns
+  `process.Info` snapshots, `proc/logs` returns bounded stdout/stderr streams
+  with drop accounting and duration metrics, and `gctl ps`/`logs` and shell
+  `ps`/`logs` display exit codes, timing, and captured output. Exited processes
+  remain listed indefinitely (no reaping), restart policies and crash-loop
+  protection are not yet implemented (Milestone 3, issues
+  [#31](https://github.com/drawmeanelephant/gostalgia/issues/31),
+  [#33](https://github.com/drawmeanelephant/gostalgia/issues/33)).
 - **Single-user, single-session:** user `guest` is fixed; personal profiles and
   session ownership are scheduled for Milestone 5 ([#41](https://github.com/drawmeanelephant/gostalgia/issues/41)).
 - **Config has one layer** (system); layered preferences are scheduled for
@@ -113,7 +114,7 @@ SDK are merged and verified (`test/e2e`, `internal/experience/shell`,
 
 ### Milestone 3: 03: A live, observable computer
 
-- [ ] **[#30 Processes: capture bounded child output and expose complete diagnostics](https://github.com/drawmeanelephant/gostalgia/issues/30)** — bounded stdout/stderr ring buffers, IPC diagnostics, gctl/shell presentation.
+- [x] **[#30 Processes: capture bounded child output and expose complete diagnostics](https://github.com/drawmeanelephant/gostalgia/issues/30)** — bounded stdout/stderr ring buffers with drop accounting, wait delay protection, sanitized child environments, IPC diagnostics (`proc/logs`, `proc/info`), `gctl ps`/`logs`, and shell `ps`/`logs`.
 - [ ] **[#31 Processes: add supervision, bounded history, and crash-loop protection](https://github.com/drawmeanelephant/gostalgia/issues/31)** — restart policies, crash-loop backoff, bounded exit history, reaping.
 - [x] **[#32 IPC: add bounded event subscriptions, audit history, and responsive concurrent calls](https://github.com/drawmeanelephant/gostalgia/issues/32)** — versioned operator subscriptions, drop-oldest buffers, multiplexed calls, bounded metadata-only trail, retention/drop/epoch resynchronization; real-runtime and race stress coverage.
 - [ ] **[#33 Experience: add a live Task Manager, notification center, and crash receipts](https://github.com/drawmeanelephant/gostalgia/issues/33)** — live process screen, toasts, notifications, crash receipts.
@@ -144,6 +145,7 @@ SDK are merged and verified (`test/e2e`, `internal/experience/shell`,
 | 2026-10-05 | Merge latest main into IPC #32: preserve Charm baseline/dependency fences and #35 scoped principals/revocation with concurrent replies and events; add scoped event-access, pending-response revocation and event-disconnect cleanup regressions | Full build/vet/gofmt/race/pure-Go gate passes on macOS; three repeated IPC/security/e2e race runs pass |
 | 2026-10-06 | Security: distinct authenticated app identities and scoped grants (#35): Principal/TokenStore, operator vs app tokens, per-request validation, revocation on app exit/stop, CleanEnv secret scrubbing, socket e2e tests | Full gate green (vet, gofmt, -race, e2e); denied undeclared methods, stale token replay rejected, confused-deputy protection verified |
 | 2026-10-05 | IPC subscriptions/history/concurrent calls (#32): five repeated focused race runs; real-runtime event + private-document history checks; deterministic blocked socket writer, floods, malformed frames, authorization, cursor replay/epoch and cleanup regressions | `gofmt -l .` clean; `go build ./...`, `go vet ./...`, `go test -race ./...`, `CGO_ENABLED=0 go build ./...` pass on macOS; no new dependencies; platform adapters/CI unchanged |
+| 2026-10-05 | Processes: bounded child output capture & complete diagnostics (#30): RingBuffer with drop accounting, WaitDelay child exit drain, sanitized DefaultChildEnv, proc/logs and proc/info IPC routes, gctl ps/logs and Charm shell ps/logs with ANSI sanitization | Full gate green (build, vet, gofmt, race tests on internal/process, internal/services, shell, e2e; CGO_ENABLED=0 pure-Go build OK) |
 | 2026-10-05 | Charm shell + public capability-scoped SDK; one embedded-manifest Echo demo; spec read against implementation | Build/vet/gofmt/race green; pure-Go and Windows/Linux builds OK; real Bubble Tea socket integration + compiled CLI PTY smoke (echo, scoped identity, stop/relaunch, F2 shelf, exit/terminal restoration/runtime cleanup); no second demo built |
 | 2026-10-05 | FIFO regression (#16): `HostFS.Stat`/`ReadDir` no longer `os.Root.Open` special files — Lstat fallback for FIFOs, sockets, devices, symlinks; regression tests for `Stat`, `ReadDir`, and `ipc.Server.Close` with a `fs/list` handler in flight over a real socket | repro tests fail unfixed, pass fixed; full gate green (`vet`, `gofmt`, `-race`) |
 | 2026-10-05 | Docs drift (#17): `status.md` "Last verified" no longer hardcodes test counts (CI is the source of truth); `security.md`/`ipc.md` scope the `runtime.json` 0600 mode to unix — Windows inherits directory ACLs | docs match the code |

@@ -2,9 +2,11 @@ package process
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -28,6 +30,23 @@ func TestMain(m *testing.M) {
 	case "check_clean_env":
 		if os.Getenv("SUPER_SECRET_HOST_KEY") != "" {
 			os.Exit(42) // leaked secret!
+		}
+		os.Exit(0)
+	case "output":
+		fmt.Fprintln(os.Stdout, "child stdout line 1")
+		fmt.Fprintln(os.Stderr, "child stderr line 1")
+		fmt.Fprintln(os.Stdout, "child stdout line 2")
+		os.Exit(0)
+	case "flood":
+		for i := 0; i < 200; i++ {
+			fmt.Fprintf(os.Stdout, "child flood line %04d: %s\n", i, strings.Repeat("x", 80))
+		}
+		os.Exit(0)
+	case "env":
+		for _, e := range os.Environ() {
+			if strings.HasPrefix(e, "GOSTALGIA_") || strings.HasPrefix(e, "TEST_") || strings.HasPrefix(e, "SECRET_") {
+				fmt.Println(e)
+			}
 		}
 		os.Exit(0)
 	}
@@ -253,5 +272,225 @@ func TestChildCleanEnvPreventsSecretLeak(t *testing.T) {
 	}
 	if info.ExitCode != 0 {
 		t.Errorf("exit code = %d (code 42 indicates secret leaked into child env)", info.ExitCode)
+	}
+}
+
+func TestRingBuffer(t *testing.T) {
+	rb := NewRingBuffer(10)
+	diag := rb.Snapshot()
+	if diag.TotalBytes != 0 || diag.BufferedBytes != 0 || diag.DroppedBytes != 0 || diag.Truncated || diag.Content != "" {
+		t.Fatalf("unexpected initial snapshot: %+v", diag)
+	}
+
+	// Write 6 bytes
+	n, err := rb.Write([]byte("hello!"))
+	if err != nil || n != 6 {
+		t.Fatalf("write failed: n=%d err=%v", n, err)
+	}
+	diag = rb.Snapshot()
+	if diag.TotalBytes != 6 || diag.BufferedBytes != 6 || diag.DroppedBytes != 0 || diag.Truncated || diag.Content != "hello!" {
+		t.Fatalf("unexpected snapshot after 6 bytes: %+v", diag)
+	}
+
+	// Write 6 more bytes (total 12 bytes, cap 10, should drop 2 bytes)
+	n, err = rb.Write([]byte("world!"))
+	if err != nil || n != 6 {
+		t.Fatalf("write failed: n=%d err=%v", n, err)
+	}
+	diag = rb.Snapshot()
+	if diag.TotalBytes != 12 || diag.BufferedBytes != 10 || diag.DroppedBytes != 2 || !diag.Truncated || diag.Content != "llo!world!" {
+		t.Fatalf("unexpected snapshot after 12 bytes: %+v", diag)
+	}
+
+	// Write a single chunk larger than capacity (15 bytes)
+	n, err = rb.Write([]byte("0123456789ABCDE"))
+	if err != nil || n != 15 {
+		t.Fatalf("write failed: n=%d err=%v", n, err)
+	}
+	diag = rb.Snapshot()
+	if diag.TotalBytes != 27 || diag.BufferedBytes != 10 || diag.DroppedBytes != 17 || !diag.Truncated || diag.Content != "56789ABCDE" {
+		t.Fatalf("unexpected snapshot after large write: %+v", diag)
+	}
+
+	// Concurrent writes and snapshots
+	rbConcurrent := NewRingBuffer(100)
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				_, _ = rbConcurrent.Write([]byte(fmt.Sprintf("[%d:%d]", id, j)))
+				_ = rbConcurrent.Snapshot()
+			}
+		}(i)
+	}
+	wg.Wait()
+	finalDiag := rbConcurrent.Snapshot()
+	if finalDiag.BufferedBytes > 100 {
+		t.Fatalf("buffered bytes %d exceeds capacity 100", finalDiag.BufferedBytes)
+	}
+}
+
+func TestChildOutputCaptured(t *testing.T) {
+	if testing.Short() {
+		t.Skip("child process test skipped in short mode")
+	}
+	m, _ := newTestManager(t)
+	p, err := m.StartChild(context.Background(), Spec{
+		Name: "speaker",
+		Args: childHelperArgs(t),
+		Env:  childHelperEnv("output"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("child did not exit")
+	}
+
+	logs, ok := m.Logs(p.ID())
+	if !ok {
+		t.Fatal("Logs returned ok=false for child process")
+	}
+	if logs.State != StateStopped {
+		t.Fatalf("state = %s, want stopped", logs.State)
+	}
+	if logs.ExitCode != 0 {
+		t.Fatalf("exit code = %d, want 0", logs.ExitCode)
+	}
+	if logs.Duration == "" {
+		t.Fatal("expected non-empty duration")
+	}
+	if !strings.Contains(logs.Stdout.Content, "child stdout line 1") || !strings.Contains(logs.Stdout.Content, "child stdout line 2") {
+		t.Fatalf("stdout missing expected lines: %q", logs.Stdout.Content)
+	}
+	if !strings.Contains(logs.Stderr.Content, "child stderr line 1") {
+		t.Fatalf("stderr missing expected line: %q", logs.Stderr.Content)
+	}
+	if !strings.Contains(logs.Combined.Content, "child stdout line 1") || !strings.Contains(logs.Combined.Content, "child stderr line 1") {
+		t.Fatalf("combined missing output: %q", logs.Combined.Content)
+	}
+	if logs.Stdout.Truncated || logs.Stderr.Truncated {
+		t.Fatalf("streams unexpectedly marked truncated: stdout=%v stderr=%v", logs.Stdout.Truncated, logs.Stderr.Truncated)
+	}
+	if logs.Stdout.TotalBytes == 0 || logs.Stderr.TotalBytes == 0 {
+		t.Fatalf("byte counts should be non-zero: stdout=%d stderr=%d", logs.Stdout.TotalBytes, logs.Stderr.TotalBytes)
+	}
+}
+
+func TestChildRingBufferBounded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("child process test skipped in short mode")
+	}
+	m, _ := newTestManager(t)
+	limit := 512
+	p, err := m.StartChild(context.Background(), Spec{
+		Name:     "flooder",
+		Args:     childHelperArgs(t),
+		Env:      childHelperEnv("flood"),
+		LogLimit: limit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("child did not exit")
+	}
+
+	logs, ok := m.Logs(p.ID())
+	if !ok {
+		t.Fatal("Logs returned ok=false")
+	}
+	if !logs.Stdout.Truncated {
+		t.Fatal("expected stdout to be marked truncated")
+	}
+	if logs.Stdout.DroppedBytes <= 0 {
+		t.Fatalf("expected stdout dropped bytes > 0, got %d", logs.Stdout.DroppedBytes)
+	}
+	if logs.Stdout.BufferedBytes > limit {
+		t.Fatalf("buffered bytes %d exceeds limit %d", logs.Stdout.BufferedBytes, limit)
+	}
+	if logs.Stdout.TotalBytes != logs.Stdout.DroppedBytes+int64(logs.Stdout.BufferedBytes) {
+		t.Fatalf("total (%d) != dropped (%d) + buffered (%d)",
+			logs.Stdout.TotalBytes, logs.Stdout.DroppedBytes, logs.Stdout.BufferedBytes)
+	}
+	if !strings.Contains(logs.Stdout.Content, "child flood line 0199") {
+		t.Fatalf("expected stdout tail to contain final lines, got: %q", logs.Stdout.Content)
+	}
+}
+
+func TestChildEnvironmentSanitization(t *testing.T) {
+	if testing.Short() {
+		t.Skip("child process test skipped in short mode")
+	}
+	m, _ := newTestManager(t)
+	p, err := m.StartChild(context.Background(), Spec{
+		Name: "envtest",
+		Args: childHelperArgs(t),
+		Env: []string{
+			"GOSTALGIA_TEST_CHILD=env",
+			"SECRET_API_TOKEN=supersecret",
+			"TEST_SAFE_VAR=visible",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("child did not exit")
+	}
+
+	logs, ok := m.Logs(p.ID())
+	if !ok {
+		t.Fatal("Logs returned ok=false")
+	}
+	if !strings.Contains(logs.Stdout.Content, "GOSTALGIA_PROCESS_ID=") {
+		t.Fatalf("expected GOSTALGIA_PROCESS_ID in child env, got: %s", logs.Stdout.Content)
+	}
+	if !strings.Contains(logs.Stdout.Content, "TEST_SAFE_VAR=visible") {
+		t.Fatalf("expected TEST_SAFE_VAR in child env, got: %s", logs.Stdout.Content)
+	}
+	if strings.Contains(logs.Stdout.Content, "SECRET_API_TOKEN") || strings.Contains(logs.Stdout.Content, "supersecret") {
+		t.Fatalf("sensitive variable leaked into child process env: %s", logs.Stdout.Content)
+	}
+}
+
+func TestInProcLogs(t *testing.T) {
+	m, _ := newTestManager(t)
+	p, err := m.StartInProc(context.Background(), Spec{Name: "noop"}, func(p *Process) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("inproc did not exit")
+	}
+
+	logs, ok := m.Logs(p.ID())
+	if !ok {
+		t.Fatal("Logs returned ok=false")
+	}
+	if logs.Kind != KindInProc {
+		t.Fatalf("kind = %s, want inproc", logs.Kind)
+	}
+	if logs.Stdout.Content != "" || logs.Stderr.Content != "" {
+		t.Fatalf("expected empty logs for inproc, got stdout=%q stderr=%q", logs.Stdout.Content, logs.Stderr.Content)
+	}
+}
+
+func TestLogsUnknownPID(t *testing.T) {
+	m, _ := newTestManager(t)
+	if _, ok := m.Logs(99999); ok {
+		t.Fatal("Logs returned ok=true for unknown PID")
 	}
 }

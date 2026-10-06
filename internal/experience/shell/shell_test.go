@@ -212,6 +212,12 @@ func TestBubbleTeaSocketAppLifecycle(t *testing.T) {
 	if r := submit("echo renewed"); !strings.Contains(r.text, "echo #1") {
 		t.Fatal("instance state not reset")
 	}
+	if r := submit("ps"); !strings.Contains(r.text, "com.gostalgia.echo") || !strings.Contains(r.text, "STATE / STATUS") {
+		t.Fatalf("ps output unexpected: %s", r.text)
+	}
+	if r := submit("logs 1"); !strings.Contains(r.text, "PROCESS 1") {
+		t.Fatalf("logs output unexpected: %s", r.text)
+	}
 	if r := submit(`cd C:\users\guest\documents`); r.cwd != "/users/guest/documents" {
 		t.Fatal(r.cwd)
 	}
