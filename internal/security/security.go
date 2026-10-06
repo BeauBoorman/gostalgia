@@ -259,6 +259,8 @@ const (
 	CapHostFSRead     = sdk.CapHostFSRead
 	CapHostFSWrite    = sdk.CapHostFSWrite
 	CapNetEgress      = sdk.CapNetEgress
+	CapSessionRead    = sdk.CapSessionRead
+	CapSessionWrite   = sdk.CapSessionWrite
 	CapAdmin          = "admin"
 )
 
@@ -316,6 +318,7 @@ func AdminCapabilities() *Capabilities {
 		CapClipboardRead, CapClipboardWrite,
 		CapHostFSRead, CapHostFSWrite,
 		CapNetEgress,
+		CapSessionRead, CapSessionWrite,
 		CapAdmin,
 	)
 }

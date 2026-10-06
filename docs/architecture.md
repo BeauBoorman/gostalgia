@@ -195,12 +195,31 @@ types; nothing publishes untyped maps.
 ### 3.8 Sessions & security (`internal/session`, `internal/security`)
 
 Users and sessions exist as first-class environment concepts from day one
-(the slice creates user `guest` and one session at boot). Security model:
+(the slice creates user `guest` and one session at boot).
+
+Sessions support detachable interactive clients and persistent workspace state:
+- **Detachable shells & multi-client attachment**: Headless runtimes (`gostalgia boot`)
+  run independently of interactive terminals. Interactive shell clients attach to a
+  running session via `gostalgia attach` or `gostalgia shell --attach`, and can cleanly
+  detach via `detach`, leaving the runtime, background services, and hosted applications
+  running undisturbed. Multiple interactive clients can attach to the same session
+  simultaneously, with attachment lifecycle events published on the `session` bus topic.
+- **Persistent workspace state**: Sessions persist working directory (CWD), active
+  view, and command history in the user's VFS configuration (`/users/guest/config/workspace.json`)
+  using atomic writes (`vfs.FS.SaveAtomic`). If workspace state is corrupted or missing,
+  safe fallback defaults are restored without failing boot.
+- **Sensitive command & token redaction**: Command history automatically filters and
+  redacts sensitive information before persistence. Commands starting with `auth`, `token`,
+  or `login` are omitted from history entirely. Long hex tokens (>= 32 characters) and
+  flags/parameters matching passwords, secrets, bearer tokens, and API keys are redacted
+  with `[REDACTED]`, ensuring secrets never leak to disk.
+
+Security model:
 **capabilities**. A process's capabilities come from its manifest
 permissions; they are attached to the IPC context and enforced at handler
 boundaries (`security.Capabilities.Has`). Read/write VFS methods, process
-listing/stopping, app listing/launching/stopping, and shutdown check their
-individual grants; app route publication/invocation checks `ipc`. App SDK
+listing/stopping, app listing/launching/stopping, session management (`session.read`, `session.write`),
+and shutdown check their individual grants; app route publication/invocation checks `ipc`. App SDK
 `Call` and `Handle` adapters replace caller capabilities with the app's manifest
 grant, enforcing capability scoping and preventing confused-deputy attacks.
 Calls attempting undeclared capabilities fail in production. Trusted operator

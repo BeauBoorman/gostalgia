@@ -287,6 +287,11 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// Done returns a channel that is closed when the connection drops or the client closes.
+func (c *Client) Done() <-chan struct{} {
+	return c.done
+}
+
 // ClientSubscription is connection-scoped and bounded. Info describes the
 // initial cursor/replay status. Events reports total server + local drops.
 // A closed Events channel means unsubscribe/disconnect, not a clean replay.
