@@ -103,9 +103,11 @@ Edit `apps/apps.go`:
    }
    ```
 
-3. Add `counter.Manifest()` to the `[]app.Manifest{echo.Manifest()}` slice in
-   `SeedManifests`. Seeding creates `/apps/manifests/com.example.counter.json`
-   in the environment VFS, only if absent.
+3. Add `counter.Manifest()` to the `[]sdk.Manifest{echo.Manifest()}` slice in
+   `apps.Manifests`. The runtime passes these declarations to
+   `app.SeedManifests`, which creates
+   `/apps/manifests/com.example.counter.json` in the environment VFS, only if
+   absent. App packages never receive the VFS or import runtime managers.
 
 Rebuild `go build ./...`. The app now appears in the shelf and `app/list`.
 Echo is auto-launched at boot; **new apps are not auto-launched**. Use
@@ -248,7 +250,9 @@ call app/com.example.counter/next
 ```
 
 Expect counts 1, 2, then 1 after relaunch. F2 opens the shelf, Enter launches,
-F3 stops, Esc returns to the prompt. `ps` shows manifest grants on the process.
+F3 stops, F4 opens the selected running app's view, and Esc returns to the
+prompt. `ps` shows manifest grants on the process. Echo's interactive view is
+available without another installed demo.
 
 Headless equivalent:
 
@@ -267,7 +271,144 @@ handler as an operator too: it must not borrow operator capabilities.
 Run `go build ./...`, `go vet ./...`, `gofmt -l .` (empty output), and
 `go test -race ./...`. Do not add another external dependency to an app.
 
-## 7. Trust and dependency boundary
+## 7. Data/action presentation contract (version 1)
+
+**There is exactly one terminal owner: the experience/shell.** Only it enters
+raw mode, renders, restores the terminal, chooses styles, edits inputs, moves
+focus, and handles global hotkeys. An app publishes data and semantic actions,
+not a `tea.Model`, widget tree, ANSI output, terminal handle, or keymap. The
+SDK and all production `apps/` packages import only the SDK, other app
+packages, and standard library packages. Runtime registration uses a narrow
+`apps.Registrar` interface; manifest file seeding stays in the runtime.
+
+### App adapter and wire methods
+
+During Init, call:
+
+```go
+func (c *sdk.Context) Present(
+    snapshot func(context.Context) (sdk.View, error),
+    action func(context.Context, sdk.ActionRequest) (sdk.View, error),
+) error
+```
+
+This reserves three ordinary app-scoped IPC routes, atomically published with
+the app's other routes after successful Init. Apps without a presentation can
+continue exposing only operation routes. Both callbacks follow the existing
+manifest grants, handler concurrency, cancellation, and error rules.
+
+| Method (`app/<app-id>/...`) | Params | Result |
+|---|---|---|
+| `view` | `sdk.ViewRequest`: `{"version":1}` | complete `sdk.View` snapshot |
+| `action` | `sdk.ActionRequest`: `{version,instance,request_id,action,item_id?,values?}` | complete updated `sdk.View` |
+| `cancel` | `sdk.CancelRequest`: `{version,instance,request_id}` | `{"canceled":true}`, cancellation intent recorded |
+
+`version` is the presentation protocol version, independent of manifest
+version. Missing/unsupported versions, unknown request fields, malformed
+params, and stale instances are errors. The SDK assigns a fresh opaque
+`instance` on every Init. Action and cancel requests must echo it; an old
+screen can never target a new launch by accident. Each action uses a distinct
+`request_id` matching `[a-z][a-z0-9_-]*` (up to 64 bytes). It identifies
+in-flight work, **not** a durable idempotency key; do not automatically retry a
+mutating action after a lost response.
+
+### Typed snapshot, not widgets
+
+`sdk.View` has `version`, `instance`, `title`, `state`, `items`, `fields`,
+`actions`, `status`, and `error`. It is a full replacement, including explicit
+empty values, not a patch. Its small concrete vocabulary is:
+
+- `sdk.Item`: stable local `id`, `label`, and textual `detail`.
+- `sdk.Field`: local `id`, `label`, initial text `value`, and `required`.
+  Version 1 fields are single-line text. The shell owns editing; periodic
+  snapshots preserve drafts for surviving field IDs. To reset an input, change
+  its ID or reopen the view.
+- `sdk.Action`: local `id`, `label`, and `disabled`.
+- `sdk.ViewState`: `ready`, `loading`, or `error`. An error state requires an
+  error banner. `status` is informational text, not an IPC error.
+
+IDs are unique within each collection and match `[a-z][a-z0-9_-]*`, up to 64
+bytes. Collections are bounded to 100 items, 16 fields, and 16 actions.
+Titles/labels are bounded to 256 bytes; field values, item details, status, and
+error to 4096 bytes each. `View.Validate()` checks the contract. The SDK stamps
+and validates callback results; the shell validates replies and strips terminal
+controls before rendering every piece of app text.
+
+Before invoking an action callback, the SDK validates the current snapshot,
+rejects unknown/disabled actions and actions on a loading view, rejects
+unrecognized item/field IDs and oversized inputs, and checks required fields.
+`values` is a `map[string]string` keyed by field ID, and `item_id` is an
+optional selection. App callbacks still validate domain rules and
+authorization, and must synchronize shared state.
+
+This deliberately supports a concrete list/text-form/action screen, not a
+speculative layout or widget framework. Files and Notes can build on these
+data types and scoped filesystem service calls; rich editors, pagination,
+multiple views, and app-defined shortcuts are not part of version 1.
+
+### Echo, interactive and headless
+
+`apps/echo` calls `app.Present(e.view, e.act)` from Init. Its snapshot contains
+a required `msg` field, an `echo` action, the last echoed item, and an echo-count
+status. Both its presentation action and existing `echo` operation call the
+same synchronized operation. Neither path imports Charm or accesses a host
+file or terminal.
+
+In the shell, press F2, select a running Echo instance, and press F4. Type a
+message and press Enter. Tab/Shift-Tab move field/action focus; Enter invokes
+the focused action (the first action when a field is focused); Up/Down select
+an item. F2 always returns to the shelf, Ctrl-C/Ctrl-D always exit, and apps
+cannot intercept these global hotkeys.
+
+The same operations run without any UI:
+
+```sh
+go run ./cmd/gostalgia boot --root /tmp/gs
+go run ./cmd/gctl --root /tmp/gs call app/com.gostalgia.echo/view '{"version":1}'
+```
+
+Copy the returned `instance` into an action request:
+
+```sh
+go run ./cmd/gctl --root /tmp/gs call app/com.gostalgia.echo/action \
+  '{"version":1,"instance":"COPY-FROM-VIEW","request_id":"cli-1","action":"echo","values":{"msg":"no terminal required"}}'
+go run ./cmd/gctl --root /tmp/gs call app/com.gostalgia.echo/stats
+```
+
+The action snapshot and stats report the same count. Existing
+`app/com.gostalgia.echo/echo` calls also update the view. The socket test in
+`test/e2e/presentation_test.go` exercises these routes without a UI; the
+shell test exercises the same action through a real Bubble Tea loop.
+
+### Loading, errors, cancellation, and retraction
+
+The shell immediately displays loading while fetching a view or awaiting an
+action. App snapshots can also expose `loading` for app-owned asynchronous
+work. A callback error becomes an IPC error and a shell-owned banner; a
+`ViewError` snapshot carries a recoverable app error banner and may offer
+enabled recovery actions.
+
+Esc during an action cancels its local wait **and** sends `cancel` over IPC,
+keeping the view available. Esc when idle dismisses the view and returns focus
+to the prompt. Dismissal, shell exit, action timeout, and switching to the
+shelf also cancel pending work. The separate route is necessary because
+canceling a socket client's context alone does not cancel server execution.
+The SDK remembers the latest 64 cancellation intents so cancel-before-action
+dispatch is honored, and permits at most 16 concurrent actions per instance.
+Cancellation is cooperative: callbacks must observe `ctx.Done()` and check
+before committing. An acknowledgment does not promise rollback of work
+already committed. Process lifetime and socket disconnect also cancel
+handler contexts.
+
+No presentation survives its owner. Existing app cleanup retracts all three
+routes and cancels/drains handlers on stop, normal exit, error, panic, or failed
+Init. The shell checks `app/list` and snapshots at 500 ms intervals (two-second
+IPC deadline), retracts data and focus on exit, PID/instance replacement, or
+lost connectivity, and ignores replies from dismissed/canceled views. The
+shell never relaunches an app merely to render it. Snapshots and action input
+are not published to the runtime event history.
+
+## 8. Trust and dependency boundary
 
 The SDK and runtime core remain standard-library-only. Bubble Tea and Lip
 Gloss live in `internal/experience/shell`; apps do not implement tea.Model and
