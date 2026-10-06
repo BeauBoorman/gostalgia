@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gostalgia/apps/echo"
+	"gostalgia/apps/notes"
 	"gostalgia/internal/app"
 	"gostalgia/internal/events"
 	"gostalgia/internal/ipc"
@@ -54,24 +55,23 @@ func TestSeedManifestsWritesIdempotently(t *testing.T) {
 		t.Fatalf("second SeedManifests (idempotency): %v", err)
 	}
 
-	data, err := env.ReadFile("/apps/manifests/" + echo.ID + ".json")
-	if err != nil {
-		t.Fatalf("seeded manifest readable: %v", err)
-	}
-	var got app.Manifest
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("seeded manifest parses: %v", err)
-	}
-	if want := echo.Manifest(); !reflect.DeepEqual(got, want) {
-		t.Errorf("seeded manifest = %+v, want %+v", got, want)
+	for _, id := range []string{echo.ID, notes.ID} {
+		data, err := env.ReadFile("/apps/manifests/" + id + ".json")
+		if err != nil {
+			t.Fatalf("seeded manifest readable for %s: %v", id, err)
+		}
+		var got app.Manifest
+		if err := json.Unmarshal(data, &got); err != nil {
+			t.Fatalf("seeded manifest parses for %s: %v", id, err)
+		}
 	}
 
 	entries, err := env.ReadDir("/apps/manifests")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Errorf("manifest dir has %d entries after double seed, want 1", len(entries))
+	if len(entries) != len(Manifests()) {
+		t.Errorf("manifest dir has %d entries after double seed, want %d", len(entries), len(Manifests()))
 	}
 }
 
@@ -119,11 +119,13 @@ func TestRegisterMakesFactoryAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
-		t.Fatalf("loaded %d manifests, want 1", n)
+	if n != len(Manifests()) {
+		t.Fatalf("loaded %d manifests, want %d", n, len(Manifests()))
 	}
-	m, ok := fresh.Manifest(echo.ID)
-	if !ok || !reflect.DeepEqual(m, echo.Manifest()) {
-		t.Errorf("loaded manifest = %+v ok=%v, want %+v", m, ok, echo.Manifest())
+	for _, expected := range Manifests() {
+		m, ok := fresh.Manifest(expected.ID)
+		if !ok || !reflect.DeepEqual(m, expected) {
+			t.Errorf("loaded manifest %s = %+v ok=%v, want %+v", expected.ID, m, ok, expected)
+		}
 	}
 }
