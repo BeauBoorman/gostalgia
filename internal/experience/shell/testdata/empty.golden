@@ -1,6 +1,6 @@
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃ G O S T A L G I A  /  PERSONAL COMPUTING, REIMAGINED                         ┃
-┃  Home  [Apps]  Prompt                                                        ┃
+┃  Home  [Apps]  Prompt   Tasks   Notifications                                ┃
 ┃ ✓ ONLINE   guest · C: environment drive                                      ┃
 ┃                                                                              ┃
 ┃ SEARCH: type to filter apps...                                               ┃
@@ -21,4 +21,4 @@
 ┃                                                                              ┃
 ┃ C:\users\guest> Esc returns to prompt.                                       ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-Esc PROMPT · (Enter) RUN · (F3) STOP · (F4) VIEW · (↑↓) SELECT · Ctrl-P PALETTE
+Esc PROMPT · (Enter) RUN · (F3) STOP · (F4) VIEW · F5 TASKS · (↑↓) SELECT · Ctrl
