@@ -23,6 +23,7 @@ import (
 	"unicode"
 
 	"gostalgia/internal/ipc"
+	"gostalgia/internal/pkg"
 	"gostalgia/internal/runtime"
 	"gostalgia/platform"
 )
@@ -36,11 +37,20 @@ Usage:
   gctl [--root DIR] reap                reap inactive process objects
   gctl [--root DIR] logs PID [TAIL]     view child process logs and diagnostics
   gctl [--root DIR] apps                installed applications
+  gctl [--root DIR] pkg SUBCOMMAND      inspect/install/update/rollback packages
   gctl [--root DIR] echo MESSAGE        send a message to the echo app
   gctl [--root DIR] ls [PATH]           list a directory in the VFS
   gctl [--root DIR] cat PATH            print a file from the VFS
   gctl [--root DIR] shutdown            request a clean shutdown
   gctl [--root DIR] call METHOD [JSON]  raw IPC call (debug)
+
+Packages (archive paths are VFS paths):
+  pkg list
+  pkg inspect APP-ID | pkg inspect --archive VFS-PATH
+  pkg install VFS-PATH [--confirm-permissions]
+  pkg update VFS-PATH [--confirm-permissions]
+  pkg rollback APP-ID [--confirm-permissions]
+  pkg uninstall APP-ID
 `
 
 func main() {
@@ -103,6 +113,16 @@ func connect(root string) (*ipc.Client, error) {
 
 func run(ctx context.Context, client *ipc.Client, cmd string, args []string) error {
 	switch cmd {
+	case "pkg", "package":
+		method, params, err := pkg.ParseCommand(args)
+		if err != nil {
+			return err
+		}
+		var raw json.RawMessage
+		if err := client.Call(ctx, method, params, &raw); err != nil {
+			return err
+		}
+		return pretty(raw)
 	case "status":
 		var raw json.RawMessage
 		if err := client.Call(ctx, "sys/status", nil, &raw); err != nil {
