@@ -143,8 +143,17 @@ func TestSysStatus(t *testing.T) {
 	if len(status.Services) != 3 {
 		t.Errorf("services = %d, want 3", len(status.Services))
 	}
-	if len(status.Apps) != 1 || status.Apps[0].Manifest.ID != "com.gostalgia.echo" {
-		t.Errorf("apps = %+v, want echo", status.Apps)
+	if len(status.Apps) != len(apps.Manifests()) {
+		t.Errorf("apps count = %d, want %d", len(status.Apps), len(apps.Manifests()))
+	}
+	appIDs := make(map[string]bool)
+	for _, a := range status.Apps {
+		appIDs[a.Manifest.ID] = true
+	}
+	for _, id := range []string{"com.gostalgia.echo", "com.gostalgia.notes"} {
+		if !appIDs[id] {
+			t.Errorf("expected app %s in status.Apps, got %+v", id, status.Apps)
+		}
 	}
 }
 
