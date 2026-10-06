@@ -51,7 +51,7 @@ const helpText = `COMMAND CENTER
   exit                      leave shell (owned boot shuts down)
   shutdown                  shut down the environment
 
-F2 app shelf · F3 stop selected · Tab complete · ↑↓ history
+F2 app shelf · F3 stop selected · F4 open selected view · Tab complete · ↑↓ history
 Paths accept /users/guest or C:\users\guest. Quote paths with spaces.`
 
 // words handles quoted paths and messages. Backslashes remain literal for DOS

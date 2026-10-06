@@ -41,6 +41,8 @@ type Model struct {
 	shelf         bool
 	busy          bool
 	scroll        int
+	presentation  *appView
+	viewEpoch     uint64
 }
 
 func New(ctx context.Context, c Caller, closed <-chan struct{}) *Model {
@@ -107,7 +109,13 @@ func (m *Model) append(e entry) {
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case viewMsg, viewTickMsg, viewCheckMsg, viewCancelMsg:
+		return m, m.updatePresentation(msg)
 	case closedMsg:
+		if m.presentation != nil && m.presentation.cancel != nil {
+			m.presentation.cancel()
+		}
+		m.presentation = nil
 		return m, tea.Quit
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -134,10 +142,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "ctrl+d":
 			return m, tea.Quit
 		case "f2":
+			cancel := m.dismissView()
 			m.shelf = !m.shelf
 			m.scroll = 0
+			return m, cancel
+		case "f4":
+			if m.presentation == nil {
+				return m, m.selectedView()
+			}
 			return m, nil
 		case "esc":
+			if m.presentation != nil {
+				return m, m.viewKey(msg)
+			}
 			m.shelf = false
 			return m, nil
 		case "pgup":
@@ -149,6 +166,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.busy {
 			return m, nil
+		}
+		if m.presentation != nil {
+			return m, m.viewKey(msg)
 		}
 		if m.shelf {
 			switch msg.String() {
@@ -303,7 +323,7 @@ func (m *Model) View() string {
 	bodyHeight := max(1, m.height-9)
 	var lines []string
 	if m.shelf {
-		lines = append(lines, gold.Render("APP SHELF"), muted.Render("Enter launch · F3 stop · Esc prompt"))
+		lines = append(lines, gold.Render("APP SHELF"), muted.Render("Enter launch · F3 stop · F4 view · Esc prompt"))
 		visible := max(1, bodyHeight-6)
 		start := max(0, m.selected-visible+1)
 		end := min(len(m.apps), start+visible)
@@ -328,6 +348,11 @@ func (m *Model) View() string {
 			a := m.apps[m.selected]
 			lines = append(lines, "", safe(a.Manifest.Description), muted.Render("GRANT  "+safe(strings.Join(a.Manifest.Permissions, " · "))))
 		}
+	} else if m.presentation != nil {
+		lines = m.viewLines(bodyHeight)
+		for i, line := range lines {
+			lines[i] = lipgloss.NewStyle().MaxWidth(w).MaxHeight(1).Render(line)
+		}
 	} else {
 		for _, e := range m.transcript {
 			line := lipgloss.NewStyle().Width(w).Render(e.text)
@@ -344,7 +369,7 @@ func (m *Model) View() string {
 			lines = append(lines, strings.Split(line, "\n")...)
 		}
 	}
-	if m.shelf {
+	if m.shelf || m.presentation != nil {
 		if len(lines) > bodyHeight {
 			lines = lines[:bodyHeight]
 		}
@@ -363,7 +388,9 @@ func (m *Model) View() string {
 		promptPath = "C:…" + string(runes)
 	}
 	prompt := gold.Render(promptPath + "> ")
-	if m.busy {
+	if m.presentation != nil {
+		prompt += muted.Render("App view owns focus. Esc returns to prompt.")
+	} else if m.busy {
 		prompt += muted.Render("working…")
 	} else {
 		// Show a cursor-centered slice rather than allowing long pasted input to
@@ -379,7 +406,7 @@ func (m *Model) View() string {
 		}
 		prompt += string(before) + selectedStyle.Render(" ") + string(after)
 	}
-	footer := muted.Render("F2 APPS  ·  TAB COMPLETE  ·  ↑↓ HISTORY  ·  PgUp SCROLL  ·  Ctrl-C EXIT")
+	footer := muted.Render("F2 APPS  ·  F4 VIEW  ·  TAB COMPLETE  ·  ↑↓ HISTORY  ·  Ctrl-C EXIT")
 	clip := lipgloss.NewStyle().MaxWidth(w).MaxHeight(1)
 	content := strings.Join([]string{clip.Render(header), clip.Render(badge), "", body, "", clip.Render(prompt)}, "\n")
 	return frame.Width(w).MaxWidth(m.width).Render(content) + "\n" + lipgloss.NewStyle().MaxWidth(m.width).Render(footer)
@@ -392,7 +419,11 @@ func Run(ctx context.Context, c Caller, closed <-chan struct{}, options ...tea.P
 	defer cancel()
 	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithContext(ctx)}
 	opts = append(opts, options...)
-	_, err := tea.NewProgram(New(ctx, c, closed), opts...).Run()
+	model := New(ctx, c, closed)
+	_, err := tea.NewProgram(model, opts...).Run()
+	if cleanup := model.dismissView(); cleanup != nil {
+		cleanup()
+	}
 	return err
 }
 

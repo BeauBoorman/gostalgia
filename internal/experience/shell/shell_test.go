@@ -18,6 +18,7 @@ import (
 	"gostalgia/internal/ipc"
 	"gostalgia/internal/runtime"
 	"gostalgia/platform"
+	"gostalgia/sdk"
 )
 
 type noopCaller struct{}
@@ -108,12 +109,16 @@ func TestDOSPathsAndParsing(t *testing.T) {
 type observedModel struct {
 	*Model
 	results chan resultMsg
+	views   chan viewMsg
 }
 
 func (m *observedModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	_, cmd := m.Model.Update(msg)
 	if r, ok := msg.(resultMsg); ok {
 		m.results <- r
+	}
+	if v, ok := msg.(viewMsg); ok && m.views != nil {
+		m.views <- v
 	}
 	return m, cmd
 }
@@ -158,7 +163,7 @@ func TestBubbleTeaSocketAppLifecycle(t *testing.T) {
 	t.Cleanup(func() { client.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	m := &observedModel{Model: New(ctx, client, rt.Done()), results: make(chan resultMsg, 20)}
+	m := &observedModel{Model: New(ctx, client, rt.Done()), results: make(chan resultMsg, 20), views: make(chan viewMsg, 10)}
 	output := &lockedBuffer{}
 	p := tea.NewProgram(m, tea.WithContext(ctx), tea.WithInput(nil), tea.WithOutput(output), tea.WithoutSignalHandler())
 	done := make(chan error, 1)
@@ -212,6 +217,29 @@ func TestBubbleTeaSocketAppLifecycle(t *testing.T) {
 	if r := submit("echo renewed"); !strings.Contains(r.text, "echo #1") {
 		t.Fatal("instance state not reset")
 	}
+	awaitView := func() viewMsg {
+		t.Helper()
+		select {
+		case v := <-m.views:
+			if v.err != nil {
+				t.Fatal(v.err)
+			}
+			return v
+		case <-ctx.Done():
+			t.Fatal("presentation timed out")
+			return viewMsg{}
+		}
+	}
+	p.Send(tea.KeyMsg{Type: tea.KeyF4})
+	if v := awaitView(); v.data.Title != "Echo" || v.data.State != sdk.ViewReady {
+		t.Fatal("Echo view did not open through the shell")
+	}
+	p.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("from the app view")})
+	p.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	if v := awaitView(); !v.action || v.data.Status != "2 echoes this launch" || v.data.Items[0].Detail != "from the app view" {
+		t.Fatal("shell action did not reach the owning app over IPC")
+	}
+	p.Send(tea.KeyMsg{Type: tea.KeyEsc})
 	if r := submit("ps"); !strings.Contains(r.text, "com.gostalgia.echo") || !strings.Contains(r.text, "STATE / STATUS") {
 		t.Fatalf("ps output unexpected: %s", r.text)
 	}

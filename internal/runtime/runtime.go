@@ -152,7 +152,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		logFile.Close()
 		return nil, err
 	}
-	if err := apps.SeedManifests(rt.VFS); err != nil {
+	if err := app.SeedManifests(rt.VFS, apps.Manifests()); err != nil {
 		logFile.Close()
 		return nil, err
 	}

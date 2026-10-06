@@ -47,10 +47,10 @@ func seededEnv(t *testing.T) *vfs.VFS {
 // twice does not duplicate or error.
 func TestSeedManifestsWritesIdempotently(t *testing.T) {
 	env := seededEnv(t)
-	if err := SeedManifests(env); err != nil {
+	if err := app.SeedManifests(env, Manifests()); err != nil {
 		t.Fatalf("first SeedManifests: %v", err)
 	}
-	if err := SeedManifests(env); err != nil {
+	if err := app.SeedManifests(env, Manifests()); err != nil {
 		t.Fatalf("second SeedManifests (idempotency): %v", err)
 	}
 
@@ -111,7 +111,7 @@ func TestRegisterMakesFactoryAvailable(t *testing.T) {
 
 	// The seeded document is loadable and agrees with the builtin.
 	env := seededEnv(t)
-	if err := SeedManifests(env); err != nil {
+	if err := app.SeedManifests(env, Manifests()); err != nil {
 		t.Fatal(err)
 	}
 	fresh := app.NewRegistry()
