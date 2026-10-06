@@ -24,6 +24,7 @@ func bootTestContext(t *testing.T) *service.Context {
 		Version:  "test",
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Router:   ipc.NewRouter(),
+		Events:   events.NewBus(),
 		Token:    "test-token",
 		BootedAt: time.Now(),
 	}

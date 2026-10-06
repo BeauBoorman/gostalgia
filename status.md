@@ -5,8 +5,8 @@ honestly missing, and the itemized milestone list. This is the **canonical
 tracker** — `docs/architecture.md` §5 summarizes the milestone arc and points
 here.
 
-- **Current position:** Milestone 1 in progress (Charm baseline pinned: Bubble Tea v1.3.10, Lip Gloss v1.1.0, Bubbles v1.0.0; automated dependency fences enforced; active item: [#22](https://github.com/drawmeanelephant/gostalgia/issues/22) reusable visual language and component kit) · foundation unblocks Milestones 1–5.
-- **Last verified:** 2026-10-05 (`go build` / `go vet` / `gofmt` clean · `go test -race ./...` green · test/package counts are CI's to report · pure-Go + Windows/Linux cross-builds OK · compiled Charm CLI exercised in a real PTY; terminal restored and runtime cleaned up · **CI green on ubuntu, macOS, and Windows** · repo: `drawmeanelephant/gostalgia`, private)
+- **Current position:** Milestone 1 in progress (Charm baseline pinned: Bubble Tea v1.3.10, Lip Gloss v1.1.0, Bubbles v1.0.0; automated dependency fences enforced; active item: [#22](https://github.com/drawmeanelephant/gostalgia/issues/22) reusable visual language and component kit); Milestone 3 IPC subscriptions, bounded event history, and concurrent calls implemented for [#32](https://github.com/drawmeanelephant/gostalgia/issues/32). Foundation unblocks Milestones 1–5.
+- **Last verified:** 2026-10-05 (`gofmt -l .` clean; `go build ./...`, `go vet ./...`, `go test -race ./...`, and `CGO_ENABLED=0 go build ./...` pass locally on macOS; repeated IPC/event race stress and real-runtime subscription/history tests pass. Earlier Charm PTY and platform CI evidence is recorded below; this change does not claim new Windows/Linux behavioral or VirelaiOS verification.)
 
 Rules for touching this file:
 
@@ -27,12 +27,13 @@ Rules for touching this file:
 | Boot → services → session → app launch → IPC → clean shutdown | ✅ working | `test/e2e` (real socket, real auth, real shutdown) |
 | Service framework (dep-ordered start, rollback, reverse stop) | ✅ working | `internal/service` unit tests |
 | IPC: in-proc + socket transports, token handshake, NDJSON | ✅ working | `internal/ipc` tests + `gctl` manual/e2e |
+| IPC: concurrent calls, versioned subscriptions, bounded metadata-only audit history | working | `internal/ipc` race stress (slow clients, floods, malformed frames, reconnect/epochs, permissions); `test/e2e` real runtime lifecycle notifications and secret/document redaction |
 | Process model: in-proc lifecycle, child spawn/kill/exit-status | ✅ working | `internal/process` tests (self-exec child helper); `proc/list` returns `exit_code` over IPC |
 | VFS: safe doc ops, atomic save + recovery fallback, copy/move, trash/restore, host/memfs backends, mounts | ✅ working | unit tests + e2e + failure injection + fstest |
 | App SDK: embedded JSON manifest, Init/Run/Stop, scoped calls/routes, launch/stop | ✅ working | `sdk`, `internal/app`, services + shell socket lifecycle tests |
 | Charm shell: DOS-style prompt, app shelf, history/completion, VFS/process commands | ✅ working | `internal/experience/shell` (real Bubble Tea + authenticated IPC) |
 | Charm baseline & dependency fences: Bubble Tea v1.3.10, Lip Gloss v1.1.0, Bubbles v1.0.0 | ✅ working | `test/e2e` dependency fences (`TestCoreDependencyBoundary`, `TestCharmRestrictedToExperienceShell`, `TestApprovedCharmBaseline`, `TestNoStandaloneHostExecutables`) |
-| Event bus (typed, synchronous, wildcard) | ✅ working | `internal/events` tests |
+| Event bus (typed synchronous handlers + bounded nonblocking metadata subscriptions/history) | ✅ working | `internal/events` tests, including ordered concurrent delivery, drop-oldest queues and 256-record retention |
 | Config store (dotted paths, atomic persist) | ✅ working | `internal/config` tests |
 | Capability scoping: app Call/Handle adapters enforce manifest grants | ✅ working | SDK adapters replace caller grants; IPC methods reject unauthorized app calls; admin tokens remain trusted operator clients — see `docs/security.md` |
 | App identity & scoped grants: distinct per-app tokens, manifest capability grants, lifecycle revocation | ✅ working | `internal/security`, `internal/ipc`, `internal/app` unit + socket integration + `test/e2e` |
@@ -71,8 +72,11 @@ go run ./cmd/gctl --root /tmp/gs status      # terminal 2
   session ownership are scheduled for Milestone 5 ([#41](https://github.com/drawmeanelephant/gostalgia/issues/41)).
 - **Config has one layer** (system); layered preferences are scheduled for
   Milestone 2 ([#29](https://github.com/drawmeanelephant/gostalgia/issues/29)).
-- **IPC client is serialized** (one outstanding call per client); subscriptions
-  and multiplexing are scheduled for Milestone 3 ([#32](https://github.com/drawmeanelephant/gostalgia/issues/32)).
+- **IPC observability is operator-only and metadata-only:** one subscription
+  per connection; history retains 256 events in memory, not a durable security
+  audit. Queue drops and runtime epochs explicitly signal resynchronization.
+  Live shell/Task Manager presentation remains scheduled for [#33](https://github.com/drawmeanelephant/gostalgia/issues/33).
+  Scoped app credentials do not grant access to the operator trail.
 - **Windows filesystem metadata:** directory mtimes are advisory on Windows
   (OS-level API inconsistency; see `docs/filesystem.md`). Deep platform
   behavior beyond the CI suite is scheduled for host integration ([#44](https://github.com/drawmeanelephant/gostalgia/issues/44)).
@@ -111,7 +115,7 @@ SDK are merged and verified (`test/e2e`, `internal/experience/shell`,
 
 - [ ] **[#30 Processes: capture bounded child output and expose complete diagnostics](https://github.com/drawmeanelephant/gostalgia/issues/30)** — bounded stdout/stderr ring buffers, IPC diagnostics, gctl/shell presentation.
 - [ ] **[#31 Processes: add supervision, bounded history, and crash-loop protection](https://github.com/drawmeanelephant/gostalgia/issues/31)** — restart policies, crash-loop backoff, bounded exit history, reaping.
-- [ ] **[#32 IPC: add bounded event subscriptions, audit history, and responsive concurrent calls](https://github.com/drawmeanelephant/gostalgia/issues/32)** — non-blocking event subscriptions, multiplexing, audit trail.
+- [x] **[#32 IPC: add bounded event subscriptions, audit history, and responsive concurrent calls](https://github.com/drawmeanelephant/gostalgia/issues/32)** — versioned operator subscriptions, drop-oldest buffers, multiplexed calls, bounded metadata-only trail, retention/drop/epoch resynchronization; real-runtime and race stress coverage.
 - [ ] **[#33 Experience: add a live Task Manager, notification center, and crash receipts](https://github.com/drawmeanelephant/gostalgia/issues/33)** — live process screen, toasts, notifications, crash receipts.
 - [ ] **[#34 Sessions: support detachable shells and persistent workspace state](https://github.com/drawmeanelephant/gostalgia/issues/34)** — attach/detach, persistent workspace state, headless survival.
 
@@ -137,7 +141,9 @@ SDK are merged and verified (`test/e2e`, `internal/experience/shell`,
 
 | Date | Check | Result |
 |---|---|---|
+| 2026-10-05 | Merge latest main into IPC #32: preserve Charm baseline/dependency fences and #35 scoped principals/revocation with concurrent replies and events; add scoped event-access, pending-response revocation and event-disconnect cleanup regressions | Full build/vet/gofmt/race/pure-Go gate passes on macOS; three repeated IPC/security/e2e race runs pass |
 | 2026-10-06 | Security: distinct authenticated app identities and scoped grants (#35): Principal/TokenStore, operator vs app tokens, per-request validation, revocation on app exit/stop, CleanEnv secret scrubbing, socket e2e tests | Full gate green (vet, gofmt, -race, e2e); denied undeclared methods, stale token replay rejected, confused-deputy protection verified |
+| 2026-10-05 | IPC subscriptions/history/concurrent calls (#32): five repeated focused race runs; real-runtime event + private-document history checks; deterministic blocked socket writer, floods, malformed frames, authorization, cursor replay/epoch and cleanup regressions | `gofmt -l .` clean; `go build ./...`, `go vet ./...`, `go test -race ./...`, `CGO_ENABLED=0 go build ./...` pass on macOS; no new dependencies; platform adapters/CI unchanged |
 | 2026-10-05 | Charm shell + public capability-scoped SDK; one embedded-manifest Echo demo; spec read against implementation | Build/vet/gofmt/race green; pure-Go and Windows/Linux builds OK; real Bubble Tea socket integration + compiled CLI PTY smoke (echo, scoped identity, stop/relaunch, F2 shelf, exit/terminal restoration/runtime cleanup); no second demo built |
 | 2026-10-05 | FIFO regression (#16): `HostFS.Stat`/`ReadDir` no longer `os.Root.Open` special files — Lstat fallback for FIFOs, sockets, devices, symlinks; regression tests for `Stat`, `ReadDir`, and `ipc.Server.Close` with a `fs/list` handler in flight over a real socket | repro tests fail unfixed, pass fixed; full gate green (`vet`, `gofmt`, `-race`) |
 | 2026-10-05 | Docs drift (#17): `status.md` "Last verified" no longer hardcodes test counts (CI is the source of truth); `security.md`/`ipc.md` scope the `runtime.json` 0600 mode to unix — Windows inherits directory ACLs | docs match the code |
