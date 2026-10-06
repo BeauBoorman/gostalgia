@@ -1,151 +1,214 @@
-# Security
+# Security & Threat Model
 
-Milestone 1 builds the vocabulary of security (identities, capabilities,
-authentication) without claiming protections it does not have. This document
-states exactly what is and is not protected.
+Gostalgia is a desktop-like local application runtime. It executes built-in and
+third-party applications under capability-based authority, virtual filesystem
+isolation, process supervision, and platform OS sandboxing.
 
-## What exists
+This document defines the system's security architecture, trust boundaries,
+threat model, credential lifecycle, isolation levels, and host limitations.
 
-### Users, sessions, and principals
+## Threat Model and Trust Boundaries
 
-`internal/security` defines `User`, `PrincipalKind` (`operator` vs `app`),
-`Principal`, and `Credential`. `internal/session` opens and closes sessions.
-The runtime creates user `guest` and one session at boot. Process specs record
-the owning session and user. Every IPC connection resolves to a verified
-`Principal` attached to the request context.
+The runtime distinguishes three classes of actors:
 
-### Capabilities and authority separation
+```
++--------------------------------------------------------------------------+
+|                              Host Machine                                |
+|                                                                          |
+|  +---------------------------+       +--------------------------------+  |
+|  |     Operator Clients      |       |      External Applications     |  |
+|  |  (Charm Shell, gctl CLI)  |       |   (Sandboxed / Strict / Child) |  |
+|  +-------------+-------------+       +---------------+----------------+  |
+|                |                                     |                   |
+|       Operator Token (Admin)                 Scoped App Token            |
+|                |                                     |                   |
+|                v                                     v                   |
+|  +--------------------------------------------------------------------+  |
+|  |                      Gostalgia Runtime Core                        |  |
+|  |                                                                    |  |
+|  |  * IPC Router & Handshake Verifier    * Process Supervisor         |  |
+|  |  * TokenStore & Capability Scoper     * VFS Grant & Mount Manager  |  |
+|  +--------------------------------------------------------------------+  |
+|                                                                          |
+|  +--------------------------------------------------------------------+  |
+|  |                       Local Attacker Boundary                      |  |
+|  |  * Unauthenticated socket clients     * Rogue host processes       |  |
+|  |  * Replayed / revoked tokens          * Malformed protocol frames  |  |
+|  +--------------------------------------------------------------------+  |
++--------------------------------------------------------------------------+
+```
 
-Permission tokens (`security.Capabilities`) travel with IPC call contexts:
+### 1. Operator Trust (High Trust)
 
-- **Operator socket clients:** Socket clients that authenticate with the
-  operator token (such as `gctl` and the interactive Charm shell) receive the
-  `admin` capability set and operator principal identity. They act as trusted
-  operator clients with full system authority.
-- **Applications:** Applications declare their complete grants in JSON
-  manifests; the runtime attaches those grants to the process context and
-  process info. Unknown, duplicate, or operator-only `admin` declarations are
-  rejected.
-- **Distinct application credentials:** When an app launches, the runtime
-  generates a distinct, cryptographically random app token via
-  `internal/security.TokenStore`, bound to the application's ID, process ID,
-  session, and declared manifest capabilities. App tokens are never written to
-  `runtime.json`, leaked to process listings (`proc/list`), or inherited by
-  unrelated child processes (`process.CleanEnv`). External applications receive
-  their scoped token explicitly via `GOSTALGIA_APP_TOKEN` over a dedicated child
-  IPC socket, and the credential is immediately revoked upon process exit or
-  launch failure.
-- **SDK capability scoping:** The public SDK exposes scoped `Call` and
-  Init-only `Handle` adapters, not raw runtime managers. `Context.Call`
-  replaces incoming capabilities with the app's manifest grant, and app
-  handlers require `ipc` from callers while executing under the app's own
-  grant. An operator invoking an app cannot lend it admin privileges (the
-  confused-deputy boundary).
-- **Enforcement:** `ipc.RequireCap` guards filesystem read/write (`fs.read`/`fs.write`),
-  shared host folder access (`hostfs.read`/`hostfs.write`), process list/stop (`proc.list`/`proc.stop`),
-  app list/launch/stop (`app.list`/`app.launch`/`app.stop`), clipboard operations (`clipboard.read`/`clipboard.write`),
-  network egress (`net.egress`), and shutdown (`shutdown`). SDK calls and app route
-  declaration/invocation require `ipc`. Because app `Call` and `Handle`
-  adapters replace caller capabilities with manifest grants, **`RequireCap`
-  does fail in production** if an app attempts an undeclared operation (for
-  example, an app without `fs.write` or `shutdown` attempting those methods).
-  Direct operator calls continue to pass because operators possess the `admin`
-  set. See [applications.md](applications.md) for method schemas and the exact
-  capability table.
+- **Definition:** The human user or administrator running Gostalgia, interacting
+  via the interactive Charm terminal shell or the `gctl` CLI tool.
+- **Authority:** Full system authority (`admin` capability set).
+- **Capabilities:** Operators can launch and terminate processes, manage
+  filesystem capability grants (`fs/grant`, `fs/grant/revoke`), mount shared host
+  folders (`hostfs/mount`), configure system services and operator policies (`sys/policy`),
+  inspect process listings and logs, and issue system shutdown.
+- **Authentication:** At boot, the runtime creates a random 256-bit operator
+  token written to `<root>/runtime.json`. Operator tools read this token to
+  authenticate their IPC connection. Socket clients authenticating with the
+  operator token receive the `admin` capability set and operator principal identity.
 
-### App-private storage and scoped VFS grants
+### 2. Application Trust (Untrusted to Semi-Trusted)
 
-Rather than allowing arbitrary open-ended access to the entire filesystem root,
-access is partitioned and scoped:
+- **Definition:** Built-in or external third-party applications running within
+  Gostalgia.
+- **Authority:** Least privilege. Applications have **no ambient authority**.
+  They cannot access the host filesystem, execute arbitrary processes, or
+  invoke privileged system methods (`sys/shutdown`, `proc/stop`, `fs/grant`).
+- **Capability Scoping:**
+  - Manifest grants: Applications declare requested capabilities (`ipc`,
+    `fs.read`, `fs.write`, `proc.list`, `proc.stop`, `app.list`, `app.launch`,
+    `shutdown`) in their JSON manifest. The runtime verifies that only
+    permitted non-admin capabilities are requested.
+  - Confused-deputy boundary: When an operator or another application invokes an
+    application's exported handlers, the runtime executes that handler strictly
+    under the application's declared grants. An operator calling an app does not
+    lend it administrative capabilities.
+  - App-private storage: Every app receives an automatic, isolated partition at
+    `/apps/data/<app_id>`. Applications can only read, write, and list within
+    their own partition. Other partitions are completely hidden and inaccessible.
+  - Scoped VFS grants: Access outside an app's private partition requires an
+    explicit, path-scoped grant issued by an operator (`fs/grant`). Grants are
+    checked per-operation and fail closed on revocation.
 
-- **Automatic app-private storage:** Each application is automatically allotted
-  an isolated private storage partition under `/apps/data/<app_id>`. Applications
-  have inherent read/write access to their own partition without requiring
-  global filesystem permissions. An application cannot enumerate, read, write,
-  stat, remove, rename, copy, or trash files belonging to another application's
-  private storage through any exposed `fs/*` method. Directory listings of
-  `/apps/data` present a principal-aware view displaying only the calling
-  application's partition.
-- **Scoped VFS grants:** Open-ended `fs.read`/`fs.write` access across the
-  shared filesystem is replaced by path-scoped capability grants managed by
-  `internal/vfs.GrantStore`. An operator issues grants via `fs/grant` specifying
-  the target application ID, environment path, access mode (`read` or `read-write`),
-  and whether descendants are included recursively.
-- **Confinement & escape prevention:** Grant expansion is strictly prevented.
-  Dot segments (`..`), host symlinks pointing outside the granted scope or into
-  another app's private partition, cross-mount renames, and copy/move trickery
-  fail closed with structured errors (`path_escape` or `permission_denied`).
-- **Immediate revocation & restart semantics:** Revoking a grant via
-  `fs/grant/revoke` invalidates the grant immediately; subsequent file operations
-  by the application fail with `permission_denied: grant revoked`. Grants are
-  scoped to `app_id`. Active grants persist across application process restarts
-  until explicitly revoked by an operator; revoked grants remain revoked across
-  restarts.
-- **Trash isolation:** The environment trash preserves isolation: applications
-  only view, restore, and empty trash entries originating from paths they are
-  authorized to access.
+### 3. Local-Attacker Threat Model (Adversarial)
 
-### Transport authentication and lifecycle revocation
+The runtime defends against local threats operating on the host machine:
 
-The local socket requires a token handshake before any other method. The IPC
-server verifies tokens using `internal/security.TokenStore`:
+- **Unauthenticated socket connections:** An attacker connecting to the local
+  IPC socket cannot invoke any RPC method without authenticating first. The
+  first message must be an `auth` handshake request with a valid token.
+  Non-auth requests, missing tokens, or invalid tokens are immediately rejected
+  and the connection is dropped.
+- **Connection and handshake budgets:** Connections are subjected to strict
+  budgets. Handshake must complete within the handshake deadline (5 seconds).
+  Exceeding the maximum connection budget (256 concurrent connections) or
+  flooding the server with in-flight requests (> 32 per connection) terminates
+  the offending connection immediately.
+- **Malformed frames and oversized payloads:** The NDJSON framing scanner
+  enforces a 4 MiB frame size limit (`maxLine`). Malformed JSON, non-object
+  payloads, unterminated lines, duplicate request IDs, and negative IDs fail
+  cleanly without crashing the server or exhausting memory.
+- **Stale credential replay:** When an application process exits or is stopped,
+  its scoped token is immediately revoked in `TokenStore`. In-flight requests
+  fail, active connections are terminated, and subsequent handshake attempts
+  using the stale token are rejected.
+- **Cross-process credential leakage:** Environment variables of external
+  processes are scrubbed (`process.CleanEnv`), stripping host environment
+  variables and parent tokens. Only the app's dedicated `GOSTALGIA_APP_TOKEN`
+  is passed to the child process.
+- **Uncooperative or hostile application processes:** Applications that ignore
+  cancellation, block shutdown, or attempt CPU/memory exhaustion are bounded by
+  supervisory timeouts and OS resource limits. If an application fails to exit
+  within its stop deadline, the process supervisor sends `SIGKILL` to the entire
+  process group (`platform.KillProcessTree`), preventing zombie or orphan escape.
 
-- **Operator authentication:** The operator token is generated per boot and
-  stored in `runtime.json` (mode 0600 on unix; on Windows the mode does not map
-  to an ACL — the file inherits the environment directory's permissions).
-- **App authentication:** App clients authenticate with their assigned app
-  token, establishing an app principal with strictly scoped capabilities.
-- **Per-request validation:** The server continuously validates token validity
-  on every request (`auth.Validate(token)`).
-- **Lifecycle revocation:** When an app stops or exits, its credential is
-  immediately revoked in `TokenStore`. In-flight and subsequent calls on active
-  connections fail with `unauthorized: credential revoked` and the connection
-  is terminated; reconnection attempts fail handshake with `unauthorized: token
-  revoked`. Stale credentials cannot be replayed.
-- **Child environment scrubbing:** `process.CleanEnv` prevents child processes
-  from inheriting host environment secrets or tokens.
+---
 
-### Platform-specific app execution and sandbox policies
+## Credential Handling & Lifecycle
 
-External applications declare an `isolation` level in their manifest (`sdk.Manifest`):
+### Token Generation
+All tokens (operator tokens and application tokens) are generated using
+cryptographically secure pseudo-random bytes (`crypto/rand`) encoded as 64-character
+hex strings (256 bits of entropy).
 
-- `inproc`: Compiled into the runtime and executed in-process. Manifest validation
-  forbids `inproc` applications from requesting `sandbox` or `strict` isolation.
-- `trusted`: Spawned out-of-process as a supervised host child process with
-  environment sanitization (`process.CleanEnv`) and process group management, but
-  without host sandbox restrictions.
-- `sandbox`: Spawned out-of-process under platform OS sandbox confinement:
-  - **Linux:** Uses kernel namespaces (`CLONE_NEWUSER | CLONE_NEWNET`) to block
-    host network egress without requiring root or setuid helpers, and enforces
-    resource ceilings (`RLIMIT_AS`, `RLIMIT_NOFILE`, `RLIMIT_CPU`) via `prlimit64`.
-  - **macOS:** Generates dynamic Apple Seatbelt profiles executed via
-    `/usr/bin/sandbox-exec` to deny network egress and restrict filesystem access.
-- `strict`: Enforces maximal containment:
-  - Network egress denied at the kernel level.
-  - Descendant process execution denied (on macOS via Seatbelt `(deny process-fork)`,
-    on Linux via real-time process supervision and immediate termination).
-  - Virtual memory space capped (2 GB virtual address space for 64-bit runtime).
-  - Maximum open file descriptors capped (512).
-  - Read-only host filesystem enforcement.
+### Operator Credential
+- Generated once per runtime boot.
+- Persisted in `<root>/runtime.json` with file mode `0600` on Unix systems.
+- Never exposed in process listings (`proc/list`, `proc/info`) or debug logs.
+- Grants full `admin` capabilities and operator principal identity.
 
-#### Fail-closed execution guarantee
+### Application Credentials
+- Generated dynamically per application launch by `internal/security.TokenStore`.
+- Strictly bound to the tuple `(app_id, proc_id, session_id, user, capabilities)`.
+- Delivered to external child processes via the `GOSTALGIA_APP_TOKEN` environment
+  variable over a dedicated IPC socket.
+- Never written to disk or `runtime.json`.
+- Scrubbed from public process inspection endpoints.
+- **Revocation:** Bound to the process lifecycle. As soon as the application
+  stops, crashes, or is terminated by the supervisor, `TokenStore.RevokeProcess`
+  invalidates the token. Any existing socket connections using that token are
+  immediately disconnected, and subsequent calls fail with `unauthorized:
+  credential revoked`.
 
-If an application requests `sandbox` or `strict` isolation on an unsupported host
-(such as Windows, generic Unix, or Linux without unprivileged user namespaces enabled),
-or if sandbox configuration fails, the runtime **fails closed** with
-`ErrSandboxUnsupported`. The runtime **never silently degrades** to trusted or
-in-process execution.
+---
 
-#### Host security capabilities & diagnostics
+## Isolation Levels
 
-`platform.GetHostSecurityCapabilities()` probes live host enforcement mechanisms:
-- `sys/status` exposes the `security` capabilities block, live process isolation levels, and active operator policy.
+Gostalgia supports four explicit isolation levels declared in application manifests:
+
+| Level | Boundary | Network Egress | Descendant Fork | Host FS Writes | Resource Limits |
+|---|---|---|---|---|---|
+| `inproc` | Logical only (SDK capability filters) | Allowed (host) | N/A (same process) | Allowed (host) | None |
+| `trusted` | Process boundary (sanitized env, process group) | Allowed (host) | Allowed (supervised) | Permitted (user perms) | None |
+| `sandbox` | OS container / sandbox confinement | **Denied** (kernel/profile) | Allowed (supervised) | Restricted | Memory & FD caps |
+| `strict` | Maximal containment | **Denied** (kernel/profile) | **Denied** (blocked/killed) | **Denied** (read-only) | Strict memory, FDs, CPU |
+
+### Detailed Confinement Mechanics
+
+#### 1. `inproc` (In-Process)
+- Application code is compiled directly into the runtime and executed in a
+  goroutine.
+- SDK adapters (`sdk.Context`) enforce capability checks logically.
+- **Limitation:** Shares the runtime's memory space and process address space.
+  A rogue in-process component could theoretically use unsafe memory access or
+  runtime manipulation. Untrusted applications must never run `inproc`.
+
+#### 2. `trusted` (Supervised Child Process)
+- Spawns out-of-process as a separate OS process via `os/exec`.
+- Environment is sanitized via `process.CleanEnv`, stripping parent environment
+  variables and secrets.
+- Allocated a new process group (`Setpgid: true` on Unix; `CREATE_NEW_PROCESS_GROUP`
+  on Windows) for clean teardown via `platform.KillProcessTree`.
+- Operates under standard OS user privileges without sandbox restrictions.
+
+#### 3. `sandbox` (OS Sandboxing)
+- **Linux:**
+  - Unprivileged user and network namespaces (`CLONE_NEWUSER | CLONE_NEWNET`)
+    block all host network egress at the kernel level without requiring root or
+    setuid helpers.
+  - Resource ceilings are enforced via `prlimit64`:
+    - Virtual memory address space (`RLIMIT_AS`) capped at 2 GB.
+    - Maximum open file descriptors (`RLIMIT_NOFILE`) capped at 1024.
+- **macOS:**
+  - Generates a custom Apple Seatbelt profile executed via `/usr/bin/sandbox-exec`.
+  - Disallows network operations (`(deny network*)`).
+  - Restricts host filesystem access to designated runtime roots and system
+    libraries (`/usr/lib`, `/System`, `/Library`).
+
+#### 4. `strict` (Maximal OS Confinement)
+- Enforces all protections of `sandbox`, plus:
+  - **Descendant Process Prevention:**
+    - macOS: Enforces `(deny process-fork)` in Seatbelt profile. Any call to `fork()`
+      or `execve()` immediately fails with `EPERM`.
+    - Linux: Process supervisor monitors child processes and immediately kills
+      any unauthorized descendants.
+  - **Read-Only Filesystem:**
+    - macOS: Disallows filesystem write operations (`(deny file-write*)`).
+    - Linux: Mounts root filesystem as read-only.
+  - **Tighter Resource Limits:**
+    - Maximum file descriptors capped at 512 (`RLIMIT_NOFILE`).
+    - Virtual memory capped at 2 GB (`RLIMIT_AS`).
+    - CPU execution budget enforced via `RLIMIT_CPU`.
+
+### Fail-Closed Execution Guarantee
+
+If an application declares `sandbox` or `strict` isolation and the host system
+cannot satisfy the required enforcement mechanisms:
+- The runtime **fails closed** immediately, returning `ErrSandboxUnsupported`.
+- The runtime **never silently degrades** to `trusted` or `inproc` execution.
+- Host capability status is transparently reported by `platform.GetHostSecurityCapabilities()`
+  and queryable via `sys/status`.
 - `proc/info` and `proc/list` report the effective `isolation` level and active
   `policy` parameters for every process.
 - Process termination (`platform.KillProcessTree`) kills the entire process group
   (`SIGKILL` to `-pid`), ensuring no orphan descendant processes can escape.
 
-### Opt-in platform integration and operator policies
+### Opt-in Platform Integration and Operator Policies
 
 Host integration adapters (clipboard, shared folders, network egress) default to
 strictly disabled/internal-only and require two distinct levels of authorization:
@@ -172,38 +235,66 @@ strictly disabled/internal-only and require two distinct levels of authorization
      sandboxed apps, host network access at the kernel/sandbox level is denied unless both the app
      manifest grants `net.egress` and the operator policy permits network egress.
 
-## Isolation levels — honest labels
+---
 
-| Level | Status |
-|---|---|
-| Logical isolation (namespaces, capabilities, scoped storage) | **current** (SDK adapters enforce manifest grants; app-private storage and scoped VFS grants enforced in `internal/vfs` and `internal/services`) |
-| Process isolation (child processes for apps) | **current** (supervised out-of-process child execution over dedicated IPC sockets with token binding and revocation; [#36](https://github.com/drawmeanelephant/gostalgia/issues/36)) |
-| OS sandboxing (namespaces, Seatbelt, prlimit64, fail-closed) | **current** (enforced on Linux and macOS; fail-closed on Windows and unsupported hosts; [#38](https://github.com/drawmeanelephant/gostalgia/issues/38)) |
-| Host / kernel isolation | out of scope for the host runtime; separate VirelaiOS bring-up is tracked independently by the owner and not claimed here |
+## Host Limitations & Unprotected Vectors
 
-## What is NOT protected
+Honesty about security boundaries is essential. The following scenarios are
+explicitly outside Gostalgia's protection guarantees:
 
-- **Operator token exposure:** A local attacker who can read `<root>/runtime.json` can
-  fully control the environment. The operator token is local authentication
-  convenience (prevents accidental cross-user access), not a security boundary.
-- **In-process memory sharing:** `inproc` applications share the runtime's
-  address space. While SDK adapters enforce capability checks logically, a
-  malicious or buggy in-proc app could bypass checks in memory. Do not run
-  untrusted applications in-process. Untrusted applications should use `sandbox`
-  or `strict` mode.
-- **Windows host sandboxing:** Windows does not support native unprivileged
-  sandboxing without hypervisor containers. As a result, requesting `sandbox` or
-  `strict` isolation on Windows fails closed. External apps on Windows may only
-  run under `trusted` isolation.
+1. **Same-UID Local Attacker:**
+   On multi-user systems, an attacker who obtains code execution under the
+   **same OS user account** that launched Gostalgia can inspect runtime files
+   in `<root>/runtime.json`, attach debuggers (`ptrace`), or read process memory.
+   The operator token is an authentication mechanism for local clients, not a
+   boundary against the owning OS account.
 
-## Roadmap
+2. **In-Process Applications:**
+   `inproc` mode provides no memory isolation. Applications requiring isolation
+   must be packaged as external executables and run under `sandbox` or `strict`
+   modes.
 
-Application isolation and trust is organized under Milestone 4:
-- Distinct authenticated app identities and scoped credentials ([#35](https://github.com/drawmeanelephant/gostalgia/issues/35) — implemented).
-- External Go application lifecycle over the environment protocol ([#36](https://github.com/drawmeanelephant/gostalgia/issues/36) — implemented).
-- App-private storage and scoped VFS grants ([#37](https://github.com/drawmeanelephant/gostalgia/issues/37) — implemented).
-- Platform-specific app execution and resource policies on macOS/Linux ([#38](https://github.com/drawmeanelephant/gostalgia/issues/38) — implemented).
-- Adversarial isolation tests, IPC fuzzing, and threat model ([#39](https://github.com/drawmeanelephant/gostalgia/issues/39)).
+3. **Windows Host Confinement:**
+   Windows lacks unprivileged native sandboxing equivalents to Linux user
+   namespaces or macOS Seatbelt without hypervisor-backed container runtimes.
+   Consequently, requesting `sandbox` or `strict` on Windows **fails closed**
+   by design. External applications on Windows run under `trusted` isolation.
 
-Capabilities will only be claimed secure when backed by an enforcement
-mechanism outside the protected code.
+4. **macOS Seatbelt Deprecation:**
+   `/usr/bin/sandbox-exec` and Apple Seatbelt (Sandbox.kext) are deprecated by
+   Apple and unsupported in modern App Store apps, although they remain
+   functional on standard macOS installations. Future macOS versions may alter
+   or restrict Seatbelt profile behavior.
+
+5. **Cgroups vs. Process Rlimits:**
+   On Linux, resource limits are enforced per-process via `prlimit64` rather than
+   systemd cgroups v2 slices (to avoid requiring root or cgroupfs delegation).
+   Consequently, memory limits constrain virtual address space (`RLIMIT_AS`)
+   rather than resident set size (RSS).
+
+---
+
+## Security Verification & Test Coverage
+
+The security guarantees described here are verified by an extensive test suite:
+
+- **IPC Fuzzing & Framing Tests (`internal/ipc`):** Fuzzing and adversarial
+  testing covering malformed NDJSON frames, oversized payloads (> 4 MiB),
+  handshake budgets, flooding clients, duplicate request IDs, and slow writers.
+- **Protocol & Path Parsing Tests (`internal/ipc`, `internal/vfs`, `sdk`):**
+  Adversarial testing of dot-segment escapes (`..`), NUL-byte injection,
+  backslash path traversal, reverse-DNS manifest ID validation, and unknown
+  manifest fields.
+- **Adversarial Test App Fixtures (`test/testapps/adversarial`):** Dedicated
+  adversarial test binary exercising:
+  - Unauthorized host filesystem access (probing `/etc/passwd`, `runtime.json`,
+    and unauthorized host paths).
+  - Cross-process credential leakage (verifying environment scrubbing).
+  - Permission borrowing and privilege escalation attempts.
+  - CPU and memory resource exhaustion attempts.
+  - Uncooperative shutdown (ignoring termination signals and stop contexts).
+- **Sandbox Guarantee Tests (`test/e2e/sandbox_test.go`, `test/e2e/adversarial_test.go`):**
+  Automated tests verifying that disallowed operations fail under `sandbox` and
+  `strict` policies, while behaving as expected under unrestricted (`trusted`)
+  launches.
+

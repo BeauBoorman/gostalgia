@@ -21,9 +21,34 @@ import (
 const maxLine = 4 << 20 // 4 MiB
 
 const (
-	maxInFlight  = 32
-	writeTimeout = 5 * time.Second
+	maxInFlight      = 32
+	writeTimeout     = 5 * time.Second
+	handshakeTimeout = 5 * time.Second
+	maxConnections   = 256
 )
+
+// ServerOption configures Server parameters.
+type ServerOption func(*Server)
+
+// WithHandshakeTimeout configures the budget for handshake completion.
+func WithHandshakeTimeout(d time.Duration) ServerOption {
+	return func(s *Server) { s.handshakeTimeout = d }
+}
+
+// WithWriteTimeout configures the deadline for socket writes.
+func WithWriteTimeout(d time.Duration) ServerOption {
+	return func(s *Server) { s.writeTimeout = d }
+}
+
+// WithMaxConnections sets the maximum number of concurrent open connections.
+func WithMaxConnections(n int) ServerOption {
+	return func(s *Server) { s.maxConns = n }
+}
+
+// WithMaxInFlight sets the maximum number of concurrent in-flight requests per connection.
+func WithMaxInFlight(n int) ServerOption {
+	return func(s *Server) { s.maxInFlight = n }
+}
 
 // Authenticator authenticates and validates connection credentials.
 type Authenticator interface {
@@ -65,6 +90,11 @@ type Server struct {
 	auth   Authenticator
 	log    *slog.Logger
 
+	handshakeTimeout time.Duration
+	writeTimeout     time.Duration
+	maxConns         int
+	maxInFlight      int
+
 	mu        sync.Mutex
 	conns     map[net.Conn]struct{}
 	wg        sync.WaitGroup
@@ -73,7 +103,7 @@ type Server struct {
 	closeErr  error
 }
 
-func NewServer(ln net.Listener, router *Router, auth any, log *slog.Logger) *Server {
+func NewServer(ln net.Listener, router *Router, auth any, log *slog.Logger, opts ...ServerOption) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -86,14 +116,22 @@ func NewServer(ln net.Listener, router *Router, auth any, log *slog.Logger) *Ser
 	default:
 		panic(fmt.Sprintf("ipc: unsupported auth type %T", auth))
 	}
-	return &Server{
-		ln:     ln,
-		router: router,
-		auth:   a,
-		log:    log,
-		conns:  map[net.Conn]struct{}{},
-		done:   make(chan struct{}),
+	s := &Server{
+		ln:               ln,
+		router:           router,
+		auth:             a,
+		log:              log,
+		handshakeTimeout: handshakeTimeout,
+		writeTimeout:     writeTimeout,
+		maxConns:         maxConnections,
+		maxInFlight:      maxInFlight,
+		conns:            map[net.Conn]struct{}{},
+		done:             make(chan struct{}),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Serve accepts connections until Close is called. It returns nil after
@@ -121,6 +159,13 @@ func (s *Server) Serve() error {
 			conn.Close()
 			return nil
 		default:
+		}
+		if s.maxConns > 0 && len(s.conns) >= s.maxConns {
+			active := len(s.conns)
+			s.mu.Unlock()
+			s.log.Warn("ipc: connection budget exceeded, rejecting connection", "remote", conn.RemoteAddr(), "active", active, "max", s.maxConns)
+			conn.Close()
+			continue
 		}
 		s.conns[conn] = struct{}{}
 		s.wg.Add(1)
@@ -164,7 +209,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	r.Split(scanNDJSON)
 	r.Buffer(make([]byte, 64*1024), maxLine)
 	w := bufio.NewWriter(conn)
-	_ = conn.SetDeadline(time.Now().Add(writeTimeout))
+	_ = conn.SetDeadline(time.Now().Add(s.handshakeTimeout))
 
 	// Handshake: the first request must be auth.
 	req, err := readRequest(r)
@@ -198,7 +243,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	stream := &eventStream{}
 	defer stream.close()
 	authCtx = context.WithValue(authCtx, streamKey{}, stream)
-	responses := make(chan queuedResponse, maxInFlight)
+	responses := make(chan queuedResponse, s.maxInFlight)
 	var flightMu sync.Mutex
 	active := make(map[int64]string)
 	writerDone := make(chan struct{})
@@ -245,7 +290,7 @@ func (s *Server) handleConn(conn net.Conn) {
 				}
 				resp = Response{ID: resp.ID, Error: "unauthorized: credential revoked"}
 			}
-			_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			_ = conn.SetWriteDeadline(time.Now().Add(s.writeTimeout))
 			if isResponse {
 				flightMu.Lock()
 				method := active[resp.ID]
@@ -286,7 +331,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			return
 		}
 		flightMu.Lock()
-		if active[req.ID] != "" || len(active) >= maxInFlight {
+		if active[req.ID] != "" || len(active) >= s.maxInFlight {
 			flightMu.Unlock()
 			// Duplicate IDs and floods are protocol violations. Closing
 			// bounds goroutines, response memory and work per connection.
