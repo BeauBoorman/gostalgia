@@ -104,16 +104,17 @@ func (s SupervisionConfig) withDefaults() SupervisionConfig {
 
 // Spec describes a process to start.
 type Spec struct {
-	Name      string            `json:"name"`                // logical name (app id, child label)
-	Kind      Kind              `json:"kind"`                // inproc or child
-	SessionID string            `json:"session,omitempty"`   // owning session
-	User      string            `json:"user,omitempty"`      // owning user
-	Caps      []string          `json:"caps,omitempty"`      // granted capabilities
-	Args      []string          `json:"args,omitempty"`      // child only: program and arguments
-	Dir       string            `json:"dir,omitempty"`       // child only: working directory
-	Env       []string          `json:"env,omitempty"`       // child only; nil defaults to deliberate child environment
-	LogLimit  int               `json:"log_limit,omitempty"` // child only: ring buffer capacity per stream in bytes (default 64KB)
-	Restart   SupervisionConfig `json:"restart,omitempty"`   // supervision and restart policy
+	Name      string                   `json:"name"`                // logical name (app id, child label)
+	Kind      Kind                     `json:"kind"`                // inproc or child
+	SessionID string                   `json:"session,omitempty"`   // owning session
+	User      string                   `json:"user,omitempty"`      // owning user
+	Caps      []string                 `json:"caps,omitempty"`      // granted capabilities
+	Args      []string                 `json:"args,omitempty"`      // child only: program and arguments
+	Dir       string                   `json:"dir,omitempty"`       // child only: working directory
+	Env       []string                 `json:"env,omitempty"`       // child only; nil defaults to deliberate child environment
+	LogLimit  int                      `json:"log_limit,omitempty"` // child only: ring buffer capacity per stream in bytes (default 64KB)
+	Restart   SupervisionConfig        `json:"restart,omitempty"`   // supervision and restart policy
+	Policy    platform.ExecutionPolicy `json:"policy,omitempty"`    // host execution and sandbox policy
 }
 
 // StreamDiagnostics holds bounded buffer content and drop accounting for an output stream.
@@ -142,20 +143,22 @@ type Logs struct {
 
 // Info is a snapshot of a process's state.
 type Info struct {
-	ID           int32                  `json:"id"`
-	Name         string                 `json:"name"`
-	Kind         Kind                   `json:"kind"`
-	State        State                  `json:"state"`
-	SessionID    string                 `json:"session,omitempty"`
-	User         string                 `json:"user,omitempty"`
-	Caps         []string               `json:"caps,omitempty"` // granted capabilities, from the spec
-	StartedAt    time.Time              `json:"started_at,omitempty"`
-	ExitedAt     time.Time              `json:"exited_at,omitempty"`
-	Err          string                 `json:"error,omitempty"`
-	ExitCode     int                    `json:"exit_code,omitempty"`
-	RestartCount int                    `json:"restart_count,omitempty"`
-	CrashLoop    bool                   `json:"crash_loop,omitempty"`
-	Resources    platform.ResourceUsage `json:"resources"`
+	ID           int32                     `json:"id"`
+	Name         string                    `json:"name"`
+	Kind         Kind                      `json:"kind"`
+	State        State                     `json:"state"`
+	SessionID    string                    `json:"session,omitempty"`
+	User         string                    `json:"user,omitempty"`
+	Caps         []string                  `json:"caps,omitempty"` // granted capabilities, from the spec
+	StartedAt    time.Time                 `json:"started_at,omitempty"`
+	ExitedAt     time.Time                 `json:"exited_at,omitempty"`
+	Err          string                    `json:"error,omitempty"`
+	ExitCode     int                       `json:"exit_code,omitempty"`
+	RestartCount int                       `json:"restart_count,omitempty"`
+	CrashLoop    bool                      `json:"crash_loop,omitempty"`
+	Resources    platform.ResourceUsage    `json:"resources"`
+	Isolation    string                    `json:"isolation,omitempty"`
+	Policy       *platform.ExecutionPolicy `json:"policy,omitempty"`
 }
 
 // HistoryEntry is a bounded record of an exited or reaped process instance.
@@ -174,6 +177,7 @@ type HistoryEntry struct {
 	RestartCount int                    `json:"restart_count,omitempty"`
 	CrashLoop    bool                   `json:"crash_loop,omitempty"`
 	Resources    platform.ResourceUsage `json:"resources"`
+	Isolation    string                 `json:"isolation,omitempty"`
 }
 
 // Event is published on every state transition.
@@ -316,6 +320,10 @@ func (m *Manager) StartInProc(ctx context.Context, spec Spec, run func(p *Proces
 		runCtx:       runCtx,
 		runCancel:    runCancel,
 	}
+	inprocIsolation := spec.Policy.Isolation
+	if inprocIsolation == "" {
+		inprocIsolation = platform.IsolationInProc
+	}
 	p.info = Info{
 		ID:        id,
 		Name:      spec.Name,
@@ -326,6 +334,8 @@ func (m *Manager) StartInProc(ctx context.Context, spec Spec, run func(p *Proces
 		StartedAt: time.Now(),
 		Caps:      append([]string(nil), spec.Caps...),
 		Resources: platform.ResourceUsage{Supported: false},
+		Isolation: inprocIsolation,
+		Policy:    &spec.Policy,
 	}
 	m.add(p)
 	m.publish(p) // starting
@@ -641,6 +651,10 @@ func (m *Manager) StartChild(ctx context.Context, spec Spec) (*Process, error) {
 		stderr:       stderrBuf,
 		combined:     combinedBuf,
 	}
+	childIsolation := spec.Policy.Isolation
+	if childIsolation == "" {
+		childIsolation = platform.IsolationTrusted
+	}
 	p.info = Info{
 		ID:        id,
 		Name:      spec.Name,
@@ -651,14 +665,30 @@ func (m *Manager) StartChild(ctx context.Context, spec Spec) (*Process, error) {
 		StartedAt: time.Now(),
 		Caps:      append([]string(nil), spec.Caps...),
 		Resources: platform.ResourceUsage{Supported: false},
+		Isolation: childIsolation,
+		Policy:    &spec.Policy,
 	}
 
 	runCtx, runCancel := context.WithCancel(p.masterCtx)
 	cmd := m.buildChildCmd(runCtx, spec, id, stdoutBuf, stderrBuf, combinedBuf)
+	postHook, err := platform.ConfigureSandbox(cmd, spec.Policy)
+	if err != nil {
+		runCancel()
+		masterCancel()
+		return nil, fmt.Errorf("process: configure sandbox for %s: %w", spec.Name, err)
+	}
 	if err := cmd.Start(); err != nil {
 		runCancel()
 		masterCancel()
 		return nil, fmt.Errorf("process: start %s: %w", spec.Args[0], err)
+	}
+	if postHook != nil {
+		if err := postHook(cmd.Process.Pid); err != nil {
+			_ = platform.KillProcessTree(cmd)
+			runCancel()
+			masterCancel()
+			return nil, fmt.Errorf("process: apply post-start sandbox policy for %s: %w", spec.Name, err)
+		}
 	}
 
 	p.runCtx = runCtx
@@ -695,6 +725,18 @@ func (m *Manager) superviseChild(p *Process) {
 			}
 			runCtx, runCancel := context.WithCancel(p.masterCtx)
 			cmd := m.buildChildCmd(runCtx, p.spec, p.info.ID, p.stdout, p.stderr, p.combined)
+			postHook, sandboxErr := platform.ConfigureSandbox(cmd, p.spec.Policy)
+			if sandboxErr != nil {
+				runCancel()
+				p.cmd = nil
+				p.pid = 0
+				p.info.State = StateFailed
+				p.info.Err = fmt.Sprintf("restart sandbox configuration failed: %v", sandboxErr)
+				p.mu.Unlock()
+				m.publish(p)
+				m.log.Error("child process restart sandbox failed", "pid", p.info.ID, "err", sandboxErr)
+				return
+			}
 			if err := cmd.Start(); err != nil {
 				runCancel()
 				p.cmd = nil
@@ -705,6 +747,20 @@ func (m *Manager) superviseChild(p *Process) {
 				m.publish(p)
 				m.log.Error("child process restart failed", "pid", p.info.ID, "err", err)
 				return
+			}
+			if postHook != nil {
+				if err := postHook(cmd.Process.Pid); err != nil {
+					_ = platform.KillProcessTree(cmd)
+					runCancel()
+					p.cmd = nil
+					p.pid = 0
+					p.info.State = StateFailed
+					p.info.Err = fmt.Sprintf("restart post-start sandbox policy failed: %v", err)
+					p.mu.Unlock()
+					m.publish(p)
+					m.log.Error("child process restart post-start sandbox policy failed", "pid", p.info.ID, "err", err)
+					return
+				}
 			}
 			p.runCtx = runCtx
 			p.runCancel = runCancel
@@ -724,7 +780,26 @@ func (m *Manager) superviseChild(p *Process) {
 		runCancel := p.runCancel
 		p.mu.Unlock()
 
+		stopWatcher := make(chan struct{})
+		if p.spec.Policy.DenyDescendants && cmd != nil && cmd.Process != nil && cmd.Process.Pid > 0 {
+			targetPID := cmd.Process.Pid
+			go func() {
+				ticker := time.NewTicker(2 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-stopWatcher:
+						return
+					case <-ticker.C:
+						platform.KillDescendants(targetPID)
+					}
+				}
+			}()
+		}
+
 		err := cmd.Wait()
+		close(stopWatcher)
+		_ = platform.KillProcessTree(cmd)
 		runCancel()
 
 		now := time.Now()
@@ -969,6 +1044,7 @@ func (m *Manager) recordHistory(p *Process) {
 		RestartCount: info.RestartCount,
 		CrashLoop:    info.CrashLoop,
 		Resources:    info.Resources,
+		Isolation:    info.Isolation,
 	}
 
 	m.history = append(m.history, entry)

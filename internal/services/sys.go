@@ -11,6 +11,7 @@ import (
 	"gostalgia/internal/security"
 	"gostalgia/internal/service"
 	"gostalgia/internal/session"
+	"gostalgia/platform"
 )
 
 // SysService exposes runtime status, control, and application endpoints.
@@ -61,23 +62,25 @@ func (s *SysService) ping(ctx context.Context, req ipc.Request) (any, error) {
 }
 
 type statusData struct {
-	Version       string           `json:"version"`
-	Root          string           `json:"root"`
-	UptimeSeconds float64          `json:"uptime_seconds"`
-	Endpoint      string           `json:"ipc_endpoint,omitempty"`
-	User          string           `json:"user"`
-	Session       string           `json:"session,omitempty"`
-	Services      []service.Status `json:"services"`
-	Processes     []processInfo    `json:"processes"`
-	Apps          []app.Status     `json:"apps"`
-	Sessions      []sessionInfo    `json:"sessions"`
+	Version       string                            `json:"version"`
+	Root          string                            `json:"root"`
+	UptimeSeconds float64                           `json:"uptime_seconds"`
+	Endpoint      string                            `json:"ipc_endpoint,omitempty"`
+	User          string                            `json:"user"`
+	Session       string                            `json:"session,omitempty"`
+	Services      []service.Status                  `json:"services"`
+	Processes     []processInfo                     `json:"processes"`
+	Apps          []app.Status                      `json:"apps"`
+	Sessions      []sessionInfo                     `json:"sessions"`
+	Security      platform.HostSecurityCapabilities `json:"security"`
 }
 
 type processInfo struct {
-	ID    int32  `json:"id"`
-	Name  string `json:"name"`
-	Kind  string `json:"kind"`
-	State string `json:"state"`
+	ID        int32  `json:"id"`
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	State     string `json:"state"`
+	Isolation string `json:"isolation,omitempty"`
 }
 
 type sessionInfo struct {
@@ -91,7 +94,13 @@ func (s *SysService) status(ctx context.Context, req ipc.Request) (any, error) {
 	}
 	procs := make([]processInfo, 0)
 	for _, p := range s.ctx.Procs.List() {
-		procs = append(procs, processInfo{ID: p.ID, Name: p.Name, Kind: string(p.Kind), State: string(p.State)})
+		procs = append(procs, processInfo{
+			ID:        p.ID,
+			Name:      p.Name,
+			Kind:      string(p.Kind),
+			State:     string(p.State),
+			Isolation: p.Isolation,
+		})
 	}
 	sessions := make([]sessionInfo, 0)
 	for _, sess := range s.ctx.Sessions.Active() {
@@ -107,6 +116,7 @@ func (s *SysService) status(ctx context.Context, req ipc.Request) (any, error) {
 		Processes:     procs,
 		Apps:          s.ctx.Apps.List(),
 		Sessions:      sessions,
+		Security:      platform.GetHostSecurityCapabilities(),
 	}
 	if sess := s.defaultSession(); sess != nil {
 		data.Session = sess.ID

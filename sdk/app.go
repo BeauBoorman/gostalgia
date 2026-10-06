@@ -27,6 +27,11 @@ const (
 	ModeInProc   = "inproc"
 	ModeExternal = "external"
 
+	IsolationInProc  = "inproc"
+	IsolationTrusted = "trusted"
+	IsolationSandbox = "sandbox"
+	IsolationStrict  = "strict"
+
 	ProtocolVersion = 1
 )
 
@@ -43,6 +48,7 @@ type Manifest struct {
 	ProtocolVersion int      `json:"protocol_version,omitempty"`
 	Permissions     []string `json:"permissions,omitempty"`
 	Description     string   `json:"description,omitempty"`
+	Isolation       string   `json:"isolation,omitempty"`
 }
 
 var (
@@ -83,6 +89,17 @@ func (m Manifest) Validate() error {
 	default:
 		return fmt.Errorf("app: manifest %s: unknown mode %q", m.ID, m.Mode)
 	}
+	if m.Isolation != "" {
+		switch m.Isolation {
+		case IsolationInProc, IsolationTrusted, IsolationSandbox, IsolationStrict:
+		default:
+			return fmt.Errorf("app: manifest %s: unknown isolation %q", m.ID, m.Isolation)
+		}
+	}
+	if (m.Mode == "" || m.Mode == ModeInProc) && (m.Isolation == IsolationSandbox || m.Isolation == IsolationStrict) {
+		return fmt.Errorf("app: manifest %s: inproc mode does not support %q isolation", m.ID, m.Isolation)
+	}
+
 	seen := make(map[string]bool)
 	for _, cap := range m.Permissions {
 		switch cap {
@@ -96,6 +113,17 @@ func (m Manifest) Validate() error {
 		seen[cap] = true
 	}
 	return nil
+}
+
+// EffectiveIsolation returns the configured or default isolation level for this manifest.
+func (m Manifest) EffectiveIsolation() string {
+	if m.Isolation != "" {
+		return m.Isolation
+	}
+	if m.Mode == ModeExternal {
+		return IsolationTrusted
+	}
+	return IsolationInProc
 }
 
 // ParseManifest decodes exactly one JSON object; unknown fields are errors.
