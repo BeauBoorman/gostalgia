@@ -155,7 +155,7 @@ func TestSysStatus(t *testing.T) {
 	for _, a := range status.Apps {
 		appIDs[a.Manifest.ID] = true
 	}
-	for _, id := range []string{"com.gostalgia.echo", "com.gostalgia.notes"} {
+	for _, id := range []string{"com.gostalgia.echo", "com.gostalgia.notes", "com.gostalgia.files"} {
 		if !appIDs[id] {
 			t.Errorf("expected app %s in status.Apps, got %+v", id, status.Apps)
 		}

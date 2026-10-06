@@ -1,0 +1,8 @@
+{
+  "id": "com.gostalgia.files",
+  "name": "Files",
+  "version": "0.1.0",
+  "entrypoint": "files",
+  "permissions": ["ipc", "fs.read", "fs.write", "app.launch", "app.list"],
+  "description": "VFS file manager and document browser."
+}

@@ -619,3 +619,94 @@ Notes also provides programmatic IPC routes under `app/com.gostalgia.notes/`:
 - `new`: Creates a new note `{force?}`
 - `edit`: Updates content `{content}`
 - `recover`: Restores or discards staged draft `{restore: bool}`
+
+## 10. Files: VFS-backed browser, preview, and handoff
+
+`apps/files` is Gostalgia's standard file manager and document browser. It provides
+a keyboard-first directory browser adhering to the SDK presentation contract (`sdk.View`
+and `sdk.ActionRequest`), integrating with VFS services and enabling handoff to Notes
+without escaping environment confinement.
+
+### Manifest and permissions
+
+```json
+{
+  "id": "com.gostalgia.files",
+  "name": "Files",
+  "version": "0.1.0",
+  "entrypoint": "files",
+  "permissions": ["ipc", "fs.read", "fs.write", "app.launch", "app.list"],
+  "description": "VFS file manager and document browser."
+}
+```
+
+Files requires `ipc` for service communication and route handling, `fs.read` for
+directory listing, file metadata, and bounded content previews, `fs.write` for file
+and folder creation, copying, moving, renaming, and trash management, and `app.launch`
+and `app.list` for seamless handoff to companion applications like Notes.
+
+### Browsing, sorting, and filtering
+
+- **Breadcrumb and directory navigation:** Files opens in `/users/guest` by default and
+  allows descending into child directories or ascending to parent directories using the
+  `[..] Up` item or the `up` action.
+- **Sorting modes:** Supports sorting by Name (alphabetical), Size (largest first),
+  and Date (newest first) via the `sort` action. Directories are always grouped ahead of files.
+- **Incremental filtering:** Ingests live filter input from the presentation `filter` field,
+  performing case-insensitive prefix and substring matching on directory entries.
+- **Snapshot limits:** Enforces presentation constraints by bounding visible entries to
+  at most 100 items and presenting an explicit truncation indicator (`item_more`) when
+  directories contain additional items.
+- **Selection survival:** Preserves the current selection across directory refreshes and
+  sort changes, gracefully falling back to the first available entry when a selected
+  item is removed.
+
+### Bounded preview
+
+- Inspects selected files and fetches bounded content previews (up to 4 KB read, 256 runes
+  displayed) via `fs/read`.
+- Distinguishes plain text from binary data using null-byte and UTF-8 validation, displaying
+  a formatted binary size indicator (`[Binary data: <size>]`) for binary files.
+
+### File operations and conflict resolution
+
+- **CRUD operations:** Supports creating new empty files (`new_file`) and directories (`new_dir`),
+  copying files (`copy`), moving files (`move`), and renaming files (`rename`).
+- **Conflict detection:** Before executing copy, move, or rename, Files checks if the
+  destination path already exists. If a collision is detected, Files transitions to
+  `PromptConflict` (`Files - Destination Exists`), prompting the user to either
+  `confirm_overwrite` or `cancel` without performing destructive writes.
+
+### Trash and restore lifecycle
+
+- **Safety-first deletion:** Selecting `trash` enters `PromptConfirmTrash` to prevent
+  accidental data loss.
+- **VFS trash integration:** Confirming trash invokes `fs/trash`, moving the item to
+  the user's `.trash` hierarchy.
+- **Trash bin view:** The user can switch to the dedicated Trash Bin view (`trash_bin`),
+  inspect trashed items with original path metadata, restore items to their original
+  locations (`restore`), or permanently empty the trash bin (`empty_trash`).
+
+### Handoff to companion applications
+
+- Selecting a file and invoking `open` resolves registered applications. For text and
+  markdown documents, Files launches Notes (`com.gostalgia.notes`) and issues an
+  `app/com.gostalgia.notes/open` IPC request to immediately display the document.
+- Any errors or unsaved-change warnings returned by the target application are captured
+  and rendered in the Files presentation error banner.
+
+### Presentation actions and programmatic routes
+
+Files exposes semantic actions over the Presentation Contract (rendered in the shell):
+- Normal mode: `open`, `up`, `preview`, `new_file`, `new_dir`, `rename`, `copy`, `move`, `trash`, `trash_bin`, `sort`, `refresh`
+- Confirm trash mode: `confirm_trash`, `cancel`
+- Conflict mode: `confirm_overwrite`, `cancel`
+- Trash bin mode: `restore`, `empty_trash`, `back`
+
+Files also provides programmatic IPC routes under `app/com.gostalgia.files/`:
+- `browse`: Lists entries and metadata for a given path `{path}`
+- `stat`: Retrieves detailed file or directory metadata `{path}`
+- `preview`: Fetches bounded text or binary preview `{path, limit?}`
+- `open`: Opens a directory or hands off a file to an application `{path, app_id?}`
+- `trash_list`: Returns all items currently in the trash bin
+
