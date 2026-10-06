@@ -72,3 +72,48 @@ filtering. An actual Bubble Tea program is driven through its key-message
 interface against a booted runtime and authenticated socket: app listing,
 Echo, scoped identity, stop/relaunch reset, VFS navigation, shelf control, and
 terminal rendering. The app SDK spec is [applications.md](applications.md).
+
+## Coordinated Charm baseline and dependency rules
+
+### Approved versions (Issue #21)
+
+Gostalgia adopts a coordinated **Charm v1** baseline pinned in `go.mod`:
+
+- **Bubble Tea**: `github.com/charmbracelet/bubbletea v1.3.10` — Elm-architecture terminal application lifecycle, alternate screen, and event loop.
+- **Lip Gloss**: `github.com/charmbracelet/lipgloss v1.1.0` — Style definitions, borders, colors, and layout blocks.
+- **Bubbles**: `github.com/charmbracelet/bubbles v1.0.0` — Reusable TUI components (text input, viewports, spinners, tables, key bindings) for upcoming visual language and launcher milestones (#22, #23).
+
+### Evaluation and decision rationale
+
+1. **v1 vs. v2 evaluation**:
+   - `bubbles v1.0.0`, `bubbletea v1.3.10`, and `lipgloss v1.1.0` were released as mutually aligned, production-proven companions. `bubbles v1.0.0` directly declares `bubbletea v1.3.10` and `lipgloss v1.1.0` as dependencies.
+   - Bubble Tea v2 (`charm.land/bubbletea/v2`) introduces breaking API migrations (`View() tea.View` instead of `View() string`, events modeled via `ultraviolet` / `uv.Event`, `tea.KeyPressMsg`, and vanity import paths `charm.land/*`). Bubble Tea v2 also requires Go 1.26+, whereas Gostalgia is built on Go 1.25.
+   - Pinned v1 versions provide maximum stability, eliminate version divergence across components, and compile cleanly without cgo (`CGO_ENABLED=0`) across macOS, Linux, and Windows.
+
+2. **Evaluated extensions (Huh, Glamour, Harmonica)**:
+   - **Huh** (form builder) and **Glamour** (markdown renderer): Evaluated and excluded from the direct baseline to minimize dependency surface. Neither is required for the DOS prompt shell or app shelf. They may be revisited in Milestone 2 if rich markdown manuals or complex interactive forms require them.
+   - **Harmonica** (spring physics animation): Transitive dependency of Bubbles (`v0.2.0`), available if subtle physics-based motion is needed without adding direct dependencies.
+
+3. **Dependency fences and boundaries**:
+   - Charm libraries are strictly restricted to `internal/experience/shell`.
+   - Core runtime (`internal/runtime`), public SDK (`sdk`), builtin applications (`apps/...`), and operator CLI (`cmd/gctl`) remain **100% standard-library-only**.
+   - Dependency fences in `test/e2e/dependencies_test.go` enforce that:
+     - `go list -deps gostalgia/internal/runtime gostalgia/sdk gostalgia/apps/... gostalgia/cmd/gctl` contains zero non-stdlib and zero Charm dependencies.
+     - `internal/experience/shell` is the sole package importing Charm libraries.
+     - Direct module dependencies in `go.mod` match the approved baseline.
+
+4. **No standalone host binaries or host shells**:
+   - The shipped runtime does not require or execute standalone host tools or Charm binaries (`gum`, `glow`, `vhs`). All terminal rendering runs in-process via pure-Go libraries.
+   - No host shell (`sh`, `bash`, `cmd.exe`) is invoked by the runtime or shell.
+
+5. **Terminal API assumptions**:
+   - Relies on standard ANSI escape sequences, alternate screen mode (`tea.WithAltScreen()`), raw terminal mode, and bracketed paste.
+   - Output from files and untrusted processes is filtered to strip OSC and dangerous control sequences before rendering.
+   - Viewport resizing is handled dynamically through `tea.WindowSizeMsg`, with graceful fallback down to 30×10.
+
+6. **Licensing and attribution**:
+   - Bubble Tea, Lip Gloss, and Bubbles are licensed under the MIT License, compatible with Gostalgia's license and dependency policy.
+
+7. **Separation from VirelaiOS**:
+   - Early VirelaiOS bring-up (toolchain, guest runner, kernel integration) is separately owned by the repository owner and tracked outside this roadmap. The Charm shell does not assume POSIX or claim guest-OS support; it runs on standard Go host targets (macOS, Linux, Windows).
+
