@@ -31,9 +31,9 @@ States: `starting → running → stopping → stopped` (or `failed`).
   reaping; supervision and crash-loop protection are tracked in Milestone 3
   ([#31](https://github.com/drawmeanelephant/gostalgia/issues/31)).
 
-## Process inspection and IPC (`proc/list`)
+## Process inspection and IPC (`proc/list`, `proc/info`, `proc/logs`)
 
-The `proc/list` IPC endpoint already returns complete `process.Info` snapshots,
+The `proc/list` IPC endpoint returns complete `process.Info` snapshots,
 including:
 - `id`, `name`, `kind`, and `state`
 - `session` and `user` ownership
@@ -42,17 +42,48 @@ including:
 - `error` (failure description)
 - `exit_code` (for both child processes and exited in-proc runs)
 
-### Diagnostics and presentation status
+The `proc/info` IPC endpoint returns this snapshot for a single process ID.
 
-While `exit_code` and lifecycle timestamps are returned over IPC today, they are
-distinct from current presentation and diagnostics:
-- **Presentation gap:** `gctl ps` and the shell `ps` command currently format
-  only PID, name, kind, state, and caps. Richer presentation and exit status
-  display are scheduled for Milestone 3 ([#30](https://github.com/drawmeanelephant/gostalgia/issues/30),
-  [#33](https://github.com/drawmeanelephant/gostalgia/issues/33)).
-- **Log capture gap:** Output from child processes (`stdout`/`stderr`) is not yet
-  captured into bounded ring buffers; capturing bounded logs and surfacing them
-  via IPC and tools is tracked in [#30](https://github.com/drawmeanelephant/gostalgia/issues/30).
+The `proc/logs` IPC endpoint returns captured process logs and stream diagnostics:
+- Process identification (`id`, `name`, `kind`, `state`, `exit_code`)
+- Lifecycle timings (`started_at`, `exited_at`, `duration`)
+- `stdout`, `stderr`, and `combined` stream diagnostics containing:
+  - `total_bytes`: total cumulative bytes written to the stream
+  - `buffered_bytes`: current un-dropped bytes retained in the ring buffer
+  - `dropped_bytes`: count of older bytes dropped due to capacity limits
+  - `truncated`: boolean flag indicating if buffer overflow occurred
+  - `content`: buffered stream text snapshot
+- Parameters:
+  - `id` (required): target process ID
+  - `stream` (optional): filter by stream (`stdout`, `stderr`, or combined default)
+  - `tail` (optional): limit returned content to the last N lines
+
+### Child output capture and bounding
+
+Child process (`KindChild`) standard output and standard error are captured via
+bounded memory ring buffers (`process.RingBuffer`) defaulting to 64KB per stream
+(configurable via `spec.LogLimit`).
+
+- **Non-blocking FIFO drops:** When incoming output exceeds capacity, the oldest
+  bytes are dropped, tracking exact byte counts and truncation flags without
+  blocking child execution or causing unbounded memory growth.
+- **WaitDelay protection:** `cmd.WaitDelay = 2 * time.Second` prevents child
+  processes from leaking background I/O handles or stalling manager shutdown.
+- **Child environment sanitization:** `DefaultChildEnv` deliberately whitelists
+  safe system variables (`PATH`, `TMPDIR`, `HOME`, etc.) and sets `GOSTALGIA_*`
+  runtime variables, explicitly filtering out sensitive host credentials,
+  tokens, and private keys.
+
+### Diagnostics and presentation
+
+Exit codes, timings, and logs are integrated across developer and interactive tools:
+- `gctl ps`: displays `PID`, `NAME`, `KIND`, `STATE`, `EXIT` code, and runtime `TIME` duration.
+- `gctl logs <pid> [tail]`: displays process diagnostics, stream byte metrics, drop counters, and captured output with terminal control-character sanitization.
+- Charm shell `ps`: displays process names, states with exit codes, run durations, and capability grants.
+- Charm shell `logs <pid> [tail]`: displays process diagnostics, byte counts, and sanitized stdout/stderr output.
+
+### Supervision status
+
 - **Supervision gap:** Processes are not yet automatically restarted or reaped,
   and crash loops are not yet guarded; tracked in
   [#31](https://github.com/drawmeanelephant/gostalgia/issues/31).

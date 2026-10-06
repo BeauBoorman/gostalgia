@@ -170,18 +170,42 @@ func TestFullEnvironmentLifecycle(t *testing.T) {
 
 	// 5. Process listing shows the running app.
 	var procs []struct {
+		ID    int32  `json:"id"`
 		Name  string `json:"name"`
 		State string `json:"state"`
 	}
 	must(t, client.Call(ctx, "proc/list", nil, &procs))
 	running := false
+	var echoPID int32
 	for _, p := range procs {
 		if p.Name == "com.gostalgia.echo" && p.State == "running" {
 			running = true
+			echoPID = p.ID
 		}
 	}
 	if !running {
 		t.Fatalf("echo not running per proc/list: %+v", procs)
+	}
+
+	// 5b. Query proc/logs and proc/info for the running app.
+	var logs struct {
+		ID       int32  `json:"id"`
+		Name     string `json:"name"`
+		State    string `json:"state"`
+		Duration string `json:"duration"`
+	}
+	must(t, client.Call(ctx, "proc/logs", map[string]any{"id": echoPID}, &logs))
+	if logs.ID != echoPID || logs.Name != "com.gostalgia.echo" || logs.Duration == "" {
+		t.Fatalf("proc/logs response unexpected: %+v", logs)
+	}
+
+	var info struct {
+		ID   int32  `json:"id"`
+		Name string `json:"name"`
+	}
+	must(t, client.Call(ctx, "proc/info", map[string]any{"id": echoPID}, &info))
+	if info.ID != echoPID || info.Name != "com.gostalgia.echo" {
+		t.Fatalf("proc/info response unexpected: %+v", info)
 	}
 
 	// 6. Clean shutdown requested over IPC.

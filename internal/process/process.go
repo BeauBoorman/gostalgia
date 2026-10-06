@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -28,6 +29,11 @@ import (
 	"gostalgia/internal/events"
 	"gostalgia/internal/ipc"
 	"gostalgia/internal/security"
+)
+
+const (
+	// DefaultLogCapacity is the default ring buffer capacity per stream (64 KB).
+	DefaultLogCapacity = 64 * 1024
 )
 
 type Kind string
@@ -49,14 +55,39 @@ const (
 
 // Spec describes a process to start.
 type Spec struct {
-	Name      string   `json:"name"`              // logical name (app id, child label)
-	Kind      Kind     `json:"kind"`              // inproc or child
-	SessionID string   `json:"session,omitempty"` // owning session
-	User      string   `json:"user,omitempty"`    // owning user
-	Caps      []string `json:"caps,omitempty"`    // granted capabilities
-	Args      []string `json:"args,omitempty"`    // child only: program and arguments
-	Dir       string   `json:"dir,omitempty"`     // child only: working directory
-	Env       []string `json:"env,omitempty"`     // child only; nil inherits the host environment
+	Name      string   `json:"name"`                // logical name (app id, child label)
+	Kind      Kind     `json:"kind"`                // inproc or child
+	SessionID string   `json:"session,omitempty"`   // owning session
+	User      string   `json:"user,omitempty"`      // owning user
+	Caps      []string `json:"caps,omitempty"`      // granted capabilities
+	Args      []string `json:"args,omitempty"`      // child only: program and arguments
+	Dir       string   `json:"dir,omitempty"`       // child only: working directory
+	Env       []string `json:"env,omitempty"`       // child only; nil defaults to deliberate child environment
+	LogLimit  int      `json:"log_limit,omitempty"` // child only: ring buffer capacity per stream in bytes (default 64KB)
+}
+
+// StreamDiagnostics holds bounded buffer content and drop accounting for an output stream.
+type StreamDiagnostics struct {
+	TotalBytes    int64  `json:"total_bytes"`
+	BufferedBytes int    `json:"buffered_bytes"`
+	DroppedBytes  int64  `json:"dropped_bytes"`
+	Truncated     bool   `json:"truncated"`
+	Content       string `json:"content"`
+}
+
+// Logs holds captured stdout/stderr diagnostics and lifecycle snapshot for a process.
+type Logs struct {
+	ID        int32             `json:"id"`
+	Name      string            `json:"name"`
+	Kind      Kind              `json:"kind"`
+	State     State             `json:"state"`
+	ExitCode  int               `json:"exit_code,omitempty"`
+	StartedAt time.Time         `json:"started_at,omitempty"`
+	ExitedAt  time.Time         `json:"exited_at,omitempty"`
+	Duration  string            `json:"duration,omitempty"`
+	Stdout    StreamDiagnostics `json:"stdout"`
+	Stderr    StreamDiagnostics `json:"stderr"`
+	Combined  StreamDiagnostics `json:"combined"`
 }
 
 // Info is a snapshot of a process's state.
@@ -87,12 +118,15 @@ func (Event) Type() string { return "proc.state" }
 
 // Process is one environment process.
 type Process struct {
-	mu     sync.Mutex
-	info   Info
-	ctx    context.Context
-	cancel context.CancelFunc
-	done   chan struct{}
-	cmd    *exec.Cmd // child only
+	mu       sync.Mutex
+	info     Info
+	ctx      context.Context
+	cancel   context.CancelFunc
+	done     chan struct{}
+	cmd      *exec.Cmd // child only
+	stdout   *RingBuffer
+	stderr   *RingBuffer
+	combined *RingBuffer
 }
 
 // ID returns the process ID.
@@ -222,10 +256,135 @@ func (m *Manager) StartInProc(ctx context.Context, spec Spec, run func(p *Proces
 	return p, nil
 }
 
+// RingBuffer is a concurrency-safe bounded byte ring buffer with drop accounting.
+type RingBuffer struct {
+	mu       sync.Mutex
+	capacity int
+	buf      []byte
+	total    int64
+	dropped  int64
+}
+
+// NewRingBuffer allocates a ring buffer with the given byte capacity.
+func NewRingBuffer(capacity int) *RingBuffer {
+	if capacity <= 0 {
+		capacity = DefaultLogCapacity
+	}
+	return &RingBuffer{
+		capacity: capacity,
+		buf:      make([]byte, 0, min(capacity, 4096)),
+	}
+}
+
+// Write appends p to the ring buffer. If writing p exceeds capacity, the
+// oldest bytes are discarded and accounted for in DroppedBytes.
+func (r *RingBuffer) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := len(p)
+	if n == 0 {
+		return 0, nil
+	}
+	r.total += int64(n)
+	if n >= r.capacity {
+		r.dropped += int64(len(r.buf)) + int64(n-r.capacity)
+		r.buf = append(r.buf[:0], p[n-r.capacity:]...)
+		return n, nil
+	}
+	overflow := len(r.buf) + n - r.capacity
+	if overflow > 0 {
+		r.dropped += int64(overflow)
+		copy(r.buf, r.buf[overflow:])
+		r.buf = r.buf[:len(r.buf)-overflow]
+	}
+	r.buf = append(r.buf, p...)
+	return n, nil
+}
+
+// Snapshot returns a copy of the stream buffer content and diagnostic accounting.
+func (r *RingBuffer) Snapshot() StreamDiagnostics {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return StreamDiagnostics{
+		TotalBytes:    r.total,
+		BufferedBytes: len(r.buf),
+		DroppedBytes:  r.dropped,
+		Truncated:     r.dropped > 0,
+		Content:       string(r.buf),
+	}
+}
+
+// CleanEnv returns an explicit child process environment containing only
+// standard system execution variables (PATH, SYSTEMROOT, TMPDIR, etc.) and
+// explicit additions. This prevents wholesale inheritance of host secrets or
+// operator tokens by child processes.
+func CleanEnv(explicit ...string) []string {
+	allowlist := map[string]bool{
+		"PATH":        true,
+		"SYSTEMROOT":  true,
+		"SYSTEMDRIVE": true,
+		"WINDIR":      true,
+		"COMSPEC":     true,
+		"PATHEXT":     true,
+		"TMPDIR":      true,
+		"TEMP":        true,
+		"TMP":         true,
+		"HOME":        true,
+		"USERPROFILE": true,
+		"LANG":        true,
+		"LC_ALL":      true,
+		"TERM":        true,
+		"TZ":          true,
+	}
+	var out []string
+	for _, env := range os.Environ() {
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) > 0 && allowlist[strings.ToUpper(parts[0])] {
+			out = append(out, env)
+		}
+	}
+	out = append(out, explicit...)
+	return out
+}
+
+// DefaultChildEnv builds a deliberate, sanitized environment for child processes
+// rather than inheriting arbitrary host credentials (tokens, secrets, private keys).
+func DefaultChildEnv(spec Spec, id int32) []string {
+	env := CleanEnv(
+		"GOSTALGIA_ENV=1",
+		fmt.Sprintf("GOSTALGIA_PID=%d", id),
+		fmt.Sprintf("GOSTALGIA_PROCESS_ID=%d", id),
+		fmt.Sprintf("GOSTALGIA_PROCESS_NAME=%s", spec.Name),
+	)
+	if spec.User != "" {
+		env = append(env, "USER="+spec.User)
+	}
+	if spec.SessionID != "" {
+		env = append(env, "GOSTALGIA_SESSION="+spec.SessionID)
+	}
+	for _, kv := range spec.Env {
+		k, _, ok := strings.Cut(kv, "=")
+		if !ok || isSensitiveEnvKey(k) {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return env
+}
+
+func isSensitiveEnvKey(k string) bool {
+	upper := strings.ToUpper(k)
+	for _, bad := range []string{"SECRET", "TOKEN", "PASSWORD", "PASSWD", "PRIVATE_KEY", "CREDENTIAL", "AUTH_SOCK"} {
+		if strings.Contains(upper, bad) {
+			return true
+		}
+	}
+	return false
+}
+
 // StartChild starts spec.Args as a real host child process. The child is
-// killed when its context is canceled (i.e. by Stop). Its combined output
-// is captured and returned via Info in later milestones; for now exit
-// status is tracked.
+// killed when its context is canceled (i.e. by Stop). Standard output and
+// standard error are captured into bounded ring buffers with drop accounting.
 func (m *Manager) StartChild(ctx context.Context, spec Spec) (*Process, error) {
 	if len(spec.Args) == 0 {
 		return nil, errors.New("process: child spec requires args")
@@ -235,13 +394,29 @@ func (m *Manager) StartChild(ctx context.Context, spec Spec) (*Process, error) {
 	procCtx, cancel := context.WithCancel(ipc.WithCapabilities(ctx, security.NewCapabilities(spec.Caps...)))
 	cmd := exec.CommandContext(procCtx, spec.Args[0], spec.Args[1:]...)
 	cmd.Dir = spec.Dir
-	if spec.Env != nil {
-		cmd.Env = spec.Env
-	} else {
-		cmd.Env = CleanEnv()
-	}
+	cmd.WaitDelay = 2 * time.Second
+	cmd.Env = DefaultChildEnv(spec, id)
 
-	p := &Process{done: make(chan struct{}), ctx: procCtx, cancel: cancel, cmd: cmd}
+	capacity := spec.LogLimit
+	if capacity <= 0 {
+		capacity = DefaultLogCapacity
+	}
+	stdoutBuf := NewRingBuffer(capacity)
+	stderrBuf := NewRingBuffer(capacity)
+	combinedBuf := NewRingBuffer(capacity)
+
+	cmd.Stdout = io.MultiWriter(stdoutBuf, combinedBuf)
+	cmd.Stderr = io.MultiWriter(stderrBuf, combinedBuf)
+
+	p := &Process{
+		done:     make(chan struct{}),
+		ctx:      procCtx,
+		cancel:   cancel,
+		cmd:      cmd,
+		stdout:   stdoutBuf,
+		stderr:   stderrBuf,
+		combined: combinedBuf,
+	}
 	p.info = Info{
 		ID:        id,
 		Name:      spec.Name,
@@ -373,30 +548,59 @@ func (m *Manager) Count() int {
 	return n
 }
 
-// CleanEnv returns an explicit child process environment containing only
-// standard system execution variables (PATH, SYSTEMROOT, TMPDIR, etc.) and
-// explicit additions. This prevents wholesale inheritance of host secrets or
-// operator tokens by child processes.
-func CleanEnv(explicit ...string) []string {
-	allowlist := map[string]bool{
-		"PATH":        true,
-		"SYSTEMROOT":  true,
-		"WINDIR":      true,
-		"TMPDIR":      true,
-		"TEMP":        true,
-		"TMP":         true,
-		"HOME":        true,
-		"USERPROFILE": true,
-		"LANG":        true,
-		"LC_ALL":      true,
+// Logs returns a snapshot of process logs and stream diagnostics.
+func (p *Process) Logs() Logs {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	info := p.info
+	var stdoutDiag, stderrDiag, combinedDiag StreamDiagnostics
+	if p.stdout != nil {
+		stdoutDiag = p.stdout.Snapshot()
 	}
-	var out []string
-	for _, env := range os.Environ() {
-		parts := strings.SplitN(env, "=", 2)
-		if len(parts) > 0 && allowlist[strings.ToUpper(parts[0])] {
-			out = append(out, env)
+	if p.stderr != nil {
+		stderrDiag = p.stderr.Snapshot()
+	}
+	if p.combined != nil {
+		combinedDiag = p.combined.Snapshot()
+	}
+	duration := ""
+	if !info.StartedAt.IsZero() {
+		if !info.ExitedAt.IsZero() {
+			duration = formatDuration(info.ExitedAt.Sub(info.StartedAt))
+		} else {
+			duration = formatDuration(time.Since(info.StartedAt))
 		}
 	}
-	out = append(out, explicit...)
-	return out
+	return Logs{
+		ID:        info.ID,
+		Name:      info.Name,
+		Kind:      info.Kind,
+		State:     info.State,
+		ExitCode:  info.ExitCode,
+		StartedAt: info.StartedAt,
+		ExitedAt:  info.ExitedAt,
+		Duration:  duration,
+		Stdout:    stdoutDiag,
+		Stderr:    stderrDiag,
+		Combined:  combinedDiag,
+	}
+}
+
+// Logs returns the captured output and diagnostics for a process.
+func (m *Manager) Logs(id int32) (Logs, bool) {
+	p, ok := m.Get(id)
+	if !ok {
+		return Logs{}, false
+	}
+	return p.Logs(), true
+}
+
+func formatDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	return d.Round(time.Second).String()
 }

@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"gostalgia/internal/ipc"
@@ -29,6 +30,12 @@ func (s *ProcService) Start(ctx context.Context) error {
 	if err := s.ctx.Router.Handle("proc/list", s.list); err != nil {
 		return err
 	}
+	if err := s.ctx.Router.Handle("proc/info", s.info); err != nil {
+		return err
+	}
+	if err := s.ctx.Router.Handle("proc/logs", s.logs); err != nil {
+		return err
+	}
 	return s.ctx.Router.Handle("proc/stop", s.stop)
 }
 
@@ -42,6 +49,96 @@ func (s *ProcService) list(ctx context.Context, req ipc.Request) (any, error) {
 		return nil, err
 	}
 	return s.ctx.Procs.List(), nil
+}
+
+func (s *ProcService) info(ctx context.Context, req ipc.Request) (any, error) {
+	if err := ipc.RequireCap(ctx, security.CapProcList); err != nil {
+		return nil, err
+	}
+	var p struct {
+		ID int32 `json:"id"`
+	}
+	if err := ipc.DecodeParams(req.Params, &p); err != nil {
+		return nil, err
+	}
+	if p.ID == 0 {
+		return nil, fmt.Errorf("params.id is required")
+	}
+	proc, ok := s.ctx.Procs.Get(p.ID)
+	if !ok {
+		return nil, fmt.Errorf("process: no such process %d", p.ID)
+	}
+	return proc.Info(), nil
+}
+
+func (s *ProcService) logs(ctx context.Context, req ipc.Request) (any, error) {
+	if err := ipc.RequireCap(ctx, security.CapProcList); err != nil {
+		return nil, err
+	}
+	var p struct {
+		ID     int32  `json:"id"`
+		Stream string `json:"stream,omitempty"` // "stdout", "stderr", "combined", or ""
+		Tail   int    `json:"tail,omitempty"`   // number of trailing lines
+	}
+	if err := ipc.DecodeParams(req.Params, &p); err != nil {
+		return nil, err
+	}
+	if p.ID == 0 {
+		return nil, fmt.Errorf("params.id is required")
+	}
+	logs, ok := s.ctx.Procs.Logs(p.ID)
+	if !ok {
+		return nil, fmt.Errorf("process: no such process %d", p.ID)
+	}
+
+	if p.Tail > 0 {
+		logs.Stdout.Content = tailLines(logs.Stdout.Content, p.Tail)
+		logs.Stderr.Content = tailLines(logs.Stderr.Content, p.Tail)
+		logs.Combined.Content = tailLines(logs.Combined.Content, p.Tail)
+	}
+
+	switch strings.ToLower(p.Stream) {
+	case "stdout":
+		return map[string]any{
+			"id":         logs.ID,
+			"name":       logs.Name,
+			"kind":       logs.Kind,
+			"state":      logs.State,
+			"exit_code":  logs.ExitCode,
+			"started_at": logs.StartedAt,
+			"exited_at":  logs.ExitedAt,
+			"duration":   logs.Duration,
+			"stdout":     logs.Stdout,
+		}, nil
+	case "stderr":
+		return map[string]any{
+			"id":         logs.ID,
+			"name":       logs.Name,
+			"kind":       logs.Kind,
+			"state":      logs.State,
+			"exit_code":  logs.ExitCode,
+			"started_at": logs.StartedAt,
+			"exited_at":  logs.ExitedAt,
+			"duration":   logs.Duration,
+			"stderr":     logs.Stderr,
+		}, nil
+	default:
+		return logs, nil
+	}
+}
+
+func tailLines(s string, n int) string {
+	if n <= 0 || s == "" {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) <= n {
+		return s
+	}
+	return strings.Join(lines[len(lines)-n:], "\n") + "\n"
 }
 
 func (s *ProcService) stop(ctx context.Context, req ipc.Request) (any, error) {
