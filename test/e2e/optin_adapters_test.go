@@ -163,6 +163,12 @@ func TestE2EOptInPlatformAdapters(t *testing.T) {
 	if !mountOut.Mounted || mountOut.MountPath != "/mnt/host" {
 		t.Fatalf("unexpected mount output: %+v", mountOut)
 	}
+	t.Cleanup(func() {
+		var out struct {
+			Unmounted bool `json:"unmounted"`
+		}
+		_ = client.Call(ctx, "hostfs/unmount", map[string]string{"mount_path": "/mnt/host"}, &out)
+	})
 
 	// Read file from shared mount via fs/read
 	var readOut struct {

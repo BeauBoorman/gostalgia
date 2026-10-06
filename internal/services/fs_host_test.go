@@ -68,6 +68,11 @@ func TestHostFSMountAndCapabilityEnforcement(t *testing.T) {
 	if !res.OK {
 		t.Fatalf("hostfs/mount failed: %s", res.Error)
 	}
+	t.Cleanup(func() {
+		_ = env.callAs(ctx, operator, capsAdmin, "hostfs/unmount", map[string]string{
+			"mount_path": "/mnt/shared",
+		})
+	})
 
 	// 4. hostfs/list returns the mount
 	res = env.call(ctx, capsAdmin, "hostfs/list", nil)
@@ -176,5 +181,13 @@ func TestHostFSMountAndCapabilityEnforcement(t *testing.T) {
 	}
 	if string(diskBytes) != "new content" {
 		t.Fatalf("expected 'new content' on host disk, got %q", string(diskBytes))
+	}
+
+	// 11. Unmount to close host file descriptors
+	res = env.callAs(ctx, operator, capsAdmin, "hostfs/unmount", map[string]string{
+		"mount_path": "/mnt/shared",
+	})
+	if !res.OK {
+		t.Fatalf("final hostfs/unmount failed: %s", res.Error)
 	}
 }
