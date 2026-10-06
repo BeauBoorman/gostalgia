@@ -149,6 +149,18 @@ type Model struct {
 
 	shortcuts           map[string]string
 	initialConfigLoaded bool
+
+	attached     bool
+	sessionID    string
+	attachmentID string
+}
+
+func (m *Model) SetAttached(attached bool) {
+	m.attached = attached
+}
+
+func (m *Model) Attached() bool {
+	return m.attached
 }
 
 func (m *Model) currentMode() viewMode {
@@ -534,6 +546,42 @@ func (m *Model) Init() tea.Cmd {
 			msg.hasDocs = true
 		}
 
+		if m.attached {
+			var attResp struct {
+				SessionID    string `json:"session_id"`
+				AttachmentID string `json:"attachment_id"`
+				ActiveCount  int    `json:"active_count"`
+				Workspace    struct {
+					CurrentDir string   `json:"cwd"`
+					ActiveView string   `json:"active_view"`
+					History    []string `json:"history"`
+				} `json:"workspace"`
+			}
+			if aErr := m.client.Call(ctx, "session/attach", map[string]any{"client_type": "shell"}, &attResp); aErr == nil {
+				msg.sessionID = attResp.SessionID
+				msg.attachmentID = attResp.AttachmentID
+				msg.activeCount = attResp.ActiveCount
+				if attResp.Workspace.CurrentDir != "" {
+					msg.cwd = attResp.Workspace.CurrentDir
+				}
+				msg.workspaceHistory = attResp.Workspace.History
+				msg.initialView = attResp.Workspace.ActiveView
+			}
+		} else {
+			var ws struct {
+				CurrentDir string   `json:"cwd"`
+				ActiveView string   `json:"active_view"`
+				History    []string `json:"history"`
+			}
+			if wErr := m.client.Call(ctx, "session/workspace/get", nil, &ws); wErr == nil {
+				if ws.CurrentDir != "" {
+					msg.cwd = ws.CurrentDir
+				}
+				msg.workspaceHistory = ws.History
+				msg.initialView = ws.ActiveView
+			}
+		}
+
 		return msg
 	}
 	watch := func() tea.Msg {
@@ -776,19 +824,74 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.append(entry{fmt.Sprintf("Reduced motion is now %s", state), "accent"})
 		}
+		if msg.sessionID != "" {
+			m.sessionID = msg.sessionID
+			m.attachmentID = msg.attachmentID
+			if m.attached {
+				m.append(entry{fmt.Sprintf("Attached to session %s (clients: %d)", msg.sessionID, msg.activeCount), "accent"})
+			}
+		}
+		if len(msg.workspaceHistory) > 0 {
+			m.history = msg.workspaceHistory
+			m.historyPos = len(m.history)
+		}
+		if msg.clearHistory {
+			m.history = nil
+			m.historyPos = 0
+		}
+		if m.client != nil && !msg.detach && !msg.quit && (msg.executedLine != "" || msg.cwd != "") {
+			c := m.client
+			line := msg.executedLine
+			cwd := m.cwd
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				params := map[string]any{"cwd": cwd}
+				if line != "" {
+					params["cmd"] = line
+				}
+				_ = c.Call(ctx, "session/workspace/set", params, nil)
+			}()
+		}
 		if msg.text != "" {
 			m.append(entry{msg.text, "output"})
 		}
 		if msg.err != nil {
 			m.append(entry{msg.err.Error(), "error"})
 		}
+		if msg.detach {
+			if m.attached {
+				if m.client != nil && m.sessionID != "" && m.attachmentID != "" {
+					_ = m.client.Call(context.Background(), "session/detach", map[string]any{
+						"session_id":    m.sessionID,
+						"attachment_id": m.attachmentID,
+					}, nil)
+				}
+				m.append(entry{"Detached from session.", "accent"})
+				return m, tea.Quit
+			}
+			m.append(entry{"cannot detach from owned session: runtime is running in-process; use 'gostalgia boot' for a detachable headless runtime, or 'shutdown' to stop.", "error"})
+			return m, nil
+		}
 		if msg.quit {
+			if m.attached && m.client != nil && m.sessionID != "" && m.attachmentID != "" {
+				_ = m.client.Call(context.Background(), "session/detach", map[string]any{
+					"session_id":    m.sessionID,
+					"attachment_id": m.attachmentID,
+				}, nil)
+			}
 			return m, tea.Quit
 		}
 	case tea.KeyMsg:
 		keyStr := msg.String()
 		switch keyStr {
 		case "ctrl+c", "ctrl+d":
+			if m.attached && m.client != nil && m.sessionID != "" && m.attachmentID != "" {
+				_ = m.client.Call(context.Background(), "session/detach", map[string]any{
+					"session_id":    m.sessionID,
+					"attachment_id": m.attachmentID,
+				}, nil)
+			}
 			return m, tea.Quit
 		}
 
@@ -1272,7 +1375,11 @@ func (m *Model) View() string {
 		active = len(tabItems) - 1
 	}
 	tabs := m.kit.Tabs(tabItems, active, w)
-	badge := m.kit.Badge("ONLINE", theme.Success, w) + m.kit.Muted("   guest · C: environment drive")
+	statusLabel := "ONLINE"
+	if m.attached {
+		statusLabel = "ATTACHED"
+	}
+	badge := m.kit.Badge(statusLabel, theme.Success, w) + m.kit.Muted("   guest · C: environment drive")
 
 	toastView := ""
 	toastLines := 0
@@ -1374,6 +1481,11 @@ func (m *Model) View() string {
 		prompt += m.kit.Text(before) + m.kit.Selection(" ") + m.kit.Text(after)
 	}
 
+	exitHelp := "EXIT"
+	if m.attached {
+		exitHelp = "DETACH"
+	}
+
 	var bindings []ui.Binding
 	if m.paletteOpen {
 		items := m.filteredPaletteItems()
@@ -1381,23 +1493,23 @@ func (m *Model) View() string {
 			{Key: "Esc", Help: "CLOSE"},
 			{Key: "Enter", Help: "EXECUTE", Disabled: len(items) == 0},
 			{Key: "↑↓", Help: "NAVIGATE", Disabled: len(items) == 0},
-			{Key: "Ctrl-C", Help: "EXIT"},
+			{Key: "Ctrl-C", Help: exitHelp},
 		}
 	} else if m.taskView && m.tasks != nil {
 		if m.tasks.Mode() == taskmanager.ModeLogs {
 			bindings = []ui.Binding{
-				{Key: "Esc", Help: "BACK"}, {Key: "↑↓", Help: "SCROLL"}, {Key: "Ctrl-C", Help: "EXIT"},
+				{Key: "Esc", Help: "BACK"}, {Key: "↑↓", Help: "SCROLL"}, {Key: "Ctrl-C", Help: exitHelp},
 			}
 		} else if m.tasks.Mode() == taskmanager.ModeReceipt {
 			bindings = []ui.Binding{
-				{Key: "Esc", Help: "BACK"}, {Key: "Ctrl-C", Help: "EXIT"},
+				{Key: "Esc", Help: "BACK"}, {Key: "Ctrl-C", Help: exitHelp},
 			}
 		} else {
 			bindings = []ui.Binding{
 				{Key: "Esc", Help: "PROMPT"}, {Key: "Enter", Help: "VIEW"},
 				{Key: "l", Help: "LOGS"}, {Key: "c", Help: "RECEIPT"},
 				{Key: "x", Help: "STOP"}, {Key: "r", Help: "REAP"},
-				{Key: "↑↓", Help: "SELECT"}, {Key: "Ctrl-C", Help: "EXIT"},
+				{Key: "↑↓", Help: "SELECT"}, {Key: "Ctrl-C", Help: exitHelp},
 			}
 		}
 	} else if m.notifView {
@@ -1405,7 +1517,7 @@ func (m *Model) View() string {
 			{Key: "Esc", Help: "PROMPT"}, {Key: "Enter", Help: "VIEW"},
 			{Key: "d", Help: "DISMISS"}, {Key: "c", Help: "CLEAR"},
 			{Key: "n", Help: "DND"}, {Key: "↑↓", Help: "SELECT"},
-			{Key: "Ctrl-C", Help: "EXIT"},
+			{Key: "Ctrl-C", Help: exitHelp},
 		}
 	} else if m.presentation != nil {
 		v := m.presentation
@@ -1413,7 +1525,7 @@ func (m *Model) View() string {
 		action := max(0, v.focus-len(v.data.Fields))
 		actionBlocked := blocked || action >= len(v.data.Actions) || v.data.Actions[action].Disabled
 		bindings = []ui.Binding{
-			{Key: "Esc", Help: "CANCEL/BACK"}, {Key: "Ctrl-C", Help: "EXIT"},
+			{Key: "Esc", Help: "CANCEL/BACK"}, {Key: "Ctrl-C", Help: exitHelp},
 			{Key: "Tab", Help: "FOCUS", Disabled: blocked}, {Key: "Enter", Help: "ACTION", Disabled: actionBlocked},
 			{Key: "↑↓", Help: "ITEM", Disabled: blocked}, {Key: "F2", Help: "APPS"},
 		}
@@ -1438,11 +1550,11 @@ func (m *Model) View() string {
 			{Key: "Ctrl-P", Help: "PALETTE"},
 			{Key: "↑↓", Help: "SELECT", Disabled: len(items) == 0},
 			{Key: "Enter", Help: "OPEN", Disabled: len(items) == 0},
-			{Key: "Ctrl-C", Help: "EXIT"},
+			{Key: "Ctrl-C", Help: exitHelp},
 		}
 	} else {
 		bindings = []ui.Binding{
-			{Key: "Ctrl-C", Help: "EXIT"},
+			{Key: "Ctrl-C", Help: exitHelp},
 			{Key: "F1", Help: "HOME"},
 			{Key: "F2", Help: "APPS"},
 			{Key: "F5", Help: "TASKS"},
@@ -1481,6 +1593,25 @@ func Run(ctx context.Context, c Caller, closed <-chan struct{}, options ...tea.P
 	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithContext(ctx)}
 	opts = append(opts, options...)
 	model := New(ctx, c, closed)
+	defer func() {
+		if cleanup := model.dismissView(); cleanup != nil {
+			cleanup()
+		}
+		RestoreTerminal()
+	}()
+	_, err = tea.NewProgram(model, opts...).Run()
+	return err
+}
+
+// RunAttached runs the Charm shell attached to an existing runtime session.
+// In attached mode, exit, detach, and interrupt leave the headless runtime running.
+func RunAttached(ctx context.Context, c Caller, closed <-chan struct{}, options ...tea.ProgramOption) (err error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithContext(ctx)}
+	opts = append(opts, options...)
+	model := New(ctx, c, closed)
+	model.SetAttached(true)
 	defer func() {
 		if cleanup := model.dismissView(); cleanup != nil {
 			cleanup()

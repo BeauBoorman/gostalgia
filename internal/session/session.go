@@ -11,7 +11,16 @@ import (
 
 	"gostalgia/internal/events"
 	"gostalgia/internal/security"
+	"gostalgia/internal/vfs"
 )
+
+// Attachment represents an active client (shell, gctl, etc.) attached to a session.
+type Attachment struct {
+	ID         string    `json:"id"`
+	ClientID   string    `json:"client_id"`
+	ClientType string    `json:"client_type"` // e.g. "shell", "gctl", "operator"
+	AttachedAt time.Time `json:"attached_at"`
+}
 
 // Session is one user's login session.
 type Session struct {
@@ -20,8 +29,10 @@ type Session struct {
 	StartedAt time.Time     `json:"started_at"`
 	StoppedAt time.Time     `json:"stopped_at,omitempty"`
 
-	mu      sync.Mutex
-	stopped bool
+	mu          sync.Mutex
+	stopped     bool
+	nextAttach  int
+	attachments map[string]Attachment
 }
 
 // Active reports whether the session is still open.
@@ -37,7 +48,68 @@ func (s *Session) close() {
 	if !s.stopped {
 		s.stopped = true
 		s.StoppedAt = time.Now()
+		s.attachments = nil
 	}
+}
+
+// Attach registers a new client attachment to this session.
+func (s *Session) Attach(clientType, clientID string) Attachment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return Attachment{}
+	}
+	if s.attachments == nil {
+		s.attachments = make(map[string]Attachment)
+	}
+	s.nextAttach++
+	if clientID == "" {
+		clientID = fmt.Sprintf("client-%d", s.nextAttach)
+	}
+	if clientType == "" {
+		clientType = "shell"
+	}
+	att := Attachment{
+		ID:         fmt.Sprintf("att-%d", s.nextAttach),
+		ClientID:   clientID,
+		ClientType: clientType,
+		AttachedAt: time.Now(),
+	}
+	s.attachments[att.ID] = att
+	return att
+}
+
+// Detach removes an attachment by ID. Returns true if removed.
+func (s *Session) Detach(attachmentID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped || s.attachments == nil {
+		return false
+	}
+	if _, ok := s.attachments[attachmentID]; ok {
+		delete(s.attachments, attachmentID)
+		return true
+	}
+	return false
+}
+
+// Attachments returns a list of active attachments, sorted by ID.
+func (s *Session) Attachments() []Attachment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Attachment, 0, len(s.attachments))
+	for _, a := range s.attachments {
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// AttachmentCount returns the number of active attachments.
+func (s *Session) AttachmentCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.attachments)
 }
 
 // Event is published when a session opens or closes.
@@ -49,20 +121,44 @@ type Event struct {
 
 func (Event) Type() string { return "session.state" }
 
-// Manager creates and tracks sessions.
+// AttachEvent is published when a client attaches to or detaches from a session.
+type AttachEvent struct {
+	SessionID    string `json:"session_id"`
+	AttachmentID string `json:"attachment_id"`
+	ClientType   string `json:"client_type"`
+	State        string `json:"state"` // "attached" or "detached"
+	ActiveCount  int    `json:"active_count"`
+}
+
+func (AttachEvent) Type() string { return "session.attachment" }
+
+// Manager creates and tracks sessions and their workspace stores.
 type Manager struct {
-	mu       sync.Mutex
-	next     int
-	sessions map[string]*Session
-	bus      *events.Bus
-	log      *slog.Logger
+	mu         sync.Mutex
+	next       int
+	sessions   map[string]*Session
+	workspaces map[string]*WorkspaceStore
+	fsys       vfs.FS
+	bus        *events.Bus
+	log        *slog.Logger
 }
 
 func NewManager(bus *events.Bus, log *slog.Logger) *Manager {
 	return &Manager{
-		sessions: map[string]*Session{},
-		bus:      bus,
-		log:      log,
+		sessions:   map[string]*Session{},
+		workspaces: map[string]*WorkspaceStore{},
+		bus:        bus,
+		log:        log,
+	}
+}
+
+// SetVFS configures the virtual filesystem for workspace persistence.
+func (m *Manager) SetVFS(fsys vfs.FS) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.fsys = fsys
+	for _, ws := range m.workspaces {
+		ws.fsys = fsys
 	}
 }
 
@@ -75,9 +171,10 @@ func (m *Manager) Create(user security.User) (*Session, error) {
 	defer m.mu.Unlock()
 	m.next++
 	s := &Session{
-		ID:        fmt.Sprintf("session-%d", m.next),
-		User:      user,
-		StartedAt: time.Now(),
+		ID:          fmt.Sprintf("session-%d", m.next),
+		User:        user,
+		StartedAt:   time.Now(),
+		attachments: make(map[string]Attachment),
 	}
 	m.sessions[s.ID] = s
 	m.bus.Publish("session", Event{ID: s.ID, User: user.Name, State: "started"})
@@ -85,7 +182,7 @@ func (m *Manager) Create(user security.User) (*Session, error) {
 	return s, nil
 }
 
-// Close closes a session by ID.
+// Close closes a session by ID and cleans up its attachments.
 func (m *Manager) Close(id string) error {
 	m.mu.Lock()
 	s, ok := m.sessions[id]
@@ -97,6 +194,78 @@ func (m *Manager) Close(id string) error {
 	m.bus.Publish("session", Event{ID: s.ID, User: s.User.Name, State: "stopped"})
 	m.log.Info("session stopped", "session", s.ID, "user", s.User.Name)
 	return nil
+}
+
+// Attach registers a client attachment to a session.
+func (m *Manager) Attach(sessionID, clientType, clientID string) (Attachment, error) {
+	m.mu.Lock()
+	s, ok := m.sessions[sessionID]
+	m.mu.Unlock()
+	if !ok {
+		return Attachment{}, fmt.Errorf("session: no such session %q", sessionID)
+	}
+	if !s.Active() {
+		return Attachment{}, fmt.Errorf("session: session %q is not active", sessionID)
+	}
+
+	att := s.Attach(clientType, clientID)
+	count := s.AttachmentCount()
+	m.bus.Publish("session", AttachEvent{
+		SessionID:    s.ID,
+		AttachmentID: att.ID,
+		ClientType:   att.ClientType,
+		State:        "attached",
+		ActiveCount:  count,
+	})
+	m.log.Info("client attached to session", "session", s.ID, "attachment", att.ID, "type", att.ClientType, "count", count)
+	return att, nil
+}
+
+// Detach unregisters a client attachment from a session.
+func (m *Manager) Detach(sessionID, attachmentID string) error {
+	m.mu.Lock()
+	s, ok := m.sessions[sessionID]
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("session: no such session %q", sessionID)
+	}
+
+	if !s.Detach(attachmentID) {
+		return fmt.Errorf("session: no such attachment %q in session %q", attachmentID, sessionID)
+	}
+
+	count := s.AttachmentCount()
+	m.bus.Publish("session", AttachEvent{
+		SessionID:    s.ID,
+		AttachmentID: attachmentID,
+		State:        "detached",
+		ActiveCount:  count,
+	})
+	m.log.Info("client detached from session", "session", s.ID, "attachment", attachmentID, "count", count)
+	return nil
+}
+
+// Workspace returns or lazily initializes the workspace store for a session.
+func (m *Manager) Workspace(sessionID string) *WorkspaceStore {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if ws, ok := m.workspaces[sessionID]; ok {
+		return ws
+	}
+
+	s, ok := m.sessions[sessionID]
+	userName := "guest"
+	if ok && s.User.Name != "" {
+		userName = s.User.Name
+	}
+	wsPath := fmt.Sprintf("/users/%s/config/workspace.json", userName)
+	ws := NewWorkspaceStore(m.fsys, wsPath)
+	ws.state.SessionID = sessionID
+	// Attempt initial load from VFS if available
+	_, _ = ws.Load()
+	m.workspaces[sessionID] = ws
+	return ws
 }
 
 // Get returns a session by ID.

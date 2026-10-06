@@ -1,6 +1,7 @@
 // Command gostalgia boots and serves the Gostalgia environment.
 //
-//	gostalgia shell [--root DIR] [--verbose] (default)
+//	gostalgia shell [--root DIR] [--verbose] [--attach] (default)
+//	gostalgia attach [--root DIR]
 //	gostalgia boot [--root DIR] [--verbose]
 //	gostalgia init [--root DIR]
 //	gostalgia version
@@ -25,10 +26,11 @@ import (
 const usageText = `gostalgia — the Gostalgia environment runtime
 
 Usage:
-  gostalgia boot [--root DIR] [--verbose]   boot and serve the environment
-  gostalgia shell [--root DIR] [--verbose] boot into the Charm terminal (default)
-  gostalgia init [--root DIR]               create the environment root
-  gostalgia version                         print the version
+  gostalgia boot [--root DIR] [--verbose]             boot and serve the environment
+  gostalgia shell [--root DIR] [--verbose] [--attach] boot into the Charm terminal (default)
+  gostalgia attach [--root DIR]                       attach shell to a running environment
+  gostalgia init [--root DIR]                         create the environment root
+  gostalgia version                                   print the version
 `
 
 func main() {
@@ -45,6 +47,8 @@ func main() {
 		err = cmdBoot(args)
 	case "shell":
 		err = cmdShell(args)
+	case "attach":
+		err = cmdAttachCLI(args)
 	case "init":
 		err = cmdInit(args)
 	case "version", "--version", "-v":
@@ -94,12 +98,60 @@ func cmdBoot(args []string) error {
 	return nil
 }
 
-// cmdShell owns the environment. Headless operators still use boot + gctl.
+func cmdAttachCLI(args []string) error {
+	fs := flag.NewFlagSet("attach", flag.ExitOnError)
+	root := rootFlag(fs)
+	fs.Parse(args)
+	return cmdAttach(*root)
+}
+
+func cmdAttach(root string) error {
+	dir, err := runtime.ResolveRoot(root)
+	if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "runtime.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no running Gostalgia instance found in %s; boot one with 'gostalgia boot' first", dir)
+		}
+		return err
+	}
+	var info struct {
+		PID      int    `json:"pid"`
+		Endpoint string `json:"endpoint"`
+		Token    string `json:"token"`
+	}
+	if err := json.Unmarshal(data, &info); err != nil {
+		return fmt.Errorf("invalid runtime metadata in %s: %w", dir, err)
+	}
+	conn, err := platform.DialIPC(info.Endpoint)
+	if err != nil {
+		return fmt.Errorf("failed to connect to Gostalgia runtime at %s (PID %d): %w", info.Endpoint, info.PID, err)
+	}
+	client, err := ipc.NewClient(conn, info.Token)
+	if err != nil {
+		return fmt.Errorf("failed to authenticate with Gostalgia runtime: %w", err)
+	}
+	defer client.Close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), platform.ShutdownSignals()...)
+	defer stop()
+	return shell.RunAttached(ctx, client, client.Done())
+}
+
+// cmdShell owns the environment unless --attach is passed.
 func cmdShell(args []string) error {
 	fs := flag.NewFlagSet("shell", flag.ExitOnError)
 	root := rootFlag(fs)
 	verbose := fs.Bool("verbose", false, "enable debug logging to the runtime log")
+	attach := fs.Bool("attach", false, "attach to an existing running Gostalgia environment")
 	fs.Parse(args)
+
+	if *attach {
+		return cmdAttach(*root)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), platform.ShutdownSignals()...)
 	defer stop()
 	rt, err := runtime.Boot(context.Background(), runtime.Options{Root: *root, Verbose: *verbose, LogOutput: io.Discard})

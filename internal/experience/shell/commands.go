@@ -36,24 +36,32 @@ type sysStatusData struct {
 }
 
 type resultMsg struct {
-	text         string
-	err          error
-	cwd          string
-	apps         []appStatus
-	status       sysStatusData
-	documents    []docShortcut
-	hasStatus    bool
-	hasDocs      bool
-	quit         bool
-	switchView   string
-	receiptPID   int32
-	listReceipts bool
-	toggleDND    bool
-	setDND       *bool
-	setTheme     string
-	showTheme    bool
-	setMotion    *bool
-	toggleMotion bool
+	text             string
+	err              error
+	cwd              string
+	apps             []appStatus
+	status           sysStatusData
+	documents        []docShortcut
+	hasStatus        bool
+	hasDocs          bool
+	quit             bool
+	switchView       string
+	receiptPID       int32
+	listReceipts     bool
+	toggleDND        bool
+	setDND           *bool
+	setTheme         string
+	showTheme        bool
+	setMotion        *bool
+	toggleMotion     bool
+	detach           bool
+	executedLine     string
+	clearHistory     bool
+	sessionID        string
+	attachmentID     string
+	activeCount      int
+	workspaceHistory []string
+	initialView      string
 }
 
 const helpText = `COMMAND CENTER
@@ -76,10 +84,13 @@ const helpText = `COMMAND CENTER
   theme [NAME]              switch theme (nostalgia, midnight, monochrome, high-contrast, high-contrast-light)
   motion [on|off]           toggle or set reduced-motion mode
   settings / preferences    interactive system preferences and themes
+  history [clear]           view or clear command history
+  session                   view session and client attachment info
+  detach                    detach shell (runtime remains running)
   ps · status               processes · system dashboard
   logs / log PID [TAIL]     view child process logs and diagnostics
   cls / clear               clear the transcript
-  exit                      leave shell (owned boot shuts down)
+  exit                      leave shell (owned boot shuts down; attached detaches)
   shutdown                  shut down the environment
 
 F1 home · F2 apps · F5 tasks · F6 alerts · F7 settings · Ctrl+P / / palette · F3 stop · F4 view
@@ -137,10 +148,16 @@ func envPath(cwd, input string) string {
 }
 
 func execute(ctx context.Context, c Caller, cwd, line string) resultMsg {
-	result := resultMsg{cwd: cwd}
+	result := resultMsg{cwd: cwd, executedLine: line}
 	text, next, quit, err := command(ctx, c, cwd, line)
 	result.text, result.cwd, result.quit, result.err = text, next, quit, err
-	if strings.HasPrefix(result.text, "__SWITCH_VIEW__:") {
+	if result.text == "__DETACH__" {
+		result.detach = true
+		result.text = ""
+	} else if result.text == "__HISTORY_CLEARED__" {
+		result.clearHistory = true
+		result.text = "Command history cleared"
+	} else if strings.HasPrefix(result.text, "__SWITCH_VIEW__:") {
 		result.switchView = strings.TrimPrefix(result.text, "__SWITCH_VIEW__:")
 		result.text = ""
 	} else if strings.HasPrefix(result.text, "__SHOW_RECEIPT__:") {
@@ -268,6 +285,71 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 			return fail(fmt.Errorf("usage: help"))
 		}
 		return ok(helpText)
+	case "detach":
+		if len(args) != 0 {
+			return fail(fmt.Errorf("usage: detach"))
+		}
+		return "__DETACH__", cwd, true, nil
+	case "history":
+		if len(args) > 1 {
+			return fail(fmt.Errorf("usage: history [clear]"))
+		}
+		if len(args) == 1 {
+			if strings.ToLower(args[0]) == "clear" {
+				var out struct {
+					History []string `json:"history"`
+				}
+				if err := c.Call(ctx, "session/workspace/clear", map[string]any{"clear_history": true}, &out); err != nil {
+					return fail(err)
+				}
+				return "__HISTORY_CLEARED__", cwd, false, nil
+			}
+			return fail(fmt.Errorf("usage: history [clear]"))
+		}
+		var ws struct {
+			History []string `json:"history"`
+		}
+		if err := c.Call(ctx, "session/workspace/get", nil, &ws); err != nil {
+			return fail(err)
+		}
+		if len(ws.History) == 0 {
+			return ok("(no history recorded)")
+		}
+		var lines []string
+		for i, h := range ws.History {
+			lines = append(lines, fmt.Sprintf("%4d  %s", i+1, safe(h)))
+		}
+		return ok(strings.Join(lines, "\n"))
+	case "session":
+		if len(args) != 0 {
+			return fail(fmt.Errorf("usage: session"))
+		}
+		var detail struct {
+			ID   string `json:"id"`
+			User struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"user"`
+			StartedAt   time.Time `json:"started_at"`
+			Active      bool      `json:"active"`
+			Attachments []struct {
+				ID         string    `json:"id"`
+				ClientID   string    `json:"client_id"`
+				ClientType string    `json:"client_type"`
+				AttachedAt time.Time `json:"attached_at"`
+			} `json:"attachments"`
+		}
+		if err := c.Call(ctx, "session/get", nil, &detail); err != nil {
+			return fail(err)
+		}
+		var out []string
+		out = append(out, fmt.Sprintf("SESSION %s · User: %s (%s)", detail.ID, detail.User.Name, detail.User.ID))
+		out = append(out, fmt.Sprintf("Started: %s · Active: %t", detail.StartedAt.Format("2006-01-02 15:04:05"), detail.Active))
+		out = append(out, fmt.Sprintf("Attached clients: %d", len(detail.Attachments)))
+		for _, a := range detail.Attachments {
+			out = append(out, fmt.Sprintf("  - %s (%s) client %s, attached %s", a.ID, a.ClientType, a.ClientID, a.AttachedAt.Format("15:04:05")))
+		}
+		return ok(strings.Join(out, "\n"))
 	case "exit", "quit":
 		if len(args) != 0 {
 			return fail(fmt.Errorf("usage: exit"))

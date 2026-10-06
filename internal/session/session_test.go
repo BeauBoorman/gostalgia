@@ -3,11 +3,13 @@ package session
 import (
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
 	"gostalgia/internal/events"
 	"gostalgia/internal/security"
+	"gostalgia/internal/vfs"
 )
 
 type recorder struct {
@@ -93,5 +95,199 @@ func TestSessionsGetDistinctIDs(t *testing.T) {
 	}
 	if len(m.Active()) != 2 {
 		t.Fatalf("active = %d, want 2", len(m.Active()))
+	}
+}
+
+func TestSessionAttachments(t *testing.T) {
+	m, _ := newTestManager(t)
+	s, err := m.Create(security.User{ID: "u-guest", Name: "guest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Attach client 1
+	att1, err := m.Attach(s.ID, "shell", "client-term-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if att1.ID == "" {
+		t.Fatal("attachment id is empty")
+	}
+	if s.AttachmentCount() != 1 {
+		t.Fatalf("attachments count = %d, want 1", s.AttachmentCount())
+	}
+
+	// Attach client 2 (multi-client)
+	att2, err := m.Attach(s.ID, "gctl", "client-ctrl-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.AttachmentCount() != 2 {
+		t.Fatalf("attachments count = %d, want 2", s.AttachmentCount())
+	}
+
+	atts := s.Attachments()
+	if len(atts) != 2 {
+		t.Fatalf("attachments len = %d, want 2", len(atts))
+	}
+	if atts[0].ID != att1.ID || atts[1].ID != att2.ID {
+		t.Fatalf("unexpected attachment list: %+v", atts)
+	}
+
+	// Detach client 1
+	if err := m.Detach(s.ID, att1.ID); err != nil {
+		t.Fatal(err)
+	}
+	if s.AttachmentCount() != 1 {
+		t.Fatalf("after detach 1, count = %d, want 1", s.AttachmentCount())
+	}
+	// Session must still be active
+	if !s.Active() {
+		t.Fatal("session unexpectedly marked inactive after single client detach")
+	}
+
+	// Detach client 2
+	if err := m.Detach(s.ID, att2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if s.AttachmentCount() != 0 {
+		t.Fatalf("after detach 2, count = %d, want 0", s.AttachmentCount())
+	}
+	// Session must still be active even with 0 attached clients (headless/background runtime)
+	if !s.Active() {
+		t.Fatal("session unexpectedly marked inactive when all clients detached")
+	}
+
+	// Detaching unknown attachment should fail
+	if err := m.Detach(s.ID, "unknown-att"); err == nil {
+		t.Fatal("detaching unknown attachment succeeded, want error")
+	}
+}
+
+func TestWorkspaceStatePersistenceAndSanitization(t *testing.T) {
+	memFS := vfs.NewMem()
+	ws := NewWorkspaceStore(memFS, "/users/guest/config/workspace.json")
+
+	// Verify defaults
+	st := ws.Get()
+	if st.CurrentDir != "/users/guest" {
+		t.Fatalf("initial cwd = %q, want /users/guest", st.CurrentDir)
+	}
+	if st.ActiveView != "prompt" {
+		t.Fatalf("initial active view = %q, want prompt", st.ActiveView)
+	}
+
+	// Modify CWD and view
+	if err := ws.SetCurrentDir("/users/guest/documents"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.SetActiveView("tasks"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add normal commands
+	_ = ws.AppendHistory("ls")
+	_ = ws.AppendHistory("cd documents")
+	_ = ws.AppendHistory("cat notes.txt")
+
+	// Add sensitive commands (must be excluded or redacted)
+	_ = ws.AppendHistory("auth login user pass")
+	_ = ws.AppendHistory("token 0123456789abcdef0123456789abcdef")
+	_ = ws.AppendHistory("connect --token=changeme")
+	_ = ws.AppendHistory("service start --password=changeme")
+
+	st = ws.Get()
+	if st.CurrentDir != "/users/guest/documents" {
+		t.Fatalf("updated cwd = %q, want /users/guest/documents", st.CurrentDir)
+	}
+	if st.ActiveView != "tasks" {
+		t.Fatalf("updated active view = %q, want tasks", st.ActiveView)
+	}
+
+	// Check history: sensitive auth/token commands must NOT appear in history
+	for _, h := range st.History {
+		if strings.HasPrefix(h, "auth ") || strings.HasPrefix(h, "token ") {
+			t.Fatalf("sensitive auth/token command leaked into history: %q", h)
+		}
+		if strings.Contains(h, "0123456789abcdef0123456789abcdef") {
+			t.Fatalf("raw hex token leaked into history: %q", h)
+		}
+		if strings.Contains(h, "changeme") {
+			t.Fatalf("raw password leaked into history: %q", h)
+		}
+	}
+
+	// Ensure saved file on VFS exists and contains no tokens
+	raw, err := memFS.ReadFile("users/guest/config/workspace.json")
+	if err != nil {
+		t.Fatalf("workspace.json not found on VFS: %v", err)
+	}
+	if strings.Contains(string(raw), "0123456789abcdef0123456789abcdef") {
+		t.Fatal("persisted JSON contains raw token")
+	}
+	if strings.Contains(string(raw), "SuperSecretPassword123") {
+		t.Fatal("persisted JSON contains raw password")
+	}
+
+	// Load into a new store instance to test recovery
+	ws2 := NewWorkspaceStore(memFS, "/users/guest/config/workspace.json")
+	loaded, err := ws2.Load()
+	if err != nil {
+		t.Fatalf("failed to load workspace state: %v", err)
+	}
+	if loaded.CurrentDir != "/users/guest/documents" {
+		t.Fatalf("loaded cwd = %q, want /users/guest/documents", loaded.CurrentDir)
+	}
+	if loaded.ActiveView != "tasks" {
+		t.Fatalf("loaded active view = %q, want tasks", loaded.ActiveView)
+	}
+	if len(loaded.History) == 0 {
+		t.Fatal("loaded history is empty")
+	}
+
+	// Test history clear
+	if err := ws2.ClearHistory(); err != nil {
+		t.Fatal(err)
+	}
+	if len(ws2.Get().History) != 0 {
+		t.Fatalf("history not empty after clear: %+v", ws2.Get().History)
+	}
+}
+
+func TestWorkspaceCorruptedFileRecovery(t *testing.T) {
+	memFS := vfs.NewMem()
+	_ = memFS.MkdirAll("users/guest/config")
+	// Write partial/corrupted JSON
+	if err := memFS.WriteFile("users/guest/config/workspace.json", []byte("{not valid json..."), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ws := NewWorkspaceStore(memFS, "/users/guest/config/workspace.json")
+	st, err := ws.Load()
+	if err == nil {
+		t.Fatal("expected error on corrupted json load, got nil")
+	}
+	// Must still return valid fallback default state without panic
+	if st == nil {
+		t.Fatal("expected non-nil default state on corrupt load")
+	}
+	if st.CurrentDir != "/users/guest" {
+		t.Fatalf("fallback cwd = %q, want /users/guest", st.CurrentDir)
+	}
+	if st.ActiveView != "prompt" {
+		t.Fatalf("fallback active view = %q, want prompt", st.ActiveView)
+	}
+
+	// Saving new state must overwrite cleanly
+	if err := ws.SetCurrentDir("/users/guest/safe"); err != nil {
+		t.Fatalf("failed to save after corruption: %v", err)
+	}
+	wsRecovered := NewWorkspaceStore(memFS, "/users/guest/config/workspace.json")
+	rec, err := wsRecovered.Load()
+	if err != nil {
+		t.Fatalf("failed to load recovered state: %v", err)
+	}
+	if rec.CurrentDir != "/users/guest/safe" {
+		t.Fatalf("recovered cwd = %q, want /users/guest/safe", rec.CurrentDir)
 	}
 }

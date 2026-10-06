@@ -153,6 +153,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 
 	rt.Procs = process.NewManager(rt.Bus, log)
 	rt.Sessions = session.NewManager(rt.Bus, log)
+	rt.Sessions.SetVFS(rt.VFS)
 
 	registry := app.NewRegistry()
 	if err := apps.Register(registry); err != nil {
@@ -221,6 +222,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		services.NewConfig(),
 		services.NewClipboard(),
 		services.NewNet(),
+		services.NewSession(),
 	} {
 		if err := sm.Register(s); err != nil {
 			logFile.Close()

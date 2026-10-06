@@ -277,6 +277,26 @@ and Settings application (`com.gostalgia.settings`):
 - **Configurable Startup View**: The shell reads `startup.view` to determine whether to
   land on Home dashboard, Prompt, App Launcher, Task Manager, or Notifications on boot.
 
+### Detachable Shells, Session Attachment & Workspace State Sync
+
+The Charm shell supports both owned (in-process boot) and attached (connected to a running runtime) modes:
+- **Attached Shell Client**: `gostalgia attach` and `gostalgia shell --attach` attach to an existing
+  running Gostalgia runtime without booting a new instance or claiming runtime ownership.
+- **Clean Detachment (`detach`)**: Running `detach` cleanly detaches the shell, closes the client
+  connection, and restores the terminal, while leaving the background runtime, services, and hosted
+  processes running uninterrupted. Attempting `detach` in an owned shell reports that the runtime is running
+  in-process and suggests `gostalgia boot` for a detachable headless runtime.
+- **Session & Attachment Inspection (`session`)**: Running `session` displays current session details,
+  including user identity, start timestamp, active status, and all currently attached clients.
+- **Workspace State Persistence & History Commands (`history`)**: The shell automatically synchronizes
+  its working directory, active view, and command history with the session workspace store
+  (`/users/guest/config/workspace.json`). Running `history` lists sanitized command history; `history clear`
+  wipes history from memory and disk. Sensitive tokens, passwords, and auth commands are automatically redacted
+  or omitted before disk persistence.
+- **Visual Attachment Indicators**: Attached shells display a distinct `ATTACHED` badge in the header
+  bar and adjust keybinding help hints to `Ctrl-C: DETACH`. Exiting via `exit`, `quit`, or `Ctrl-C` / `Ctrl-D`
+  detaches cleanly without stopping the headless environment.
+
 ## Layout and external text
 
 All sizes are terminal **cells**, not byte/rune counts. The kit uses Charm's ANSI
