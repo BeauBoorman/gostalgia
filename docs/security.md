@@ -103,38 +103,77 @@ server verifies tokens using `internal/security.TokenStore`:
 - **Child environment scrubbing:** `process.CleanEnv` prevents child processes
   from inheriting host environment secrets or tokens.
 
+### Platform-specific app execution and sandbox policies
+
+External applications declare an `isolation` level in their manifest (`sdk.Manifest`):
+
+- `inproc`: Compiled into the runtime and executed in-process. Manifest validation
+  forbids `inproc` applications from requesting `sandbox` or `strict` isolation.
+- `trusted`: Spawned out-of-process as a supervised host child process with
+  environment sanitization (`process.CleanEnv`) and process group management, but
+  without host sandbox restrictions.
+- `sandbox`: Spawned out-of-process under platform OS sandbox confinement:
+  - **Linux:** Uses kernel namespaces (`CLONE_NEWUSER | CLONE_NEWNET`) to block
+    host network egress without requiring root or setuid helpers, and enforces
+    resource ceilings (`RLIMIT_AS`, `RLIMIT_NOFILE`, `RLIMIT_CPU`) via `prlimit64`.
+  - **macOS:** Generates dynamic Apple Seatbelt profiles executed via
+    `/usr/bin/sandbox-exec` to deny network egress and restrict filesystem access.
+- `strict`: Enforces maximal containment:
+  - Network egress denied at the kernel level.
+  - Descendant process execution denied (on macOS via Seatbelt `(deny process-fork)`,
+    on Linux via real-time process supervision and immediate termination).
+  - Virtual memory space capped (2 GB virtual address space for 64-bit runtime).
+  - Maximum open file descriptors capped (512).
+  - Read-only host filesystem enforcement.
+
+#### Fail-closed execution guarantee
+
+If an application requests `sandbox` or `strict` isolation on an unsupported host
+(such as Windows, generic Unix, or Linux without unprivileged user namespaces enabled),
+or if sandbox configuration fails, the runtime **fails closed** with
+`ErrSandboxUnsupported`. The runtime **never silently degrades** to trusted or
+in-process execution.
+
+#### Host security capabilities & diagnostics
+
+`platform.GetHostSecurityCapabilities()` probes live host enforcement mechanisms:
+- `sys/status` exposes the `security` capabilities block and live process isolation levels.
+- `proc/info` and `proc/list` report the effective `isolation` level and active
+  `policy` parameters for every process.
+- Process termination (`platform.KillProcessTree`) kills the entire process group
+  (`SIGKILL` to `-pid`), ensuring no orphan descendant processes can escape.
+
 ## Isolation levels — honest labels
 
 | Level | Status |
 |---|---|
 | Logical isolation (namespaces, capabilities, scoped storage) | **current** (SDK adapters enforce manifest grants; app-private storage and scoped VFS grants enforced in `internal/vfs` and `internal/services`) |
-| Process isolation (child processes for apps) | **in progress** (distinct authenticated app identities and lifecycle revocation implemented in [#35](https://github.com/drawmeanelephant/gostalgia/issues/35); external app lifecycle tracked in [#36](https://github.com/drawmeanelephant/gostalgia/issues/36)) |
-| OS sandboxing (job objects, sandbox profiles, landlock, seccomp) | not started (tracked in [#38](https://github.com/drawmeanelephant/gostalgia/issues/38)) |
+| Process isolation (child processes for apps) | **current** (supervised out-of-process child execution over dedicated IPC sockets with token binding and revocation; [#36](https://github.com/drawmeanelephant/gostalgia/issues/36)) |
+| OS sandboxing (namespaces, Seatbelt, prlimit64, fail-closed) | **current** (enforced on Linux and macOS; fail-closed on Windows and unsupported hosts; [#38](https://github.com/drawmeanelephant/gostalgia/issues/38)) |
 | Host / kernel isolation | out of scope for the host runtime; separate VirelaiOS bring-up is tracked independently by the owner and not claimed here |
 
 ## What is NOT protected
 
-- **No OS sandbox.** A local attacker who can read `<root>/runtime.json` can
+- **Operator token exposure:** A local attacker who can read `<root>/runtime.json` can
   fully control the environment. The operator token is local authentication
   convenience (prevents accidental cross-user access), not a security boundary.
 - **In-process memory sharing:** `inproc` applications share the runtime's
   address space. While SDK adapters enforce capability checks logically, a
-  malicious or buggy app could bypass checks in memory. Do not run untrusted
-  applications. Arbitrary external apps remain trusted-only until platform
-  sandbox enforcement is implemented.
-- **Host syscall boundary:** App-private storage (`/apps/data/<app_id>`) and
-  path-scoped VFS grants are enforced at the service and VFS layers. However,
-  direct host syscalls from in-process code or un-sandboxed child processes
-  remain outside this logical boundary until OS sandbox enforcement
-  ([#38](https://github.com/drawmeanelephant/gostalgia/issues/38)).
+  malicious or buggy in-proc app could bypass checks in memory. Do not run
+  untrusted applications in-process. Untrusted applications should use `sandbox`
+  or `strict` mode.
+- **Windows host sandboxing:** Windows does not support native unprivileged
+  sandboxing without hypervisor containers. As a result, requesting `sandbox` or
+  `strict` isolation on Windows fails closed. External apps on Windows may only
+  run under `trusted` isolation.
 
 ## Roadmap
 
 Application isolation and trust is organized under Milestone 4:
 - Distinct authenticated app identities and scoped credentials ([#35](https://github.com/drawmeanelephant/gostalgia/issues/35) — implemented).
-- External Go application lifecycle over the environment protocol ([#36](https://github.com/drawmeanelephant/gostalgia/issues/36)).
+- External Go application lifecycle over the environment protocol ([#36](https://github.com/drawmeanelephant/gostalgia/issues/36) — implemented).
 - App-private storage and scoped VFS grants ([#37](https://github.com/drawmeanelephant/gostalgia/issues/37) — implemented).
-- Platform-specific app execution and resource policies on macOS/Linux ([#38](https://github.com/drawmeanelephant/gostalgia/issues/38)).
+- Platform-specific app execution and resource policies on macOS/Linux ([#38](https://github.com/drawmeanelephant/gostalgia/issues/38) — implemented).
 - Adversarial isolation tests, IPC fuzzing, and threat model ([#39](https://github.com/drawmeanelephant/gostalgia/issues/39)).
 
 Capabilities will only be claimed secure when backed by an enforcement

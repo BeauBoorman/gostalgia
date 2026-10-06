@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -433,7 +434,13 @@ func (m *Manager) launchInProc(ctx context.Context, man Manifest) (*process.Proc
 
 	registered = true
 	ready := make(chan struct{})
-	proc, err := m.procs.StartInProc(life, process.Spec{Name: id, Caps: caps}, func(p *process.Process) (runErr error) {
+	proc, err := m.procs.StartInProc(life, process.Spec{
+		Name: id,
+		Caps: caps,
+		Policy: platform.ExecutionPolicy{
+			Isolation: platform.IsolationInProc,
+		},
+	}, func(p *process.Process) (runErr error) {
 		<-ready
 		defer func() {
 			ra.cleanupErr = cleanup()
@@ -543,11 +550,24 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest) (*process.Pr
 			execPath += ".exe"
 		}
 	}
+	policy, pErr := platform.PolicyForIsolation(man.EffectiveIsolation())
+	if pErr != nil {
+		if m.tokens != nil && appToken != "" {
+			m.tokens.Revoke(appToken)
+		}
+		_ = ln.Close()
+		platform.RemoveChildSocket(endpoint)
+		cancel()
+		forget()
+		return nil, fmt.Errorf("app: resolve isolation for %s: %w", man.ID, pErr)
+	}
+
 	spec := process.Spec{
-		Name: man.ID,
-		Args: append([]string{execPath}, childArgs...),
-		Caps: caps,
-		Env:  childEnv,
+		Name:   man.ID,
+		Args:   append([]string{execPath}, childArgs...),
+		Caps:   caps,
+		Env:    childEnv,
+		Policy: policy,
 	}
 
 	proc, err := m.procs.StartChild(life, spec)
@@ -600,7 +620,12 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest) (*process.Pr
 		cancel()
 		forget()
 		info := proc.Info()
-		return nil, fmt.Errorf("app: %s exited before connecting: %s", man.ID, info.Err)
+		logs, _ := m.procs.Logs(proc.ID())
+		detail := info.Err
+		if logs.Stderr.Content != "" {
+			detail += fmt.Sprintf(" (stderr: %s)", strings.TrimSpace(logs.Stderr.Content))
+		}
+		return nil, fmt.Errorf("app: %s exited before connecting: %s", man.ID, detail)
 	case res := <-acceptCh:
 		if res.err != nil {
 			_ = ln.Close()
