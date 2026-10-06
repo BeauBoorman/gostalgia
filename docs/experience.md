@@ -137,9 +137,11 @@ GOOS=darwin go build ./...
 
 Checked-in goldens cover the component vocabulary, focus and all named states,
 custom tokens, both palettes, and all three explicit color modes. ANSI snapshots
-spell escapes as `\x1b` for readable diffs. Shell goldens cover home, populated
-shelf, empty shelf, busy, and error views. Snapshot comparisons ignore trailing
-spaces; separate unit tests check exact rectangular cell dimensions.
+spell escapes as `\x1b` for readable diffs. `.gitattributes` preserves LF endings
+in golden fixtures, including Windows checkouts with `core.autocrlf=true`.
+Shell goldens cover home, populated shelf, empty shelf, busy, and error views.
+Snapshot comparisons ignore trailing spaces; separate unit tests check exact
+rectangular cell dimensions.
 
 Other tests cover clipping/wrapping, combining/CJK/emoji text, narrow action/tab
 visibility, progress clamping, control filtering, host-environment independence,
