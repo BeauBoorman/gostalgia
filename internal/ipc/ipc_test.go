@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -451,9 +452,8 @@ func TestClientCancelWithoutDeadlineAbortsCall(t *testing.T) {
 		t.Fatalf("cancellation not honored: call took %s", elapsed)
 	}
 
-	// The aborted call leaves the stream framing unverifiable: the next
-	// call must fail fast instead of hanging on a desynchronized line.
-	if err := client.Call(context.Background(), "test/slow", nil, nil); err == nil {
-		t.Fatal("call on aborted client succeeded, want a broken-connection error")
+	// IDs keep late responses from an aborted call out of other calls.
+	if err := client.Call(context.Background(), "missing", nil, nil); err == nil || !strings.Contains(err.Error(), "unknown method") {
+		t.Fatalf("call after cancellation = %v, want a routed response", err)
 	}
 }

@@ -2,13 +2,15 @@
 // is a value implementing Event; publishers attach a source; subscribers
 // receive envelopes. Handlers run synchronously in the publisher's
 // goroutine: delivery is ordered and deterministic, and the bus does no
-// buffering. Handlers must be fast and should not panic; slow consumers
-// should move work to their own goroutine. A panicking handler is
+// buffering for those handlers. SubscribeBuffered provides nonblocking,
+// bounded metadata delivery for remote consumers. Handlers must be fast
+// and should not panic. A panicking handler is
 // contained by the bus and logged with its topic — one bad subscriber
 // cannot take down the publisher or the runtime.
 package events
 
 import (
+	"crypto/rand"
 	"log/slog"
 	"sort"
 	"sync"
@@ -41,11 +43,15 @@ type subscription struct {
 
 // Bus is the environment event bus.
 type Bus struct {
-	mu     sync.RWMutex
-	seq    uint64
-	subSeq uint64
-	topics map[string][]subscription
-	log    *slog.Logger // reports subscriber panics; never nil
+	mu      sync.RWMutex
+	seq     uint64
+	subSeq  uint64
+	topics  map[string][]subscription
+	log     *slog.Logger // reports subscriber panics; never nil
+	recent  []Record
+	head    int
+	streams map[uint64]*Subscription
+	epoch   string
 }
 
 func NewBus() *Bus { return NewBusWithLogger(nil) }
@@ -56,7 +62,11 @@ func NewBusWithLogger(log *slog.Logger) *Bus {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Bus{topics: make(map[string][]subscription), log: log}
+	return &Bus{
+		topics: make(map[string][]subscription), log: log,
+		recent: make([]Record, 0, HistoryLimit), streams: make(map[uint64]*Subscription),
+		epoch: rand.Text(),
+	}
 }
 
 // Publish delivers ev to all current subscribers of ev.Type() and "*".
@@ -67,14 +77,27 @@ func (b *Bus) Publish(source string, ev Event) {
 	if ev == nil || source == "" {
 		return
 	}
+	topic := ev.Type()
 	b.mu.Lock()
 	b.seq++
 	env := Envelope{
 		ID:      b.seq,
-		Type:    ev.Type(),
+		Type:    topic,
 		Source:  source,
 		Time:    time.Now(),
 		Payload: ev,
+	}
+	record := Record{ID: env.ID, Type: identifier(topic), Source: identifier(source), Time: env.Time}
+	if len(b.recent) < HistoryLimit {
+		b.recent = append(b.recent, record)
+	} else {
+		b.recent[b.head] = record
+		b.head = (b.head + 1) % HistoryLimit
+	}
+	for _, sub := range b.streams {
+		if sub.topic == "*" || sub.topic == record.Type {
+			sub.enqueue(record)
+		}
 	}
 	targets := make([]Handler, 0, len(b.topics[env.Type])+len(b.topics["*"]))
 	for _, sub := range b.topics["*"] {
@@ -124,6 +147,9 @@ func (b *Bus) Subscribe(topic string, h Handler) (cancel func()) {
 		for i, sub := range subs {
 			if sub.id == id {
 				b.topics[topic] = append(subs[:i], subs[i+1:]...)
+				if len(b.topics[topic]) == 0 {
+					delete(b.topics, topic)
+				}
 				break
 			}
 		}

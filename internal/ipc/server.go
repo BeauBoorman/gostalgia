@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -10,12 +11,19 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
+	"gostalgia/internal/events"
 	"gostalgia/internal/security"
 )
 
 // maxLine bounds one protocol line (request or response).
 const maxLine = 4 << 20 // 4 MiB
+
+const (
+	maxInFlight  = 32
+	writeTimeout = 5 * time.Second
+)
 
 // Server serves the router over a local listener. Every connection must
 // authenticate with the environment token before any other method is
@@ -27,13 +35,18 @@ type Server struct {
 	token  string
 	log    *slog.Logger
 
-	mu    sync.Mutex
-	conns map[net.Conn]struct{}
-	wg    sync.WaitGroup
-	done  chan struct{}
+	mu        sync.Mutex
+	conns     map[net.Conn]struct{}
+	wg        sync.WaitGroup
+	done      chan struct{}
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func NewServer(ln net.Listener, router *Router, token string, log *slog.Logger) *Server {
+	if log == nil {
+		log = slog.Default()
+	}
 	return &Server{
 		ln:     ln,
 		router: router,
@@ -81,20 +94,17 @@ func (s *Server) Serve() error {
 // idle ones — shutdown must never hang on a connected client, and it
 // never waits on a connection it did not close itself.
 func (s *Server) Close() error {
-	select {
-	case <-s.done:
-		return nil
-	default:
+	s.closeOnce.Do(func() {
 		close(s.done)
-	}
-	err := s.ln.Close()
-	s.mu.Lock()
-	for conn := range s.conns {
-		conn.Close()
-	}
-	s.mu.Unlock()
-	s.wg.Wait()
-	return err
+		s.closeErr = s.ln.Close()
+		s.mu.Lock()
+		for conn := range s.conns {
+			conn.Close()
+		}
+		s.mu.Unlock()
+		s.wg.Wait()
+	})
+	return s.closeErr
 }
 
 func (s *Server) untrack(conn net.Conn) {
@@ -112,8 +122,10 @@ func (s *Server) handleConn(conn net.Conn) {
 	defer cancel()
 
 	r := bufio.NewScanner(conn)
+	r.Split(scanNDJSON)
 	r.Buffer(make([]byte, 64*1024), maxLine)
 	w := bufio.NewWriter(conn)
+	_ = conn.SetDeadline(time.Now().Add(writeTimeout))
 
 	// Handshake: the first request must be auth.
 	req, err := readRequest(r)
@@ -139,17 +151,104 @@ func (s *Server) handleConn(conn net.Conn) {
 	if err := writeResponse(w, Response{ID: req.ID, OK: true}); err != nil {
 		return
 	}
+	_ = conn.SetDeadline(time.Time{})
 
 	authCtx := WithCapabilities(ctx, security.AdminCapabilities())
+	stream := &eventStream{}
+	defer stream.close()
+	authCtx = context.WithValue(authCtx, streamKey{}, stream)
+	responses := make(chan Response, maxInFlight)
+	var flightMu sync.Mutex
+	active := make(map[int64]string)
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		defer cancel()
+		defer conn.Close()
+		var sub *events.Subscription
+		for {
+			if sub != nil && stream.current() != sub {
+				sub = nil
+			}
+			var queue <-chan events.Delivery
+			if sub != nil {
+				queue = sub.Events
+			}
+			var resp Response
+			var delivery events.Delivery
+			isResponse := false
+			// Replies have priority over queued notifications. Only this
+			// goroutine writes, so lines cannot interleave.
+			select {
+			case resp = <-responses:
+				isResponse = true
+			default:
+				select {
+				case <-ctx.Done():
+					return
+				case resp = <-responses:
+					isResponse = true
+				case item, ok := <-queue:
+					if !ok {
+						sub = nil
+						continue
+					}
+					delivery = item
+				}
+			}
+			_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if isResponse {
+				flightMu.Lock()
+				method := active[resp.ID]
+				delete(active, resp.ID)
+				flightMu.Unlock()
+				if err := writeResponse(w, resp); err != nil {
+					return
+				}
+				// Activate delivery only after the subscribe acknowledgement.
+				var info SubscriptionInfo
+				if method == SubscribeMethod && resp.OK && json.Unmarshal(resp.Data, &info) == nil && info.Subscription != 0 {
+					current := stream.current()
+					if current != nil && current.ID == info.Subscription {
+						sub = current
+					}
+				}
+			} else if stream.current() == sub {
+				if err := writeFrame(w, Notification{
+					Kind: "event", Version: 1, Subscription: sub.ID,
+					Event: delivery.Event, Dropped: delivery.Dropped,
+				}); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	defer func() {
+		cancel()
+		conn.Close()
+		<-writerDone
+	}()
 	for {
 		req, err := readRequest(r)
 		if err != nil {
 			return
 		}
-		resp := s.router.Dispatch(authCtx, req)
-		if err := writeResponse(w, resp); err != nil {
+		flightMu.Lock()
+		if active[req.ID] != "" || len(active) >= maxInFlight {
+			flightMu.Unlock()
+			// Duplicate IDs and floods are protocol violations. Closing
+			// bounds goroutines, response memory and work per connection.
 			return
 		}
+		active[req.ID] = req.Method
+		flightMu.Unlock()
+		go func(req Request) {
+			resp := s.router.Dispatch(authCtx, req)
+			select {
+			case responses <- resp:
+			case <-ctx.Done():
+			}
+		}(req)
 	}
 }
 
@@ -165,13 +264,38 @@ func readRequest(r *bufio.Scanner) (Request, error) {
 	if err := json.Unmarshal(r.Bytes(), &req); err != nil {
 		return Request{}, fmt.Errorf("ipc: bad request: %w", err)
 	}
+	if req.ID <= 0 || req.Method == "" {
+		return Request{}, errors.New("ipc: request requires a positive id and method")
+	}
 	return req, nil
 }
 
+// Unlike ScanLines, a partial final frame is not accepted at EOF.
+func scanNDJSON(data []byte, atEOF bool) (int, []byte, error) {
+	if i := bytes.IndexByte(data, '\n'); i >= 0 {
+		return i + 1, bytes.TrimSuffix(data[:i], []byte{'\r'}), nil
+	}
+	if atEOF && len(data) > 0 {
+		return 0, nil, errors.New("ipc: truncated frame")
+	}
+	return 0, nil, nil
+}
+
 func writeResponse(w *bufio.Writer, resp Response) error {
-	b, err := json.Marshal(resp)
+	return writeFrame(w, resp)
+}
+
+func writeFrame(w *bufio.Writer, frame any) error {
+	b, err := json.Marshal(frame)
 	if err != nil {
-		b, _ = json.Marshal(Response{ID: resp.ID, Error: "response encoding failed"})
+		return err
+	}
+	if len(b)+1 >= maxLine {
+		if resp, ok := frame.(Response); ok {
+			b, _ = json.Marshal(Response{ID: resp.ID, Error: "ipc: response exceeds frame limit"})
+		} else {
+			return errors.New("ipc: frame exceeds limit")
+		}
 	}
 	if _, err := w.Write(b); err != nil {
 		return err

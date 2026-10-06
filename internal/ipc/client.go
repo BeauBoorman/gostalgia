@@ -9,148 +9,331 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"gostalgia/internal/events"
 )
 
-// defaultCallTimeout applies when the caller passes no deadline.
 const defaultCallTimeout = 30 * time.Second
 
-// Client is an authenticated IPC client over one connection. Calls are
-// serialized (one outstanding request per client); multiplexing is future
-// work. Safe for concurrent use.
-//
-// A call aborted by its context — cancellation or deadline — gives up
-// mid-protocol: the response may still arrive later, so the framing can
-// no longer be trusted and the client marks itself broken. Further calls
-// fail immediately; use a fresh client.
-type Client struct {
-	conn net.Conn
-	r    *bufio.Scanner
-	w    *bufio.Writer
-
-	mu     sync.Mutex
-	nextID int64
-	broken bool
+type callResult struct {
+	response Response
+	sub      *ClientSubscription
+	err      error
 }
 
-// NewClient authenticates a fresh connection with token and returns a
-// ready client. Callers dial via platform.DialIPC.
+type pendingCall struct {
+	result chan callResult
+	method string
+	buffer int
+}
+
+type clientWrite struct {
+	request Request
+	ctx     context.Context
+}
+
+// Client multiplexes calls by ID. One reader demultiplexes responses/events
+// and one writer owns framing. Neither waits for an event consumer.
+type Client struct {
+	conn        net.Conn
+	mu          sync.Mutex
+	nextID      int64
+	pending     map[int64]*pendingCall
+	err         error
+	done        chan struct{}
+	writes      chan clientWrite
+	wg          sync.WaitGroup
+	sub         *ClientSubscription
+	subscribing bool
+}
+
 func NewClient(conn net.Conn, token string) (*Client, error) {
 	c := &Client{
-		conn: conn,
-		r:    bufio.NewScanner(conn),
-		w:    bufio.NewWriter(conn),
+		conn: conn, pending: make(map[int64]*pendingCall),
+		done: make(chan struct{}), writes: make(chan clientWrite, maxInFlight),
 	}
-	c.r.Buffer(make([]byte, 64*1024), maxLine)
-	err := c.call(context.Background(), "auth", map[string]string{"token": token}, nil)
-	if err != nil {
-		conn.Close()
+	c.wg.Add(2)
+	go c.readLoop()
+	go c.writeLoop()
+	if _, err := c.call(context.Background(), "auth", map[string]string{"token": token}, nil, 0); err != nil {
+		c.Close()
 		return nil, fmt.Errorf("ipc: auth failed: %w", err)
 	}
 	return c, nil
 }
 
-// Call invokes method with params (nil for none) and, if out is
-// non-nil, decodes the response data into it.
+// Call honors context cancellation, including while queued. A canceled call
+// does not invalidate other calls: late responses are discarded by ID.
 func (c *Client) Call(ctx context.Context, method string, params, out any) error {
-	return c.call(ctx, method, params, out)
+	if method == SubscribeMethod {
+		return errors.New("ipc: use Client.Subscribe for event delivery")
+	}
+	_, err := c.call(ctx, method, params, out, 0)
+	return err
 }
 
-func (c *Client) call(ctx context.Context, method string, params, out any) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.broken {
-		return errors.New("ipc: connection is unusable: an earlier call was aborted mid-protocol")
+func (c *Client) call(ctx context.Context, method string, params, out any, buffer int) (*ClientSubscription, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultCallTimeout)
+		defer cancel()
 	}
-	c.nextID++
-	id := c.nextID
-
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var raw json.RawMessage
 	if params != nil {
 		var err error
 		raw, err = Encode(params)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
-	req := Request{ID: id, Method: method, Params: raw}
-
-	timeout := defaultCallTimeout
-	if deadline, ok := ctx.Deadline(); ok {
-		timeout = time.Until(deadline)
+	c.mu.Lock()
+	if c.err != nil {
+		err := c.err
+		c.mu.Unlock()
+		return nil, err
 	}
-	if timeout <= 0 {
-		return errors.New("ipc: deadline exceeded before call")
+	if len(c.pending) >= maxInFlight {
+		c.mu.Unlock()
+		return nil, errors.New("ipc: too many outstanding calls")
 	}
-	_ = c.conn.SetDeadline(time.Now().Add(timeout))
-	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
-
-	// The context is honored even without a deadline: a watcher expires
-	// the connection deadline on cancellation, breaking the blocked
-	// write or read below promptly.
-	if done := ctx.Done(); done != nil {
-		watchStop := make(chan struct{})
-		watcherDone := make(chan struct{})
-		go func() {
-			defer close(watcherDone)
-			select {
-			case <-done:
-				_ = c.conn.SetDeadline(time.Now())
-			case <-watchStop:
+	c.nextID++
+	id := c.nextID
+	pending := &pendingCall{result: make(chan callResult, 1), method: method, buffer: buffer}
+	c.pending[id] = pending
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		delete(c.pending, id)
+		c.mu.Unlock()
+	}()
+	select {
+	case c.writes <- clientWrite{Request{ID: id, Method: method, Params: raw}, ctx}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.done:
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, errors.New("ipc: connection closed")
+	}
+	select {
+	case result := <-pending.result:
+		if result.err != nil {
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
-		}()
-		defer func() {
-			close(watchStop)
-			<-watcherDone
-		}()
+			return nil, result.err
+		}
+		if !result.response.OK {
+			return nil, errors.New(result.response.Error)
+		}
+		if out != nil && len(result.response.Data) > 0 {
+			if err := json.Unmarshal(result.response.Data, out); err != nil {
+				return nil, err
+			}
+		}
+		return result.sub, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
+}
 
-	b, err := json.Marshal(req)
-	if err != nil {
-		return err
+func (c *Client) writeLoop() {
+	defer c.wg.Done()
+	w := bufio.NewWriter(c.conn)
+	for {
+		var item clientWrite
+		select {
+		case <-c.done:
+			return
+		case item = <-c.writes:
+		}
+		if item.ctx.Err() != nil {
+			continue
+		}
+		deadline, _ := item.ctx.Deadline()
+		_ = c.conn.SetWriteDeadline(deadline)
+		fired := make(chan struct{})
+		stop := context.AfterFunc(item.ctx, func() {
+			_ = c.conn.SetWriteDeadline(time.Now())
+			close(fired)
+		})
+		err := writeFrame(w, item.request)
+		if !stop() {
+			<-fired
+		}
+		if err != nil {
+			// A partial write cannot be safely resumed as another frame.
+			c.fail(fmt.Errorf("ipc: write: %w", err))
+			return
+		}
 	}
-	if _, err := c.w.Write(b); err != nil {
-		return c.gaveUp(ctx, fmt.Errorf("ipc: write: %w", err))
-	}
-	if err := c.w.WriteByte('\n'); err != nil {
-		return c.gaveUp(ctx, fmt.Errorf("ipc: write: %w", err))
-	}
-	if err := c.w.Flush(); err != nil {
-		return c.gaveUp(ctx, fmt.Errorf("ipc: flush: %w", err))
-	}
+}
 
-	for c.r.Scan() {
+func (c *Client) readLoop() {
+	defer c.wg.Done()
+	r := bufio.NewScanner(c.conn)
+	r.Split(scanNDJSON)
+	r.Buffer(make([]byte, 64*1024), maxLine)
+	for r.Scan() {
+		var frame struct {
+			Kind string `json:"kind"`
+			ID   *int64 `json:"id"`
+			OK   *bool  `json:"ok"`
+		}
+		if err := json.Unmarshal(r.Bytes(), &frame); err != nil {
+			c.fail(fmt.Errorf("ipc: bad frame: %w", err))
+			return
+		}
+		if frame.Kind != "" {
+			var n Notification
+			if err := json.Unmarshal(r.Bytes(), &n); err != nil || frame.Kind != "event" ||
+				n.Version != 1 || n.Subscription == 0 || n.Event.ID == 0 || frame.ID != nil {
+				c.fail(errors.New("ipc: malformed event frame"))
+				return
+			}
+			c.mu.Lock()
+			if sub := c.sub; sub != nil && sub.Info.Subscription == n.Subscription {
+				if n.Event.ID <= sub.lastID {
+					c.mu.Unlock()
+					c.fail(errors.New("ipc: out-of-order event frame"))
+					return
+				}
+				sub.lastID = n.Event.ID
+				sub.enqueue(n)
+			}
+			c.mu.Unlock()
+			continue
+		}
+		if frame.ID == nil || *frame.ID <= 0 || frame.OK == nil {
+			c.fail(errors.New("ipc: malformed response frame"))
+			return
+		}
 		var resp Response
-		if err := json.Unmarshal(c.r.Bytes(), &resp); err != nil {
-			return c.gaveUp(ctx, fmt.Errorf("ipc: bad response: %w", err))
+		if err := json.Unmarshal(r.Bytes(), &resp); err != nil {
+			c.fail(fmt.Errorf("ipc: bad response: %w", err))
+			return
 		}
-		if resp.ID != id {
-			continue // unsolicited line; ignore for now
+		c.mu.Lock()
+		pending := c.pending[resp.ID]
+		if pending == nil {
+			c.mu.Unlock()
+			continue // a canceled call's late response
 		}
-		if !resp.OK {
-			return errors.New(resp.Error)
+		result := callResult{response: resp}
+		if resp.OK && pending.method == SubscribeMethod {
+			var info SubscriptionInfo
+			if err := json.Unmarshal(resp.Data, &info); err != nil || info.Subscription == 0 || c.sub != nil {
+				c.mu.Unlock()
+				c.fail(errors.New("ipc: malformed subscribe acknowledgement"))
+				return
+			}
+			q := make(chan Notification, pending.buffer)
+			c.sub = &ClientSubscription{Info: info, Events: q, queue: q, client: c}
+			result.sub = c.sub
+		} else if resp.OK && pending.method == UnsubscribeMethod && c.sub != nil {
+			close(c.sub.queue)
+			c.sub = nil
 		}
-		if out != nil && len(resp.Data) > 0 {
-			return json.Unmarshal(resp.Data, out)
-		}
-		return nil
+		delete(c.pending, resp.ID)
+		pending.result <- result
+		c.mu.Unlock()
 	}
-	err = c.r.Err()
+	err := r.Err()
 	if err == nil {
 		err = errors.New("connection closed")
 	}
-	return c.gaveUp(ctx, fmt.Errorf("ipc: read: %w", err))
+	c.fail(fmt.Errorf("ipc: read: %w", err))
 }
 
-// gaveUp reports err, or — when the call failed because the caller's
-// context gave up — the context error, after marking the client broken.
-func (c *Client) gaveUp(ctx context.Context, err error) error {
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		c.broken = true
-		_ = c.conn.Close()
-		return fmt.Errorf("ipc: call aborted: %w", ctxErr)
+func (c *Client) fail(err error) {
+	c.mu.Lock()
+	if c.err != nil {
+		c.mu.Unlock()
+		return
+	}
+	c.err = err
+	close(c.done)
+	for id, pending := range c.pending {
+		pending.result <- callResult{err: err}
+		delete(c.pending, id)
+	}
+	if c.sub != nil {
+		close(c.sub.queue)
+		c.sub = nil
+	}
+	c.mu.Unlock()
+	c.conn.Close()
+}
+
+func (c *Client) Close() error {
+	c.fail(errors.New("ipc: client closed"))
+	c.wg.Wait()
+	return nil
+}
+
+// ClientSubscription is connection-scoped and bounded. Info describes the
+// initial cursor/replay status. Events reports total server + local drops.
+// A closed Events channel means unsubscribe/disconnect, not a clean replay.
+type ClientSubscription struct {
+	Info    SubscriptionInfo
+	Events  <-chan Notification
+	client  *Client
+	queue   chan Notification
+	dropped uint64
+	lastID  uint64
+}
+
+func (s *ClientSubscription) enqueue(n Notification) {
+	n.Dropped += s.dropped
+	select {
+	case s.queue <- n:
+		return
+	default:
+	}
+	select {
+	case <-s.queue:
+		s.dropped++
+		n.Dropped++
+	default:
+	}
+	s.queue <- n
+}
+
+func (c *Client) Subscribe(ctx context.Context, p SubscribeParams) (*ClientSubscription, error) {
+	buffer := p.Buffer
+	if buffer == 0 {
+		buffer = events.DefaultBuffer
+	}
+	if buffer < 1 || buffer > events.BufferLimit {
+		return nil, fmt.Errorf("ipc: buffer must be 1..%d", events.BufferLimit)
+	}
+	c.mu.Lock()
+	if c.sub != nil || c.subscribing {
+		c.mu.Unlock()
+		return nil, errors.New("ipc: connection already has a subscription")
+	}
+	c.subscribing = true
+	c.mu.Unlock()
+	sub, err := c.call(ctx, SubscribeMethod, p, nil, buffer)
+	c.mu.Lock()
+	c.subscribing = false
+	c.mu.Unlock()
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		// The server may have subscribed before cancellation. Disconnect
+		// rather than leaving an unowned subscription on this connection.
+		c.Close()
+	}
+	return sub, err
+}
+
+func (s *ClientSubscription) Close(ctx context.Context) error {
+	err := s.client.Call(ctx, UnsubscribeMethod, map[string]uint64{"subscription": s.Info.Subscription}, nil)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		s.client.Close()
 	}
 	return err
 }
-
-// Close closes the underlying connection.
-func (c *Client) Close() error { return c.conn.Close() }

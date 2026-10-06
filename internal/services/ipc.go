@@ -46,6 +46,15 @@ func (s *IPCService) Init(ctx *service.Context) error {
 }
 
 func (s *IPCService) Start(ctx context.Context) error {
+	if err := ipc.RegisterEvents(s.ctx.Router, s.ctx.Events); err != nil {
+		return err
+	}
+	started := false
+	defer func() {
+		if !started {
+			s.ctx.Router.UnhandlePrefix("events/v1/")
+		}
+	}()
 	ln, endpoint, err := platform.ListenIPC(s.ctx.Root)
 	if err != nil {
 		return err
@@ -77,6 +86,7 @@ func (s *IPCService) Start(ctx context.Context) error {
 		return err
 	}
 	s.log.Info("ipc listening", "endpoint", endpoint)
+	started = true
 	return nil
 }
 
@@ -89,6 +99,7 @@ func (s *IPCService) Stop(ctx context.Context) error {
 	if s.listener != nil {
 		s.listener.Close()
 	}
+	s.ctx.Router.UnhandlePrefix("events/v1/")
 	_ = os.Remove(s.runtimeFilePath())
 	s.log.Info("ipc stopped", "endpoint", s.endpoint)
 	return nil
