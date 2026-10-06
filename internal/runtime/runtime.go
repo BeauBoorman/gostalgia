@@ -173,6 +173,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		return nil, err
 	}
 	rt.Apps.SetTokenStore(tokens)
+	rt.Apps.SetGrantStore(rt.VFS.Grants())
 
 	svcCtx := &service.Context{
 		Root:     root,
@@ -279,6 +280,7 @@ func InitRoot(root string) error {
 		"/users/guest/config",
 		"/users/guest/.trash",
 		"/apps/manifests",
+		"/apps/data",
 		"/data",
 		"/mounts",
 	} {

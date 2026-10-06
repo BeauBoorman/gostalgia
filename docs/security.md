@@ -46,7 +46,39 @@ Permission tokens (`security.Capabilities`) travel with IPC call contexts:
   example, an app without `fs.write` or `shutdown` attempting those methods).
   Direct operator calls continue to pass because operators possess the `admin`
   set. See [applications.md](applications.md) for method schemas and the exact
-  capability table. Filesystem grants are currently service-wide, not per-path.
+  capability table.
+
+### App-private storage and scoped VFS grants
+
+Rather than allowing arbitrary open-ended access to the entire filesystem root,
+access is partitioned and scoped:
+
+- **Automatic app-private storage:** Each application is automatically allotted
+  an isolated private storage partition under `/apps/data/<app_id>`. Applications
+  have inherent read/write access to their own partition without requiring
+  global filesystem permissions. An application cannot enumerate, read, write,
+  stat, remove, rename, copy, or trash files belonging to another application's
+  private storage through any exposed `fs/*` method. Directory listings of
+  `/apps/data` present a principal-aware view displaying only the calling
+  application's partition.
+- **Scoped VFS grants:** Open-ended `fs.read`/`fs.write` access across the
+  shared filesystem is replaced by path-scoped capability grants managed by
+  `internal/vfs.GrantStore`. An operator issues grants via `fs/grant` specifying
+  the target application ID, environment path, access mode (`read` or `read-write`),
+  and whether descendants are included recursively.
+- **Confinement & escape prevention:** Grant expansion is strictly prevented.
+  Dot segments (`..`), host symlinks pointing outside the granted scope or into
+  another app's private partition, cross-mount renames, and copy/move trickery
+  fail closed with structured errors (`path_escape` or `permission_denied`).
+- **Immediate revocation & restart semantics:** Revoking a grant via
+  `fs/grant/revoke` invalidates the grant immediately; subsequent file operations
+  by the application fail with `permission_denied: grant revoked`. Grants are
+  scoped to `app_id`. Active grants persist across application process restarts
+  until explicitly revoked by an operator; revoked grants remain revoked across
+  restarts.
+- **Trash isolation:** The environment trash preserves isolation: applications
+  only view, restore, and empty trash entries originating from paths they are
+  authorized to access.
 
 ### Transport authentication and lifecycle revocation
 
@@ -72,7 +104,7 @@ server verifies tokens using `internal/security.TokenStore`:
 
 | Level | Status |
 |---|---|
-| Logical isolation (namespaces, capabilities in-process) | **current** (SDK adapters enforce manifest grants; confused-deputy protection in place) |
+| Logical isolation (namespaces, capabilities, scoped storage) | **current** (SDK adapters enforce manifest grants; app-private storage and scoped VFS grants enforced in `internal/vfs` and `internal/services`) |
 | Process isolation (child processes for apps) | **in progress** (distinct authenticated app identities and lifecycle revocation implemented in [#35](https://github.com/drawmeanelephant/gostalgia/issues/35); external app lifecycle tracked in [#36](https://github.com/drawmeanelephant/gostalgia/issues/36)) |
 | OS sandboxing (job objects, sandbox profiles, landlock, seccomp) | not started (tracked in [#38](https://github.com/drawmeanelephant/gostalgia/issues/38)) |
 | Host / kernel isolation | out of scope for the host runtime; separate VirelaiOS bring-up is tracked independently by the owner and not claimed here |
@@ -87,17 +119,18 @@ server verifies tokens using `internal/security.TokenStore`:
   malicious or buggy app could bypass checks in memory. Do not run untrusted
   applications. Arbitrary external apps remain trusted-only until platform
   sandbox enforcement is implemented.
-- **Shared filesystem root:** The VFS confines paths through `os.Root`
-  (symlink and `..` escapes fail closed), but all applications currently share
-  the environment root; scoped per-app private storage and per-document grants
-  are not yet implemented (tracked in [#37](https://github.com/drawmeanelephant/gostalgia/issues/37)).
+- **Host syscall boundary:** App-private storage (`/apps/data/<app_id>`) and
+  path-scoped VFS grants are enforced at the service and VFS layers. However,
+  direct host syscalls from in-process code or un-sandboxed child processes
+  remain outside this logical boundary until OS sandbox enforcement
+  ([#38](https://github.com/drawmeanelephant/gostalgia/issues/38)).
 
 ## Roadmap
 
 Application isolation and trust is organized under Milestone 4:
 - Distinct authenticated app identities and scoped credentials ([#35](https://github.com/drawmeanelephant/gostalgia/issues/35) — implemented).
 - External Go application lifecycle over the environment protocol ([#36](https://github.com/drawmeanelephant/gostalgia/issues/36)).
-- App-private storage and scoped VFS grants ([#37](https://github.com/drawmeanelephant/gostalgia/issues/37)).
+- App-private storage and scoped VFS grants ([#37](https://github.com/drawmeanelephant/gostalgia/issues/37) — implemented).
 - Platform-specific app execution and resource policies on macOS/Linux ([#38](https://github.com/drawmeanelephant/gostalgia/issues/38)).
 - Adversarial isolation tests, IPC fuzzing, and threat model ([#39](https://github.com/drawmeanelephant/gostalgia/issues/39)).
 

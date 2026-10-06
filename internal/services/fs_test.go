@@ -313,3 +313,233 @@ func TestFSSizeLimitsOverIPC(t *testing.T) {
 		t.Fatal("fs/save exceeding MaxIPCWriteLimit should fail")
 	}
 }
+
+func TestAppPrivateStorageIsolationOverIPC(t *testing.T) {
+	env := newTestEnv(t)
+	admin := security.AdminCapabilities()
+
+	appAPrincipal := security.Principal{Kind: security.PrincipalKindApp, AppID: "com.gostalgia.appA"}
+	appBPrincipal := security.Principal{Kind: security.PrincipalKindApp, AppID: "com.gostalgia.appB"}
+	appCaps := security.NewCapabilities(security.CapFileRead, security.CapFileWrite)
+
+	// App A writes a private file
+	payloadA := base64.StdEncoding.EncodeToString([]byte("appA secret data"))
+	resp := env.callAs(context.Background(), appAPrincipal, appCaps, "fs/write", map[string]any{
+		"path":        "/apps/data/com.gostalgia.appA/private.txt",
+		"data_base64": payloadA,
+	})
+	if !resp.OK {
+		t.Fatalf("appA write to private storage failed: %s", resp.Error)
+	}
+
+	// App A reads its own private file
+	resp = env.callAs(context.Background(), appAPrincipal, appCaps, "fs/read", map[string]any{
+		"path": "/apps/data/com.gostalgia.appA/private.txt",
+	})
+	if !resp.OK {
+		t.Fatalf("appA read own private file failed: %s", resp.Error)
+	}
+
+	// App B attempts to read App A's private file -> must fail
+	resp = env.callAs(context.Background(), appBPrincipal, appCaps, "fs/read", map[string]any{
+		"path": "/apps/data/com.gostalgia.appA/private.txt",
+	})
+	if resp.OK {
+		t.Fatal("appB read of appA private file should have failed")
+	}
+
+	// App B attempts to write to App A's private file -> must fail
+	resp = env.callAs(context.Background(), appBPrincipal, appCaps, "fs/write", map[string]any{
+		"path":        "/apps/data/com.gostalgia.appA/malicious.txt",
+		"data_base64": payloadA,
+	})
+	if resp.OK {
+		t.Fatal("appB write to appA private directory should have failed")
+	}
+
+	// App B attempts to remove App A's private file -> must fail
+	resp = env.callAs(context.Background(), appBPrincipal, appCaps, "fs/remove", map[string]any{
+		"path": "/apps/data/com.gostalgia.appA/private.txt",
+	})
+	if resp.OK {
+		t.Fatal("appB remove of appA private file should have failed")
+	}
+
+	// App B attempts to rename App A's file -> must fail
+	resp = env.callAs(context.Background(), appBPrincipal, appCaps, "fs/rename", map[string]any{
+		"src": "/apps/data/com.gostalgia.appA/private.txt",
+		"dst": "/apps/data/com.gostalgia.appB/stolen.txt",
+	})
+	if resp.OK {
+		t.Fatal("appB rename of appA private file should have failed")
+	}
+
+	// App B attempts to copy App A's file -> must fail
+	resp = env.callAs(context.Background(), appBPrincipal, appCaps, "fs/copy", map[string]any{
+		"src": "/apps/data/com.gostalgia.appA/private.txt",
+		"dst": "/apps/data/com.gostalgia.appB/copied.txt",
+	})
+	if resp.OK {
+		t.Fatal("appB copy of appA private file should have failed")
+	}
+
+	// App B attempts to list App A's private directory -> must fail
+	resp = env.callAs(context.Background(), appBPrincipal, appCaps, "fs/list", map[string]any{
+		"path": "/apps/data/com.gostalgia.appA",
+	})
+	if resp.OK {
+		t.Fatal("appB list of appA private directory should have failed")
+	}
+
+	// App B lists /apps/data -> must only see com.gostalgia.appB
+	must(t, env.ctx.VFS.MkdirAll("/apps/data/com.gostalgia.appB"))
+	resp = env.callAs(context.Background(), appBPrincipal, appCaps, "fs/list", map[string]any{
+		"path": "/apps/data",
+	})
+	if !resp.OK {
+		t.Fatalf("appB list /apps/data failed: %s", resp.Error)
+	}
+	var listOut struct {
+		Entries []struct {
+			Name string `json:"name"`
+		} `json:"entries"`
+	}
+	must(t, json.Unmarshal(resp.Data, &listOut))
+	for _, entry := range listOut.Entries {
+		if entry.Name == "com.gostalgia.appA" {
+			t.Fatal("appB should not see com.gostalgia.appA in /apps/data")
+		}
+	}
+
+	// Operator (admin) has full access
+	resp = env.call(context.Background(), admin, "fs/read", map[string]any{
+		"path": "/apps/data/com.gostalgia.appA/private.txt",
+	})
+	if !resp.OK {
+		t.Fatalf("admin read of appA private file failed: %s", resp.Error)
+	}
+}
+
+func TestScopedGrantsOverIPC(t *testing.T) {
+	env := newTestEnv(t)
+	admin := security.AdminCapabilities()
+
+	appAPrincipal := security.Principal{Kind: security.PrincipalKindApp, AppID: "com.gostalgia.appA"}
+	appBPrincipal := security.Principal{Kind: security.PrincipalKindApp, AppID: "com.gostalgia.appB"}
+	appCaps := security.NewCapabilities(security.CapFileRead, security.CapFileWrite)
+
+	// Create a shared document
+	docData := base64.StdEncoding.EncodeToString([]byte("public report"))
+	resp := env.call(context.Background(), admin, "fs/save", map[string]any{
+		"path":        "/users/guest/documents/report.txt",
+		"data_base64": docData,
+	})
+	if !resp.OK {
+		t.Fatalf("seed document failed: %s", resp.Error)
+	}
+
+	// App A initially cannot read it (no grant)
+	resp = env.callAs(context.Background(), appAPrincipal, appCaps, "fs/read", map[string]any{
+		"path": "/users/guest/documents/report.txt",
+	})
+	if resp.OK {
+		t.Fatal("appA read before grant should have failed")
+	}
+
+	// App A cannot issue a grant (requires CapAdmin)
+	resp = env.callAs(context.Background(), appAPrincipal, appCaps, "fs/grant", map[string]any{
+		"app_id": "com.gostalgia.appA",
+		"path":   "/users/guest/documents/report.txt",
+		"access": "read",
+	})
+	if resp.OK {
+		t.Fatal("appA issuing grant should have failed")
+	}
+
+	// Operator grants read-only access on the report to App A
+	resp = env.call(context.Background(), admin, "fs/grant", map[string]any{
+		"app_id": "com.gostalgia.appA",
+		"path":   "/users/guest/documents/report.txt",
+		"access": "read",
+	})
+	if !resp.OK {
+		t.Fatalf("admin issue grant failed: %s", resp.Error)
+	}
+	var grantOut struct {
+		Grant struct {
+			ID string `json:"id"`
+		} `json:"grant"`
+	}
+	must(t, json.Unmarshal(resp.Data, &grantOut))
+	grantID := grantOut.Grant.ID
+	if grantID == "" {
+		t.Fatal("expected non-empty grant id")
+	}
+
+	// App A can now read the document
+	resp = env.callAs(context.Background(), appAPrincipal, appCaps, "fs/read", map[string]any{
+		"path": "/users/guest/documents/report.txt",
+	})
+	if !resp.OK {
+		t.Fatalf("appA read after grant failed: %s", resp.Error)
+	}
+
+	// App A CANNOT write to the document (grant is read-only)
+	resp = env.callAs(context.Background(), appAPrincipal, appCaps, "fs/write", map[string]any{
+		"path":        "/users/guest/documents/report.txt",
+		"data_base64": base64.StdEncoding.EncodeToString([]byte("overwritten")),
+	})
+	if resp.OK {
+		t.Fatal("appA write to read-only grant should have failed")
+	}
+
+	// App B still cannot read the document
+	resp = env.callAs(context.Background(), appBPrincipal, appCaps, "fs/read", map[string]any{
+		"path": "/users/guest/documents/report.txt",
+	})
+	if resp.OK {
+		t.Fatal("appB read without grant should have failed")
+	}
+
+	// App A lists its grants
+	resp = env.callAs(context.Background(), appAPrincipal, appCaps, "fs/grant/list", nil)
+	if !resp.OK {
+		t.Fatalf("appA list grants failed: %s", resp.Error)
+	}
+	var listGrantsOut struct {
+		Grants []struct {
+			ID string `json:"id"`
+		} `json:"grants"`
+	}
+	must(t, json.Unmarshal(resp.Data, &listGrantsOut))
+	if len(listGrantsOut.Grants) != 1 || listGrantsOut.Grants[0].ID != grantID {
+		t.Fatalf("unexpected grant list for appA: %+v", listGrantsOut)
+	}
+
+	// App A cannot list App B's grants
+	resp = env.callAs(context.Background(), appAPrincipal, appCaps, "fs/grant/list", map[string]string{
+		"app_id": "com.gostalgia.appB",
+	})
+	if resp.OK {
+		t.Fatal("appA should not be allowed to list appB grants")
+	}
+
+	// Operator revokes the grant
+	resp = env.call(context.Background(), admin, "fs/grant/revoke", map[string]string{
+		"id": grantID,
+	})
+	if !resp.OK {
+		t.Fatalf("revoke grant failed: %s", resp.Error)
+	}
+
+	// App A subsequent read fails immediately with revoked error
+	resp = env.callAs(context.Background(), appAPrincipal, appCaps, "fs/read", map[string]any{
+		"path": "/users/guest/documents/report.txt",
+	})
+	if resp.OK {
+		t.Fatal("appA read after grant revocation should have failed")
+	}
+	if !strings.Contains(resp.Error, "revoked") {
+		t.Fatalf("expected error mentioning revoked, got: %s", resp.Error)
+	}
+}
