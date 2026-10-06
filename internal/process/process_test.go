@@ -909,3 +909,52 @@ func TestChildTreeCleanup(t *testing.T) {
 		t.Fatalf("grandchild %d was not killed by KillProcessTree", grandchildPID)
 	}
 }
+
+func TestChildSandboxPolicyApplied(t *testing.T) {
+	if testing.Short() {
+		t.Skip("child process test skipped in short mode")
+	}
+	caps := platform.GetHostSecurityCapabilities()
+	if !caps.Supported {
+		t.Skip("sandbox not supported on this platform")
+	}
+
+	m, _ := newTestManager(t)
+	policy, err := platform.PolicyForIsolation(platform.IsolationSandbox)
+	if err != nil {
+		t.Fatalf("PolicyForIsolation: %v", err)
+	}
+	p, err := m.StartChild(context.Background(), Spec{
+		Name:   "sandboxed-sleeper",
+		Args:   childHelperArgs(t),
+		Env:    childHelperEnv("1"),
+		Policy: policy,
+	})
+	if err != nil {
+		t.Fatalf("StartChild sandboxed: %v", err)
+	}
+	defer func() { _ = m.Stop(p.ID(), time.Second) }()
+
+	info := p.Info()
+	if info.Isolation != platform.IsolationSandbox {
+		t.Errorf("expected isolation %s, got %s", platform.IsolationSandbox, info.Isolation)
+	}
+	if info.Policy == nil || info.Policy.Isolation != platform.IsolationSandbox {
+		t.Errorf("expected info.Policy to reflect sandbox policy")
+	}
+}
+
+func TestChildSandboxPolicyFailClosed(t *testing.T) {
+	m, _ := newTestManager(t)
+	// Spec with an invalid isolation
+	_, err := m.StartChild(context.Background(), Spec{
+		Name: "invalid-policy",
+		Args: []string{"echo", "hi"},
+		Policy: platform.ExecutionPolicy{
+			Isolation: "nonexistent-isolation-level",
+		},
+	})
+	if err == nil {
+		t.Fatal("expected StartChild to fail with invalid policy")
+	}
+}

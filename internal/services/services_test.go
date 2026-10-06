@@ -21,6 +21,7 @@ import (
 	"gostalgia/internal/service"
 	"gostalgia/internal/session"
 	"gostalgia/internal/vfs"
+	"gostalgia/platform"
 )
 
 // testEnv is a full core-service stack without sockets or a real boot.
@@ -134,9 +135,13 @@ func TestSysStatus(t *testing.T) {
 			Name  string        `json:"name"`
 			State service.State `json:"state"`
 		} `json:"services"`
-		Apps []app.Status `json:"apps"`
+		Apps     []app.Status                      `json:"apps"`
+		Security platform.HostSecurityCapabilities `json:"security"`
 	}
 	must(t, json.Unmarshal(resp.Data, &status))
+	if status.Security.Platform == "" {
+		t.Errorf("expected security platform to be populated, got %+v", status.Security)
+	}
 	if status.Version != "test" {
 		t.Errorf("version = %q, want test", status.Version)
 	}
