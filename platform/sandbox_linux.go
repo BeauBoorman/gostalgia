@@ -43,10 +43,27 @@ func GetHostSecurityCapabilities() HostSecurityCapabilities {
 		} else if _, err := os.Stat("/proc/self/ns/net"); err != nil {
 			caps.Supported = false
 			caps.Reason = "network namespace unsupported by kernel"
-		} else if data, err := os.ReadFile("/proc/sys/kernel/unprivileged_userns_clone"); err == nil {
-			if strings.TrimSpace(string(data)) == "0" {
+		} else if data, err := os.ReadFile("/proc/sys/kernel/unprivileged_userns_clone"); err == nil && strings.TrimSpace(string(data)) == "0" {
+			caps.Supported = false
+			caps.Reason = "unprivileged user namespaces disabled by sysctl"
+		} else if data, err := os.ReadFile("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"); err == nil && strings.TrimSpace(string(data)) == "1" {
+			caps.Supported = false
+			caps.Reason = "unprivileged user namespaces restricted by AppArmor"
+		}
+
+		// Active probe: verify that unprivileged user namespace clone is permitted on this host.
+		if caps.Supported {
+			sh, err := exec.LookPath("sh")
+			if err != nil {
+				sh = "/bin/sh"
+			}
+			cmd := exec.Command(sh, "-c", "exit 0")
+			cmd.SysProcAttr = &syscall.SysProcAttr{
+				Cloneflags: syscall.CLONE_NEWUSER,
+			}
+			if err := cmd.Run(); err != nil {
 				caps.Supported = false
-				caps.Reason = "unprivileged user namespaces disabled by sysctl"
+				caps.Reason = fmt.Sprintf("unprivileged user namespace restricted by host: %v", err)
 			}
 		}
 

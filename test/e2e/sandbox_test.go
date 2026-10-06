@@ -229,4 +229,30 @@ func TestSandboxFailClosedUnsupported(t *testing.T) {
 	if err := rt.Apps.Registry().RegisterExternal(badMan); err == nil {
 		t.Fatal("expected RegisterExternal with unknown isolation to fail")
 	}
+
+	caps := platform.GetHostSecurityCapabilities()
+	if !caps.Supported {
+		// On an unsupported platform/host, declaring sandbox or strict fails closed at launch time
+		bin := "/bin/true"
+		if goRuntime.GOOS == "windows" {
+			bin = "cmd.exe"
+		}
+		unsupportedMan := app.Manifest{
+			ID:              "com.test.unsupported.sandbox",
+			Name:            "Unsupported Sandbox App",
+			Version:         "1.0.0",
+			Mode:            sdk.ModeExternal,
+			Executable:      bin,
+			Isolation:       sdk.IsolationSandbox,
+			Permissions:     []string{sdk.CapIPC},
+			ProtocolVersion: 1,
+		}
+		must(t, rt.Apps.Registry().RegisterExternal(unsupportedMan))
+		client := dialRunning(t, root)
+		var res any
+		err := client.Call(context.Background(), "app/launch", map[string]string{"id": unsupportedMan.ID}, &res)
+		if err == nil {
+			t.Fatal("expected app/launch to fail closed when sandbox is unsupported on host")
+		}
+	}
 }

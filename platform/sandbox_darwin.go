@@ -83,6 +83,9 @@ func buildDarwinSandboxProfile(policy ExecutionPolicy) string {
 
 	if policy.DenyNetwork {
 		b.WriteString("(deny network*)\n")
+		b.WriteString("(allow network-outbound (remote unix-socket))\n")
+		b.WriteString("(allow network-inbound (local unix-socket))\n")
+		b.WriteString("(allow network-bind (local unix-socket))\n")
 	} else {
 		b.WriteString("(allow network*)\n")
 	}
@@ -90,6 +93,13 @@ func buildDarwinSandboxProfile(policy ExecutionPolicy) string {
 	b.WriteString("(allow file-read*)\n")
 	if policy.ReadOnlyFS {
 		b.WriteString("(deny file-write*)\n")
+		b.WriteString("(allow file-write-data (remote unix-socket))\n")
+		b.WriteString("(allow file-write* (literal \"/dev/null\") (literal \"/dev/zero\"))\n")
+		// Allow ephemeral runtime sockets in standard temporary directories
+		b.WriteString("(allow file-write* (subpath \"/private/var/folders\"))\n")
+		b.WriteString("(allow file-write* (subpath \"/var/folders\"))\n")
+		b.WriteString("(allow file-write* (subpath \"/private/tmp\"))\n")
+		b.WriteString("(allow file-write* (subpath \"/tmp\"))\n")
 		for _, p := range policy.AllowedPaths {
 			if p != "" {
 				b.WriteString(fmt.Sprintf("(allow file-write* (subpath %q))\n", p))
