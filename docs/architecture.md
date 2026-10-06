@@ -55,9 +55,11 @@ gostalgia
 │   ├── process/        # environment process manager
 │   ├── security/       # users, capabilities                (leaf)
 │   ├── profile/        # workspace profiles and isolation   (leaf)
+│   ├── recovery/       # portable backup and disaster restore (leaf)
+│   ├── pkg/            # application package management     (leaf)
 │   ├── session/        # user sessions
 │   ├── service/        # service lifecycle framework
-│   ├── services/       # concrete core services (sys, process, fs, ipc, profile)
+│   ├── services/       # concrete core services (sys, process, fs, ipc, profile, package, recovery)
 │   ├── experience/     # Charm shell (imports IPC client contracts only)
 │   ├── app/            # application model, manifests, launcher
 │   └── runtime/        # boot, wiring, shutdown
@@ -221,6 +223,7 @@ permissions; they are attached to the IPC context and enforced at handler
 boundaries (`security.Capabilities.Has`). Read/write VFS methods, process
 listing/stopping, app listing/launching/stopping, session management (`session.read`, `session.write`),
 profile management (`profile.read`, `profile.write`),
+backup management (`backup.read`, `backup.write`),
 and shutdown check their individual grants; app route publication/invocation checks `ipc`. App SDK
 `Call` and `Handle` adapters replace caller capabilities with the app's manifest
 grant, enforcing capability scoping and preventing confused-deputy attacks.
@@ -246,6 +249,15 @@ and personal workspace separation under `/users/<profile_id>/`:
 - **IPC profile service**: Endpoints under `profile/*` (`list`, `get`, `active`, `create`,
   `update`, `switch`, `delete`) enable programmatic profile administration, guarded by
   `profile.read` and `profile.write` capabilities.
+
+### 3.8b Portable backup and disaster recovery (`internal/recovery`)
+
+Disaster recovery and state migration provide bounded, verified archive portability:
+- **Format**: ZIP-based `.gbar` containing `backup.json` manifest and `data/` file trees.
+- **Resource bounds**: 100 MiB archive size, 200 MiB extracted limit, 5,000 files, 100x max compression ratio, and 32 MiB max single file limit.
+- **Security filtering**: Restricts archives to `/config` and `/users/<id>/*`. Automatically excludes live session tokens, host endpoints, IPC sockets, logs, transient files, and private app mounts.
+- **Conflict detection & rollback**: Interactive preview identifies `create`, `identical`, and `conflict` entries. Restores support `abort`, `overwrite`, and `skip` conflict strategies with atomic transactional staging and automated journaled rollback.
+- See [recovery.md](recovery.md) for full specifications and command reference.
 
 **Honesty clause:** this is *logical* isolation only while applications run
 in-process. The auth token on the socket protects against accidental

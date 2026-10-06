@@ -253,6 +253,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		services.NewSession(),
 		services.NewProfile(),
 		services.NewPackage(),
+		services.NewRecovery(),
 	} {
 		if err := sm.Register(s); err != nil {
 			logFile.Close()

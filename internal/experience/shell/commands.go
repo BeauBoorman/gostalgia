@@ -11,6 +11,7 @@ import (
 	"unicode"
 
 	"gostalgia/internal/pkg"
+	"gostalgia/internal/recovery"
 )
 
 // Caller is the single environment API used by the experience layer.
@@ -70,6 +71,7 @@ type resultMsg struct {
 const helpText = `COMMAND CENTER
   apps                     installed apps and their grants
   pkg / package            list, inspect, install, update, uninstall, rollback
+  backup                   export, inspect, preview, restore portable backups
   launch / run APP-ID       start a manifest-declared app
   stop APP-ID               stop, clean up, retract routes
   echo MESSAGE              talk to the Echo demo
@@ -305,6 +307,30 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 		}
 		if params.Path != "" {
 			params.Path = envPath(cwd, params.Path)
+		}
+		var out json.RawMessage
+		if err := c.Call(ctx, method, params, &out); err != nil {
+			return fail(err)
+		}
+		pretty, err := json.MarshalIndent(out, "", "  ")
+		if err != nil {
+			return fail(err)
+		}
+		return ok(safe(string(pretty)))
+	case "backup", "recovery":
+		method, params, err := recovery.ParseCommand(args)
+		if err != nil {
+			return fail(err)
+		}
+		if ep, ok := params.(recovery.ExportParams); ok && ep.Path != "" {
+			ep.Path = envPath(cwd, ep.Path)
+			params = ep
+		} else if pp, ok := params.(recovery.PathParams); ok && pp.Path != "" {
+			pp.Path = envPath(cwd, pp.Path)
+			params = pp
+		} else if rp, ok := params.(recovery.RestoreParams); ok && rp.Path != "" {
+			rp.Path = envPath(cwd, rp.Path)
+			params = rp
 		}
 		var out json.RawMessage
 		if err := c.Call(ctx, method, params, &out); err != nil {

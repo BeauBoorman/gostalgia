@@ -110,6 +110,12 @@ func (m *Model) paletteItems() []paletteItem {
 		},
 		paletteItem{
 			Tag:    "CMD",
+			Title:  "backup",
+			Detail: "Create portable backup export of personal workspace",
+			Action: func(m *Model) tea.Cmd { return m.submit("backup export") },
+		},
+		paletteItem{
+			Tag:    "CMD",
 			Title:  "dir",
 			Detail: "Directory contents of current drive",
 			Action: func(m *Model) tea.Cmd { return m.submit("dir") },
