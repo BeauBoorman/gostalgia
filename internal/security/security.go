@@ -244,15 +244,17 @@ func (s *TokenStore) Lookup(token string) (Credential, bool) {
 // their manifest; the runtime grants them to the application's call
 // context, and system services check them before acting.
 const (
-	CapIPC       = sdk.CapIPC
-	CapFileRead  = sdk.CapFileRead
-	CapFileWrite = sdk.CapFileWrite
-	CapProcList  = sdk.CapProcList
-	CapProcStop  = sdk.CapProcStop
-	CapAppList   = sdk.CapAppList
-	CapAppLaunch = sdk.CapAppLaunch
-	CapShutdown  = sdk.CapShutdown
-	CapAdmin     = "admin"
+	CapIPC         = sdk.CapIPC
+	CapFileRead    = sdk.CapFileRead
+	CapFileWrite   = sdk.CapFileWrite
+	CapProcList    = sdk.CapProcList
+	CapProcStop    = sdk.CapProcStop
+	CapAppList     = sdk.CapAppList
+	CapAppLaunch   = sdk.CapAppLaunch
+	CapShutdown    = sdk.CapShutdown
+	CapConfigRead  = sdk.CapConfigRead
+	CapConfigWrite = sdk.CapConfigWrite
+	CapAdmin       = "admin"
 )
 
 // Capabilities is a concurrency-safe permission set.
@@ -304,6 +306,6 @@ func AdminCapabilities() *Capabilities {
 		CapIPC, CapFileRead, CapFileWrite,
 		CapProcList, CapProcStop,
 		CapAppList, CapAppLaunch,
-		CapShutdown, CapAdmin,
+		CapShutdown, CapConfigRead, CapConfigWrite, CapAdmin,
 	)
 }

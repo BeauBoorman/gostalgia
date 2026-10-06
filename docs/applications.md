@@ -710,3 +710,55 @@ Files also provides programmatic IPC routes under `app/com.gostalgia.files/`:
 - `open`: Opens a directory or hands off a file to an application `{path, app_id?}`
 - `trash_list`: Returns all items currently in the trash bin
 
+---
+
+## 9. Reference application: Settings (`com.gostalgia.settings`)
+
+Settings is the interactive preferences hub for Gostalgia. It manages themes, accessibility, keyboard shortcuts, startup behavior, and storage statistics via the presentation contract and the configuration service.
+
+```json
+{
+  "id": "com.gostalgia.settings",
+  "name": "Settings",
+  "version": "0.1.0",
+  "mode": "inproc",
+  "entrypoint": "settings",
+  "permissions": [
+    "ipc",
+    "fs.read",
+    "fs.write",
+    "app.list",
+    "config.read",
+    "config.write"
+  ],
+  "description": "System preferences, appearance, accessibility, and shortcut configuration."
+}
+```
+
+### Features and presentation flow
+
+1. **Preference categories:**
+   - **Appearance & Theme:** Browse themes (`nostalgia`, `midnight`, `monochrome`, `high-contrast`, `high-contrast-light`), preview colors, toggle live previews.
+   - **Accessibility & Motion:** Configure terminal color fidelity (`plain`, `ansi256`, `truecolor`) and toggle reduced motion.
+   - **Keyboard Shortcuts:** View effective keybindings, detect and prevent conflicting assignments.
+   - **Startup & Boot:** Choose the default boot landing view (`home`, `prompt`, `launcher`, `tasks`, `notifications`).
+   - **Storage & System:** Inspect storage statistics, configuration file provenance, and layer explanations.
+
+2. **Live preview & rollback:**
+   - Selecting a theme triggers a live in-memory preview via `config/preview`.
+   - The shell updates its styling dynamically.
+   - The user can commit the changes (`save`) or revert to prior settings (`revert`).
+
+3. **Presentation actions:**
+   - Category navigation: `cat_appearance`, `cat_accessibility`, `cat_shortcuts`, `cat_startup`, `cat_storage`.
+   - Option toggles: `select` (activates or toggles selected item).
+   - Lifecycle controls: `save` (commits preview to disk), `revert` (cancels preview), `reset` (restores factory defaults).
+
+4. **Programmatic IPC routes (`app/com.gostalgia.settings/*`):**
+   - `preferences`: Returns active settings, effective values, and layer breakdown.
+   - `preview`: Applies an in-memory preview override for a setting path `{path, value}`.
+   - `save`: Commits in-memory preview changes to the user configuration layer.
+   - `revert`: Cancels in-memory preview overrides and restores prior configuration.
+   - `reset`: Restores system default preferences.
+
+

@@ -260,6 +260,23 @@ Crash receipts provide immediate post-mortem diagnostics for abnormal exits:
 - **Inspection**: Drill down from the Task Manager table, press `Enter` on a crash
   notification in the Notification Center, or run `receipt [PID]` from the prompt.
 
+### Interactive Settings & Live Configuration Updates
+
+The shell deeply integrates with Gostalgia's configuration engine (`internal/config`)
+and Settings application (`com.gostalgia.settings`):
+- **Access**: Press `F7`, run `settings`, `preferences`, or `pref`, or choose Settings
+  from the Command Palette (`Ctrl-P`).
+- **Dynamic Keybinding Dispatch**: Shell key shortcuts (F1-F7, palette) are evaluated
+  dynamically against the effective `shortcuts.*` configuration.
+- **Live Theme & Motion Switching**: Changes to `theme`, `accessibility.color_mode`,
+  and `accessibility.reduced_motion` apply immediately across the running shell without
+  rebooting.
+- **Interactive Preview & Rollback**: Live theme selections rendered in Settings apply
+  in-memory preview overrides via `config/preview`, which can be committed (`save`) or
+  reverted (`revert` / `cancel`) safely.
+- **Configurable Startup View**: The shell reads `startup.view` to determine whether to
+  land on Home dashboard, Prompt, App Launcher, Task Manager, or Notifications on boot.
+
 ## Layout and external text
 
 All sizes are terminal **cells**, not byte/rune counts. The kit uses Charm's ANSI
