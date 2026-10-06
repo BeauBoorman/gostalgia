@@ -2,16 +2,21 @@ package process
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"gostalgia/internal/events"
+	"gostalgia/platform"
 )
 
 // TestMain doubles as the child helper. When the test binary is invoked
@@ -27,6 +32,16 @@ func TestMain(m *testing.M) {
 		}
 	case "exit":
 		os.Exit(3)
+	case "spawn_grandchild":
+		cmd := exec.Command(os.Args[0])
+		cmd.Env = append(os.Environ(), "GOSTALGIA_TEST_CHILD=1")
+		if err := cmd.Start(); err != nil {
+			os.Exit(1)
+		}
+		fmt.Printf("GRANDCHILD_PID=%d\n", cmd.Process.Pid)
+		for {
+			time.Sleep(time.Hour)
+		}
 	case "check_clean_env":
 		if os.Getenv("SUPER_SECRET_HOST_KEY") != "" {
 			os.Exit(42) // leaked secret!
@@ -492,5 +507,375 @@ func TestLogsUnknownPID(t *testing.T) {
 	m, _ := newTestManager(t)
 	if _, ok := m.Logs(99999); ok {
 		t.Fatal("Logs returned ok=true for unknown PID")
+	}
+}
+
+func TestRestartNever(t *testing.T) {
+	m, _ := newTestManager(t)
+	var runs atomic.Int32
+	p, err := m.StartInProc(context.Background(), Spec{
+		Name: "failonce",
+		Restart: SupervisionConfig{
+			Policy: RestartNever,
+		},
+	}, func(p *Process) error {
+		runs.Add(1)
+		return errors.New("boom")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-p.Done()
+	if r := runs.Load(); r != 1 {
+		t.Fatalf("expected 1 run, got %d", r)
+	}
+	info := p.Info()
+	if info.State != StateFailed {
+		t.Fatalf("expected StateFailed, got %s", info.State)
+	}
+	if info.RestartCount != 0 {
+		t.Fatalf("expected 0 restarts, got %d", info.RestartCount)
+	}
+}
+
+func TestRestartOnFailure_Success(t *testing.T) {
+	m, _ := newTestManager(t)
+	var runs atomic.Int32
+	p, err := m.StartInProc(context.Background(), Spec{
+		Name: "succeed",
+		Restart: SupervisionConfig{
+			Policy: RestartOnFailure,
+		},
+	}, func(p *Process) error {
+		runs.Add(1)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-p.Done()
+	if r := runs.Load(); r != 1 {
+		t.Fatalf("expected 1 run, got %d", r)
+	}
+	info := p.Info()
+	if info.State != StateStopped {
+		t.Fatalf("expected StateStopped, got %s", info.State)
+	}
+	if info.RestartCount != 0 {
+		t.Fatalf("expected 0 restarts, got %d", info.RestartCount)
+	}
+}
+
+func TestRestartOnFailure_Recovers(t *testing.T) {
+	m, _ := newTestManager(t)
+	var runs atomic.Int32
+	p, err := m.StartInProc(context.Background(), Spec{
+		Name: "recover",
+		Restart: SupervisionConfig{
+			Policy:         RestartOnFailure,
+			MaxRestarts:    3,
+			Window:         time.Minute,
+			InitialBackoff: 5 * time.Millisecond,
+		},
+	}, func(p *Process) error {
+		count := runs.Add(1)
+		if count < 3 {
+			return errors.New("temporary error")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-p.Done()
+	if r := runs.Load(); r != 3 {
+		t.Fatalf("expected 3 runs, got %d", r)
+	}
+	info := p.Info()
+	if info.State != StateStopped {
+		t.Fatalf("expected StateStopped, got %s", info.State)
+	}
+	if info.RestartCount != 2 {
+		t.Fatalf("expected 2 restarts, got %d", info.RestartCount)
+	}
+}
+
+func TestInProcCrashLoopCutoff(t *testing.T) {
+	m, _ := newTestManager(t)
+	var runs atomic.Int32
+	p, err := m.StartInProc(context.Background(), Spec{
+		Name: "crasher",
+		Restart: SupervisionConfig{
+			Policy:         RestartOnFailure,
+			MaxRestarts:    3,
+			Window:         time.Minute,
+			InitialBackoff: 2 * time.Millisecond,
+			MaxBackoff:     10 * time.Millisecond,
+		},
+	}, func(p *Process) error {
+		runs.Add(1)
+		return errors.New("fatal crash")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("process did not terminate in crash loop")
+	}
+	// Initial run + 3 restarts = 4 runs
+	if r := runs.Load(); r != 4 {
+		t.Fatalf("expected 4 runs (1 initial + 3 restarts), got %d", r)
+	}
+	info := p.Info()
+	if info.State != StateCrashLoop {
+		t.Fatalf("expected StateCrashLoop, got %s", info.State)
+	}
+	if !info.CrashLoop {
+		t.Fatal("expected info.CrashLoop to be true")
+	}
+	if info.RestartCount != 3 {
+		t.Fatalf("expected 3 restarts, got %d", info.RestartCount)
+	}
+}
+
+func TestUserStopSuppressesRestart(t *testing.T) {
+	m, _ := newTestManager(t)
+	started := make(chan struct{})
+	var runs atomic.Int32
+	p, err := m.StartInProc(context.Background(), Spec{
+		Name: "looping",
+		Restart: SupervisionConfig{
+			Policy:         RestartAlways,
+			InitialBackoff: 5 * time.Millisecond,
+		},
+	}, func(p *Process) error {
+		runs.Add(1)
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		<-p.Context().Done()
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := m.Stop(p.ID(), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	<-p.Done()
+	time.Sleep(50 * time.Millisecond)
+	if r := runs.Load(); r != 1 {
+		t.Fatalf("expected 1 run, got %d", r)
+	}
+	info := p.Info()
+	if info.State != StateStopped {
+		t.Fatalf("expected StateStopped, got %s", info.State)
+	}
+}
+
+func TestUserStopDuringBackoff(t *testing.T) {
+	m, _ := newTestManager(t)
+	firstFail := make(chan struct{})
+	var runs atomic.Int32
+	p, err := m.StartInProc(context.Background(), Spec{
+		Name: "backoff-stop",
+		Restart: SupervisionConfig{
+			Policy:         RestartOnFailure,
+			InitialBackoff: 2 * time.Second, // long backoff
+		},
+	}, func(p *Process) error {
+		runs.Add(1)
+		close(firstFail)
+		return errors.New("fail into backoff")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-firstFail
+	deadline := time.Now().Add(time.Second)
+	for p.Info().State != StateRestarting && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if p.Info().State != StateRestarting {
+		t.Fatalf("expected StateRestarting, got %s", p.Info().State)
+	}
+	if err := m.Stop(p.ID(), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	<-p.Done()
+	if r := runs.Load(); r != 1 {
+		t.Fatalf("expected 1 run, got %d", r)
+	}
+	if p.Info().State != StateStopped {
+		t.Fatalf("expected StateStopped, got %s", infoState(p))
+	}
+}
+
+func infoState(p *Process) State {
+	return p.Info().State
+}
+
+func TestChildCrashLoop(t *testing.T) {
+	m, _ := newTestManager(t)
+	p, err := m.StartChild(context.Background(), Spec{
+		Name: "child-crash",
+		Args: childHelperArgs(t),
+		Env:  []string{"GOSTALGIA_TEST_CHILD=exit"},
+		Restart: SupervisionConfig{
+			Policy:         RestartOnFailure,
+			MaxRestarts:    2,
+			Window:         time.Minute,
+			InitialBackoff: 2 * time.Millisecond,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("child did not reach crash loop in time")
+	}
+	info := p.Info()
+	if info.State != StateCrashLoop {
+		t.Fatalf("expected StateCrashLoop, got %s", info.State)
+	}
+	if info.RestartCount != 2 {
+		t.Fatalf("expected 2 restarts, got %d", info.RestartCount)
+	}
+}
+
+func TestBoundedHistoryAndReap(t *testing.T) {
+	m, _ := newTestManager(t)
+	m.SetMaxHistory(3)
+
+	var pids []int32
+	for i := 0; i < 5; i++ {
+		p, err := m.StartInProc(context.Background(), Spec{
+			Name: fmt.Sprintf("proc-%d", i),
+		}, func(p *Process) error {
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-p.Done()
+		pids = append(pids, p.ID())
+	}
+
+	history := m.History()
+	if len(history) != 3 {
+		t.Fatalf("expected 3 history entries, got %d", len(history))
+	}
+	for _, id := range pids[2:] {
+		if _, ok := m.HistoryByID(id); !ok {
+			t.Errorf("expected pid %d in history", id)
+		}
+	}
+	if _, ok := m.HistoryByID(pids[0]); ok {
+		t.Errorf("pid %d should have been evicted", pids[0])
+	}
+
+	if len(m.List()) != 5 {
+		t.Fatalf("expected 5 processes in list before reap, got %d", len(m.List()))
+	}
+	reaped := m.Reap()
+	if reaped != 5 {
+		t.Fatalf("expected 5 reaped processes, got %d", reaped)
+	}
+	if len(m.List()) != 0 {
+		t.Fatalf("expected 0 processes in list after reap, got %d", len(m.List()))
+	}
+	if len(m.History()) != 3 {
+		t.Fatalf("expected 3 history entries after reap, got %d", len(m.History()))
+	}
+}
+
+func TestAutoReap(t *testing.T) {
+	m, _ := newTestManager(t)
+	m.SetMaxHistory(2)
+
+	// Spawning 15 short-lived processes will cross the auto-reap limit (limit = max(10, 2*2) = 10)
+	for i := 0; i < 15; i++ {
+		p, err := m.StartInProc(context.Background(), Spec{
+			Name: fmt.Sprintf("auto-reap-%d", i),
+		}, func(p *Process) error {
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-p.Done()
+	}
+
+	// Auto-reaping should have pruned inactive processes down to maxHistory (2)
+	list := m.List()
+	if len(list) > 10 {
+		t.Fatalf("expected auto-reap to prune inactive processes, got %d", len(list))
+	}
+	if len(m.History()) != 2 {
+		t.Fatalf("expected 2 history entries, got %d", len(m.History()))
+	}
+}
+
+func TestChildTreeCleanup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process group tree signaling is Unix-specific")
+	}
+	m, _ := newTestManager(t)
+	p, err := m.StartChild(context.Background(), Spec{
+		Name: "grandparent",
+		Args: childHelperArgs(t),
+		Env:  []string{"GOSTALGIA_TEST_CHILD=spawn_grandchild"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var grandchildPID int
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		logs, ok := m.Logs(p.ID())
+		if ok && strings.Contains(logs.Stdout.Content, "GRANDCHILD_PID=") {
+			for _, line := range strings.Split(logs.Stdout.Content, "\n") {
+				if strings.HasPrefix(line, "GRANDCHILD_PID=") {
+					fmt.Sscanf(line, "GRANDCHILD_PID=%d", &grandchildPID)
+					break
+				}
+			}
+			if grandchildPID > 0 {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if grandchildPID == 0 {
+		t.Fatal("failed to find grandchild PID from child logs")
+	}
+
+	if !platform.ProcessAlive(grandchildPID) {
+		t.Fatalf("grandchild %d not running", grandchildPID)
+	}
+
+	if err := m.Stop(p.ID(), time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	killed := false
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if !platform.ProcessAlive(grandchildPID) {
+			killed = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !killed {
+		t.Fatalf("grandchild %d was not killed by KillProcessTree", grandchildPID)
 	}
 }

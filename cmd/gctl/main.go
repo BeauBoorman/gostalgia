@@ -32,6 +32,8 @@ const usageText = `gctl — control a running Gostalgia environment
 Usage:
   gctl [--root DIR] status              runtime status
   gctl [--root DIR] ps                  environment processes
+  gctl [--root DIR] history             bounded process exit history
+  gctl [--root DIR] reap                reap inactive process objects
   gctl [--root DIR] logs PID [TAIL]     view child process logs and diagnostics
   gctl [--root DIR] apps                installed applications
   gctl [--root DIR] echo MESSAGE        send a message to the echo app
@@ -110,19 +112,21 @@ func run(ctx context.Context, client *ipc.Client, cmd string, args []string) err
 
 	case "ps":
 		var procs []struct {
-			ID        int32     `json:"id"`
-			Name      string    `json:"name"`
-			Kind      string    `json:"kind"`
-			State     string    `json:"state"`
-			StartedAt time.Time `json:"started_at"`
-			ExitedAt  time.Time `json:"exited_at"`
-			ExitCode  int       `json:"exit_code"`
+			ID           int32     `json:"id"`
+			Name         string    `json:"name"`
+			Kind         string    `json:"kind"`
+			State        string    `json:"state"`
+			StartedAt    time.Time `json:"started_at"`
+			ExitedAt     time.Time `json:"exited_at"`
+			ExitCode     int       `json:"exit_code"`
+			RestartCount int       `json:"restart_count"`
+			CrashLoop    bool      `json:"crash_loop"`
 		}
 		if err := client.Call(ctx, "proc/list", nil, &procs); err != nil {
 			return err
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "PID\tNAME\tKIND\tSTATE\tEXIT\tTIME")
+		fmt.Fprintln(w, "PID\tNAME\tKIND\tSTATE\tRESTARTS\tEXIT\tTIME")
 		for _, p := range procs {
 			exitStr := "-"
 			if p.State == "stopped" || p.State == "failed" {
@@ -136,9 +140,58 @@ func run(ctx context.Context, client *ipc.Client, cmd string, args []string) err
 					timeStr = formatDuration(time.Since(p.StartedAt))
 				}
 			}
-			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\n", p.ID, sanitizeTerminal(p.Name), p.Kind, p.State, exitStr, timeStr)
+			restartsStr := fmt.Sprintf("%d", p.RestartCount)
+			if p.CrashLoop {
+				restartsStr += " (crashloop)"
+			}
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n", p.ID, sanitizeTerminal(p.Name), p.Kind, p.State, restartsStr, exitStr, timeStr)
 		}
 		return w.Flush()
+
+	case "history":
+		var history []struct {
+			ID           int32  `json:"id"`
+			Name         string `json:"name"`
+			Kind         string `json:"kind"`
+			State        string `json:"state"`
+			ExitCode     int    `json:"exit_code"`
+			Duration     string `json:"duration"`
+			RestartCount int    `json:"restart_count"`
+			CrashLoop    bool   `json:"crash_loop"`
+			Err          string `json:"error"`
+		}
+		if err := client.Call(ctx, "proc/history", nil, &history); err != nil {
+			return err
+		}
+		if len(history) == 0 {
+			fmt.Println("No process history recorded.")
+			return nil
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "PID\tNAME\tKIND\tSTATE\tEXIT\tRESTARTS\tDURATION\tERROR")
+		for _, h := range history {
+			restartsStr := fmt.Sprintf("%d", h.RestartCount)
+			if h.CrashLoop {
+				restartsStr += " (crashloop)"
+			}
+			errStr := sanitizeTerminal(h.Err)
+			if errStr == "" {
+				errStr = "-"
+			}
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+				h.ID, sanitizeTerminal(h.Name), h.Kind, h.State, h.ExitCode, restartsStr, h.Duration, errStr)
+		}
+		return w.Flush()
+
+	case "reap":
+		var res struct {
+			Reaped int `json:"reaped"`
+		}
+		if err := client.Call(ctx, "proc/reap", nil, &res); err != nil {
+			return err
+		}
+		fmt.Printf("Reaped %d inactive processes.\n", res.Reaped)
+		return nil
 
 	case "logs":
 		if len(args) == 0 {

@@ -18,31 +18,83 @@ process.
 
 ## Lifecycle
 
-States: `starting → running → stopping → stopped` (or `failed`).
+States: `starting → running → restarting → stopping → stopped` (or `failed`, `crashloop`).
 
-- `Manager.StartInProc(ctx, spec, run)` — starts immediately; `run` must honor
-  `p.Context()`. `Launch` returns once the process is running.
-- `Manager.StartChild(ctx, spec)` — spawns `spec.Args`, inheriting or replacing
-  the environment (`spec.Env`), optional working directory.
-- `Manager.Stop(id, timeout)` — sets `stopping`, cancels, waits up to the
-  timeout. A process that ignores its context leaves Stop with an error and is
-  reported as failed at shutdown.
-- Exited processes remain listed (with state, exit code, and error) until
-  reaping; supervision and crash-loop protection are tracked in Milestone 3
-  ([#31](https://github.com/drawmeanelephant/gostalgia/issues/31)).
+- `Manager.StartInProc(ctx, spec, run)` — starts in-process logic; `run` must
+  honor `p.Context()`. Supervised by the manager according to its restart policy.
+- `Manager.StartChild(ctx, spec)` — spawns `spec.Args` in an isolated process
+  group, inheriting or replacing the environment (`spec.Env`), optional working
+  directory.
+- `Manager.Stop(id, timeout)` — sets `stopping`, cancels, terminates child
+  process trees, and waits up to the timeout. Suppresses any automatic restarts.
+- Exited processes record exit diagnostics in bounded history buffer; inactive
+  in-memory processes are reaped manually via `Reap()` or automatically when
+  inactive counts exceed limits.
 
-## Process inspection and IPC (`proc/list`, `proc/info`, `proc/logs`)
+## Supervision, restart policies, and crash-loop protection
+
+The process manager provides automated supervision for both `inproc` and `child`
+processes configured via `process.SupervisionConfig`:
+
+- **Restart policies (`RestartPolicy`):**
+  - `RestartNever` (default): run once; failure transitions to `failed`, normal exit to `stopped`.
+  - `RestartAlways`: automatically restart on any exit, unless stopped by operator or system shutdown.
+  - `RestartOnFailure`: restart only on unexpected exit (non-zero exit code or run error). Clean exits terminate in `stopped`.
+- **User stop & shutdown suppression:** Explicit calls to `Stop(id)` or `StopAll()`
+  flag the process as operator-stopped and cancel the master context, ensuring
+  no restart loops occur when a service is deliberately stopped.
+- **Crash loop cutoff:** Tracks restarts within a sliding time window
+  (`Window`, default 1 minute). If restart attempts exceed `MaxRestarts`
+  (default 3) within that window, the process transitions to `crashloop` state
+  and halts further restarts with an explicit error description.
+- **Exponential backoff:** Restarts back off exponentially starting from
+  `InitialBackoff` (default 100ms) up to `MaxBackoff` (default 5s) by
+  `BackoffFactor` (default 2.0). If stopped during backoff, the wait aborts
+  immediately and transitions cleanly to `stopped`.
+
+## Process tree isolation and cleanup
+
+For real host child processes (`KindChild`), runaway child processes and their
+descendants are managed via platform process group adapters (`platform.SetupProcessTree`
+and `platform.KillProcessTree`):
+
+- **Process group isolation:** Child processes are launched in their own process
+  group (`Setpgid: true` on Unix).
+- **Descendant termination:** On `Stop()` or shutdown, `KillProcessTree` sends
+  `SIGKILL` to `-pid` (the process group), guaranteeing that any background
+  worker processes or grandchildren spawned by the child are terminated and do
+  not leak into the host system.
+
+## Bounded exit history and process reaping
+
+- **Bounded history buffer:** A thread-safe, bounded ring buffer (`HistoryEntry`)
+  records terminal states, exit codes, durations, restart counts, and error
+  diagnostics for terminated processes. Default capacity is 100 entries
+  (`DefaultMaxHistory`), evicting the oldest entries when full.
+- **Process reaping:** Live process structs can be pruned from memory via
+  `Manager.Reap()` or automatic background reaping (`autoReap()`), freeing
+  active process table slots while retaining diagnostic logs and exit history.
+
+## Process inspection and IPC (`proc/list`, `proc/info`, `proc/logs`, `proc/history`, `proc/reap`)
 
 The `proc/list` IPC endpoint returns complete `process.Info` snapshots,
 including:
 - `id`, `name`, `kind`, and `state`
+- `restart_count` and `crash_loop` boolean indicators
 - `session` and `user` ownership
 - `caps` (granted capabilities snapshot)
 - `started_at` and `exited_at` timestamps
 - `error` (failure description)
 - `exit_code` (for both child processes and exited in-proc runs)
 
-The `proc/info` IPC endpoint returns this snapshot for a single process ID.
+The `proc/info` IPC endpoint returns this snapshot for a single process ID,
+falling back to the bounded history buffer if the process was already reaped.
+
+The `proc/history` IPC endpoint returns recent terminated process entries from the
+bounded history buffer.
+
+The `proc/reap` IPC endpoint prunes inactive process entries from the active
+process table (requires `proc:stop` capability).
 
 The `proc/logs` IPC endpoint returns captured process logs and stream diagnostics:
 - Process identification (`id`, `name`, `kind`, `state`, `exit_code`)
@@ -77,16 +129,12 @@ bounded memory ring buffers (`process.RingBuffer`) defaulting to 64KB per stream
 ### Diagnostics and presentation
 
 Exit codes, timings, and logs are integrated across developer and interactive tools:
-- `gctl ps`: displays `PID`, `NAME`, `KIND`, `STATE`, `EXIT` code, and runtime `TIME` duration.
+- `gctl ps`: displays `PID`, `NAME`, `KIND`, `STATE`, `RESTARTS` (with crashloop indicator), `EXIT` code, and runtime `TIME` duration.
+- `gctl history`: displays bounded exit history, terminal states, restart counts, run durations, and exit errors.
+- `gctl reap`: manually reaps inactive process records from the runtime.
 - `gctl logs <pid> [tail]`: displays process diagnostics, stream byte metrics, drop counters, and captured output with terminal control-character sanitization.
 - Charm shell `ps`: displays process names, states with exit codes, run durations, and capability grants.
 - Charm shell `logs <pid> [tail]`: displays process diagnostics, byte counts, and sanitized stdout/stderr output.
-
-### Supervision status
-
-- **Supervision gap:** Processes are not yet automatically restarted or reaped,
-  and crash loops are not yet guarded; tracked in
-  [#31](https://github.com/drawmeanelephant/gostalgia/issues/31).
 
 ## Events
 
