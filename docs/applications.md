@@ -270,7 +270,7 @@ Run `go build ./...`, `go vet ./...`, `gofmt -l .` (empty output), and
 ## 7. Trust and dependency boundary
 
 The SDK and runtime core remain standard-library-only. Bubble Tea and Lip
-Gloss live in `internal/experience/shell`; apps do not implement tea.Model and
+Gloss live in `internal/experience/`; apps do not implement tea.Model and
 never own the terminal. Shell IPC clients are trusted operators with the same
 local-token grant as gctl; apps receive only their manifests' grant.
 
