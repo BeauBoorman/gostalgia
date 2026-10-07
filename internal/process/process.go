@@ -115,6 +115,13 @@ type Spec struct {
 	LogLimit  int                      `json:"log_limit,omitempty"` // child only: ring buffer capacity per stream in bytes (default 64KB)
 	Restart   SupervisionConfig        `json:"restart,omitempty"`   // supervision and restart policy
 	Policy    platform.ExecutionPolicy `json:"policy,omitempty"`    // host execution and sandbox policy
+
+	// ExtraFiles are inherited open files passed to the child as fds 3,4,...
+	// (cmd.ExtraFiles). Used to hand confined children a pre-connected IPC
+	// channel so they never need filesystem or socket-connect authority.
+	// Each file is duped into the child at Start; the parent may close its
+	// copy afterwards, but supervised restarts would need a fresh file.
+	ExtraFiles []*os.File `json:"-"`
 }
 
 // StreamDiagnostics holds bounded buffer content and drop accounting for an output stream.
@@ -613,6 +620,7 @@ func (m *Manager) buildChildCmd(ctx context.Context, spec Spec, id int32, stdout
 	cmd.Dir = spec.Dir
 	cmd.WaitDelay = 2 * time.Second
 	cmd.Env = DefaultChildEnv(spec, id)
+	cmd.ExtraFiles = spec.ExtraFiles
 	platform.SetupProcessTree(cmd)
 	cmd.Cancel = func() error {
 		return platform.KillProcessTree(cmd)

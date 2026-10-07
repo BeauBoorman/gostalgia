@@ -210,6 +210,7 @@ type Manager struct {
 	grants      *vfs.GrantStore
 	policy      *security.PolicyStore
 	user        security.User
+	root        string // environment root; masked from sandboxed children
 	log         *slog.Logger
 	mu          sync.Mutex
 	running     map[string]*runningApp
@@ -255,6 +256,23 @@ func (m *Manager) SetTokenStore(tokens *security.TokenStore) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.tokens = tokens
+}
+
+// SetRoot configures the host environment root. It is added to
+// MaskedPaths for sandboxed children so the operator token in
+// runtime.json stays unreachable even if OS sandboxing of reads is
+// otherwise incomplete.
+func (m *Manager) SetRoot(root string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.root = root
+}
+
+// Root returns the configured environment root ("" if unset).
+func (m *Manager) Root() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.root
 }
 
 // SetPolicyStore configures the operator policy store.
@@ -704,24 +722,8 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 		m.mu.Unlock()
 	}
 
-	ln, endpoint, err := platform.ListenChildIPC(man.ID)
-	if err != nil {
-		if m.tokens != nil && appToken != "" {
-			m.tokens.Revoke(appToken)
-		}
-		forget()
-		return nil, fmt.Errorf("app: listen child ipc for %s: %w", man.ID, err)
-	}
-
 	life, cancel := context.WithCancel(ctx)
 	childArgs := append([]string(nil), man.Args...)
-	childEnv := []string{
-		"GOSTALGIA_ENDPOINT=" + endpoint,
-		"GOSTALGIA_APP_TOKEN=" + appToken,
-		"GOSTALGIA_TOKEN=" + appToken,
-		"GOSTALGIA_APP_ID=" + man.ID,
-		fmt.Sprintf("GOSTALGIA_PROTOCOL_VERSION=%d", sdk.ProtocolVersion),
-	}
 	execPath := man.Executable
 	if runtime.GOOS == "windows" && filepath.Ext(execPath) == "" {
 		if _, err := os.Stat(execPath + ".exe"); err == nil {
@@ -733,8 +735,6 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 		if m.tokens != nil && appToken != "" {
 			m.tokens.Revoke(appToken)
 		}
-		_ = ln.Close()
-		platform.RemoveChildSocket(endpoint)
 		cancel()
 		forget()
 		return nil, fmt.Errorf("app: resolve isolation for %s: %w", man.ID, pErr)
@@ -760,6 +760,71 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 		policy.DenyNetwork = true
 	}
 
+	childEnv := []string{
+		"GOSTALGIA_APP_TOKEN=" + appToken,
+		"GOSTALGIA_TOKEN=" + appToken,
+		"GOSTALGIA_APP_ID=" + man.ID,
+		fmt.Sprintf("GOSTALGIA_PROTOCOL_VERSION=%d", sdk.ProtocolVersion),
+	}
+
+	// Sandboxed children get their IPC channel as an inherited pre-connected
+	// descriptor (fd 3): the sandbox profile can then deny every socket
+	// connect/bind/listen, including remote unix sockets, which Seatbelt and
+	// network namespaces cannot scope to a single path. Trusted children keep
+	// the listener + dial flow (and Windows has no fd-passing anyway).
+	sandboxed := policy.Isolation == platform.IsolationSandbox || policy.Isolation == platform.IsolationStrict
+	var err error
+	var conn net.Conn
+	var childFile *os.File
+	var ln net.Listener
+	var endpoint string
+	if sandboxed {
+		conn, childFile, err = platform.ChildIPC()
+		if err != nil {
+			if m.tokens != nil && appToken != "" {
+				m.tokens.Revoke(appToken)
+			}
+			cancel()
+			forget()
+			return nil, fmt.Errorf("app: child ipc for %s: %w", man.ID, err)
+		}
+		childEnv = append(childEnv, "GOSTALGIA_IPC_FD=3")
+		if root := m.Root(); root != "" {
+			policy.MaskedPaths = append(policy.MaskedPaths, root)
+		}
+	} else {
+		ln, endpoint, err = platform.ListenChildIPC(man.ID)
+		if err != nil {
+			if m.tokens != nil && appToken != "" {
+				m.tokens.Revoke(appToken)
+			}
+			cancel()
+			forget()
+			return nil, fmt.Errorf("app: listen child ipc for %s: %w", man.ID, err)
+		}
+		childEnv = append(childEnv, "GOSTALGIA_ENDPOINT="+endpoint)
+	}
+
+	// teardownChannel releases every half of the child channel on failure;
+	// after the handshake succeeds the conn is owned by the pump and closed
+	// by cleanup.
+	dropConn := func() {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		if childFile != nil {
+			_ = childFile.Close()
+			childFile = nil
+		}
+	}
+	teardownChannel := func() {
+		if ln != nil {
+			_ = ln.Close()
+		}
+		dropConn()
+		platform.RemoveChildSocket(endpoint)
+	}
+
 	spec := process.Spec{
 		Name:   man.ID,
 		User:   m.User().Name,
@@ -768,17 +833,27 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 		Env:    childEnv,
 		Policy: policy,
 	}
+	if childFile != nil {
+		spec.ExtraFiles = []*os.File{childFile}
+	}
 
 	proc, err := m.procs.StartChild(life, spec)
 	if err != nil {
-		_ = ln.Close()
-		platform.RemoveChildSocket(endpoint)
+		teardownChannel()
 		if m.tokens != nil && appToken != "" {
 			m.tokens.Revoke(appToken)
 		}
 		cancel()
 		forget()
 		return nil, fmt.Errorf("app: start %s: %w", man.ID, err)
+	}
+	// The child now holds its own copy of the IPC descriptor (ExtraFiles is
+	// duped into the child at Start). Release the parent's copy so the peer
+	// end is fully owned by the child — a dead child then produces EOF on
+	// conn instead of a silent timeout.
+	if childFile != nil {
+		_ = childFile.Close()
+		childFile = nil
 	}
 
 	m.mu.Lock()
@@ -788,59 +863,77 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 		m.tokens.BindProcess(appToken, proc.ID())
 	}
 
-	type acceptRes struct {
-		conn net.Conn
-		err  error
-	}
-	acceptCh := make(chan acceptRes, 1)
-	go func() {
-		c, aErr := ln.Accept()
-		acceptCh <- acceptRes{conn: c, err: aErr}
-	}()
+	if ln != nil {
+		type acceptRes struct {
+			conn net.Conn
+			err  error
+		}
+		acceptCh := make(chan acceptRes, 1)
+		go func() {
+			c, aErr := ln.Accept()
+			acceptCh <- acceptRes{conn: c, err: aErr}
+		}()
 
-	var conn net.Conn
-	select {
-	case <-time.After(5 * time.Second):
-		_ = ln.Close()
-		platform.RemoveChildSocket(endpoint)
-		_ = m.procs.Stop(proc.ID(), 2*time.Second)
-		if m.tokens != nil && appToken != "" {
-			m.tokens.Revoke(appToken)
-		}
-		cancel()
-		forget()
-		return nil, fmt.Errorf("app: %s: handshake timed out waiting for connection", man.ID)
-	case <-proc.Done():
-		_ = ln.Close()
-		platform.RemoveChildSocket(endpoint)
-		if m.tokens != nil && appToken != "" {
-			m.tokens.Revoke(appToken)
-		}
-		cancel()
-		forget()
-		info := proc.Info()
-		logs, _ := m.procs.Logs(proc.ID())
-		detail := info.Err
-		if logs.Stderr.Content != "" {
-			detail += fmt.Sprintf(" (stderr: %s)", strings.TrimSpace(logs.Stderr.Content))
-		}
-		return nil, fmt.Errorf("app: %s exited before connecting: %s", man.ID, detail)
-	case res := <-acceptCh:
-		if res.err != nil {
-			_ = ln.Close()
-			platform.RemoveChildSocket(endpoint)
+		select {
+		case <-time.After(5 * time.Second):
+			teardownChannel()
 			_ = m.procs.Stop(proc.ID(), 2*time.Second)
 			if m.tokens != nil && appToken != "" {
 				m.tokens.Revoke(appToken)
 			}
 			cancel()
 			forget()
-			return nil, fmt.Errorf("app: %s: accept connection: %w", man.ID, res.err)
+			return nil, fmt.Errorf("app: %s: handshake timed out waiting for connection", man.ID)
+		case <-proc.Done():
+			teardownChannel()
+			if m.tokens != nil && appToken != "" {
+				m.tokens.Revoke(appToken)
+			}
+			cancel()
+			forget()
+			info := proc.Info()
+			logs, _ := m.procs.Logs(proc.ID())
+			detail := info.Err
+			if logs.Stderr.Content != "" {
+				detail += fmt.Sprintf(" (stderr: %s)", strings.TrimSpace(logs.Stderr.Content))
+			}
+			return nil, fmt.Errorf("app: %s exited before connecting: %s", man.ID, detail)
+		case res := <-acceptCh:
+			if res.err != nil {
+				teardownChannel()
+				_ = m.procs.Stop(proc.ID(), 2*time.Second)
+				if m.tokens != nil && appToken != "" {
+					m.tokens.Revoke(appToken)
+				}
+				cancel()
+				forget()
+				return nil, fmt.Errorf("app: %s: accept connection: %w", man.ID, res.err)
+			}
+			conn = res.conn
 		}
-		conn = res.conn
+		_ = ln.Close()
+		platform.RemoveChildSocket(endpoint)
+	} else {
+		// The fd channel is already connected; the child may still die
+		// before handshaking, so honor that case up front.
+		select {
+		case <-proc.Done():
+			teardownChannel()
+			if m.tokens != nil && appToken != "" {
+				m.tokens.Revoke(appToken)
+			}
+			cancel()
+			forget()
+			info := proc.Info()
+			logs, _ := m.procs.Logs(proc.ID())
+			detail := info.Err
+			if logs.Stderr.Content != "" {
+				detail += fmt.Sprintf(" (stderr: %s)", strings.TrimSpace(logs.Stderr.Content))
+			}
+			return nil, fmt.Errorf("app: %s exited before connecting: %s", man.ID, detail)
+		default:
+		}
 	}
-	_ = ln.Close()
-	platform.RemoveChildSocket(endpoint)
 
 	var writeMu sync.Mutex
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -849,18 +942,23 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 	// Read auth request
 	line, err := readWireLine(reader)
 	if err != nil {
-		_ = conn.Close()
+		dropConn()
 		_ = m.procs.Stop(proc.ID(), 2*time.Second)
 		if m.tokens != nil && appToken != "" {
 			m.tokens.Revoke(appToken)
 		}
 		cancel()
 		forget()
-		return nil, fmt.Errorf("app: %s: read auth handshake: %w", man.ID, err)
+		logs, _ := m.procs.Logs(proc.ID())
+		detail := ""
+		if logs.Stderr.Content != "" {
+			detail = fmt.Sprintf(" (stderr: %s)", strings.TrimSpace(logs.Stderr.Content))
+		}
+		return nil, fmt.Errorf("app: %s: read auth handshake: %w%s", man.ID, err, detail)
 	}
 	var authReq rpcWireMessage
 	if err := json.Unmarshal(line, &authReq); err != nil || authReq.Method != "auth" {
-		_ = conn.Close()
+		dropConn()
 		_ = m.procs.Stop(proc.ID(), 2*time.Second)
 		if m.tokens != nil && appToken != "" {
 			m.tokens.Revoke(appToken)
@@ -879,7 +977,7 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 			OK:    false,
 			Error: "invalid application token",
 		})
-		_ = conn.Close()
+		dropConn()
 		_ = m.procs.Stop(proc.ID(), 2*time.Second)
 		if m.tokens != nil && appToken != "" {
 			m.tokens.Revoke(appToken)
@@ -893,7 +991,7 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 		OK:   true,
 		Data: json.RawMessage(`{"authenticated":true}`),
 	}); err != nil {
-		_ = conn.Close()
+		dropConn()
 		_ = m.procs.Stop(proc.ID(), 2*time.Second)
 		if m.tokens != nil && appToken != "" {
 			m.tokens.Revoke(appToken)
@@ -907,7 +1005,7 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	line, err = readWireLine(reader)
 	if err != nil {
-		_ = conn.Close()
+		dropConn()
 		_ = m.procs.Stop(proc.ID(), 2*time.Second)
 		if m.tokens != nil && appToken != "" {
 			m.tokens.Revoke(appToken)
@@ -918,7 +1016,7 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 	}
 	var readyReq rpcWireMessage
 	if err := json.Unmarshal(line, &readyReq); err != nil || readyReq.Method != "app/ready" {
-		_ = conn.Close()
+		dropConn()
 		_ = m.procs.Stop(proc.ID(), 2*time.Second)
 		if m.tokens != nil && appToken != "" {
 			m.tokens.Revoke(appToken)
@@ -933,7 +1031,7 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 		Routes          []string `json:"routes"`
 	}
 	if err := json.Unmarshal(readyReq.Params, &readyParams); err != nil {
-		_ = conn.Close()
+		dropConn()
 		_ = m.procs.Stop(proc.ID(), 2*time.Second)
 		if m.tokens != nil && appToken != "" {
 			m.tokens.Revoke(appToken)
@@ -948,7 +1046,7 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 			OK:    false,
 			Error: fmt.Sprintf("unsupported protocol version %d", readyParams.ProtocolVersion),
 		})
-		_ = conn.Close()
+		dropConn()
 		_ = m.procs.Stop(proc.ID(), 2*time.Second)
 		if m.tokens != nil && appToken != "" {
 			m.tokens.Revoke(appToken)
@@ -963,7 +1061,7 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 			OK:    false,
 			Error: fmt.Sprintf("mismatched app_id %q", readyParams.AppID),
 		})
-		_ = conn.Close()
+		dropConn()
 		_ = m.procs.Stop(proc.ID(), 2*time.Second)
 		if m.tokens != nil && appToken != "" {
 			m.tokens.Revoke(appToken)
@@ -978,7 +1076,7 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 			OK:    false,
 			Error: fmt.Sprintf("permission denied: missing capability %q", security.CapIPC),
 		})
-		_ = conn.Close()
+		dropConn()
 		_ = m.procs.Stop(proc.ID(), 2*time.Second)
 		if m.tokens != nil && appToken != "" {
 			m.tokens.Revoke(appToken)
@@ -992,7 +1090,7 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 		OK:   true,
 		Data: json.RawMessage(`{"ready":true}`),
 	}); err != nil {
-		_ = conn.Close()
+		dropConn()
 		_ = m.procs.Stop(proc.ID(), 2*time.Second)
 		if m.tokens != nil && appToken != "" {
 			m.tokens.Revoke(appToken)
@@ -1087,7 +1185,7 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 
 	if len(routes) > 0 {
 		if err := m.router.HandleBatch(routes); err != nil {
-			_ = conn.Close()
+			dropConn()
 			_ = m.procs.Stop(proc.ID(), 2*time.Second)
 			if m.tokens != nil && appToken != "" {
 				m.tokens.Revoke(appToken)
@@ -1106,7 +1204,7 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 			active = false
 			mu.Unlock()
 			cancel()
-			_ = conn.Close()
+			dropConn()
 			if m.tokens != nil && ra.token != "" {
 				m.tokens.Revoke(ra.token)
 			}

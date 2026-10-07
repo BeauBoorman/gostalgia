@@ -195,6 +195,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 	}
 	rt.Apps = app.NewManager(registry, rt.Procs, rt.Router, rt.Bus, log)
 	rt.Apps.SetUser(rt.User)
+	rt.Apps.SetRoot(root)
 
 	token, err := newToken()
 	if err != nil {

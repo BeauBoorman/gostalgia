@@ -5,6 +5,7 @@ package platform
 import (
 	"fmt"
 	"net"
+	"os"
 )
 
 // ListenIPC opens the environment's local IPC listener. Windows lacks a
@@ -27,4 +28,11 @@ func ListenChildIPC(appID string) (net.Listener, string, error) {
 		return nil, "", fmt.Errorf("platform: listen child loopback: %w", err)
 	}
 	return ln, "tcp://" + ln.Addr().String(), nil
+}
+
+// ChildIPC is unsupported on Windows: there is no way to pass a pre-connected
+// socket descriptor to a child process. Sandbox isolation also fails closed on
+// Windows, so this is unreachable in practice.
+func ChildIPC() (net.Conn, *os.File, error) {
+	return nil, nil, fmt.Errorf("%w: inherited-descriptor child IPC is unsupported on Windows", ErrSandboxUnsupported)
 }
