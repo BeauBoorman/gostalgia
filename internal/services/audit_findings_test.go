@@ -1,17 +1,15 @@
 package services
 
-// Audit proof-of-trigger tests. Each test demonstrates a real defect;
-// they are discovery artifacts, not fixes.
+// Audit proof-of-trigger tests for findings that are still open, plus
+// regression tests for the fixes in this branch. Findings already fixed
+// upstream have graduated into the package's regular test files
+// (session_test.go, profile_test.go, document_test.go, net_test.go).
 
 import (
 	"archive/zip"
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,72 +27,6 @@ var (
 	ipcOnly   = security.NewCapabilities(security.CapIPC)
 	adminCaps = security.AdminCapabilities()
 )
-
-// F: session/* accepts baseline ipc cap -> any app injects into the user's
-// persistent shell history and can close sessions.
-func TestAuditSessionHistoryInjection(t *testing.T) {
-	env := newTestEnv(t)
-	resp := env.callAs(context.Background(), evilApp, ipcOnly,
-		"session/workspace/set", map[string]any{"cmd": "open /users/guest/documents/diary.txt"})
-	if !resp.OK {
-		t.Fatalf("workspace/set rejected: %s", resp.Error)
-	}
-	var ws struct {
-		History []string `json:"history"`
-	}
-	must(t, json.Unmarshal(resp.Data, &ws))
-	found := false
-	for _, h := range ws.History {
-		if strings.Contains(h, "diary.txt") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("injected command missing from workspace history")
-	}
-	t.Log("CONFIRMED: app with only 'ipc' cap wrote into operator shell history")
-}
-
-// F: same fallback lets an app close every session (DoS) and create sessions
-// with arbitrary user identities.
-func TestAuditSessionCloseByApp(t *testing.T) {
-	env := newTestEnv(t)
-	// discover a session id as operator
-	resp := env.call(context.Background(), adminCaps, "session/list", nil)
-	var list []struct {
-		ID string `json:"id"`
-	}
-	must(t, json.Unmarshal(resp.Data, &list))
-	if len(list) == 0 {
-		t.Fatal("no sessions")
-	}
-	resp = env.callAs(context.Background(), evilApp, ipcOnly,
-		"session/close", map[string]any{"id": list[0].ID})
-	if !resp.OK {
-		t.Fatalf("session/close rejected: %s", resp.Error)
-	}
-	t.Log("CONFIRMED: app closed an operator session with only 'ipc' cap")
-}
-
-// F: profile/* accepts baseline ipc cap -> any app switches the active profile
-// (rewiring user context) and can create/delete profiles.
-func TestAuditProfileSwitchByApp(t *testing.T) {
-	env := newTestEnv(t)
-	resp := env.callAs(context.Background(), evilApp, ipcOnly,
-		"profile/create", map[string]any{"id": "pwned", "name": "Pwned"})
-	if !resp.OK {
-		t.Fatalf("profile/create rejected: %s", resp.Error)
-	}
-	resp = env.callAs(context.Background(), evilApp, ipcOnly,
-		"profile/switch", map[string]any{"id": "pwned"})
-	if !resp.OK {
-		t.Fatalf("profile/switch rejected: %s", resp.Error)
-	}
-	if got := env.ctx.Profiles.ActiveID(); got != "pwned" {
-		t.Fatalf("active profile = %q, want pwned", got)
-	}
-	t.Log("CONFIRMED: app switched active profile with only 'ipc' cap")
-}
 
 // Regression for #75: doc/associations/register requires the admin
 // capability, and applications can never claim a default handler — a
@@ -170,66 +102,6 @@ func TestAuditHandoffGrantLeakOnFailure(t *testing.T) {
 	if err := gs.CheckAccess("com.test.nonexistent", "/users/guest/documents/f.txt", vfs.AccessRead); err == nil {
 		t.Fatal("failed handoff left a live grant to a nonexistent app")
 	}
-}
-
-// F: doc/recents/add has no capability check and returns stat metadata for
-// paths the caller cannot read (existence/size/mtime oracle).
-func TestAuditRecentsMetadataOracle(t *testing.T) {
-	env := newTestEnv(t)
-	must(t, env.ctx.VFS.MkdirAll("/users/guest/documents"))
-	must(t, env.ctx.VFS.WriteFile("/users/guest/documents/secret.txt", []byte("hidden"), 0o644))
-	resp := env.callAs(context.Background(), evilApp, ipcOnly,
-		"doc/recents/add", map[string]any{"path": "/users/guest/documents/secret.txt"})
-	if !resp.OK {
-		t.Fatalf("recents/add rejected: %s", resp.Error)
-	}
-	var entry struct {
-		Path   string `json:"path"`
-		Exists bool   `json:"exists"`
-		Size   int64  `json:"size"`
-	}
-	must(t, json.Unmarshal(resp.Data, &entry))
-	if !entry.Exists {
-		t.Fatal("entry reports nonexistent")
-	}
-	t.Logf("CONFIRMED: app probed unreadable path: exists=%v size=%d", entry.Exists, entry.Size)
-}
-
-// F: net/fetch checks policy only on the initial URL; http.Client follows
-// redirects to any host (and to plaintext HTTP) -> allowlist bypass.
-func TestAuditNetFetchRedirectBypass(t *testing.T) {
-	env := newTestEnv(t)
-	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "PWNED-BY-REDIRECT")
-	}))
-	defer blocked.Close()
-	allowed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, blocked.URL, http.StatusFound)
-	}))
-	defer allowed.Close()
-
-	env.ctx.Policy.Update(func(p *security.OperatorPolicy) {
-		p.Network.Enabled = true
-		p.Network.AllowInsecure = true
-		p.Network.AllowedHosts = []string{"127.0.0.1"}
-		p.Network.BlockedHosts = []string{"localhost"}
-	})
-	// 'localhost' is explicitly blocked; '127.0.0.1' is allowed. The allowed
-	// server 302s to the blocked one.
-	resp := env.callAs(context.Background(), security.OperatorPrincipal(security.User{Name: "op"}),
-		adminCaps, "net/fetch", map[string]any{"url": allowed.URL})
-	if !resp.OK {
-		t.Fatalf("net/fetch failed: %s", resp.Error)
-	}
-	var out struct {
-		Data string `json:"data_base64"`
-	}
-	must(t, json.Unmarshal(resp.Data, &out))
-	decoded, _ := base64.StdEncoding.DecodeString(out.Data)
-	if !strings.Contains(string(decoded), "PWNED-BY-REDIRECT") {
-		t.Fatalf("redirect target body not returned: %q", decoded)
-	}
-	t.Log("CONFIRMED: fetch followed a redirect to a policy-blocked host")
 }
 
 // F: backup export silently drops files — a user's *.zip documents, unreadable
