@@ -93,7 +93,7 @@ type getResp struct {
 }
 
 func (s *ConfigService) get(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapIPC); err != nil {
+	if err := ipc.RequireCap(ctx, security.CapConfigRead); err != nil {
 		return nil, err
 	}
 	var p getReq
@@ -286,7 +286,7 @@ type listResp struct {
 }
 
 func (s *ConfigService) list(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapIPC); err != nil {
+	if err := ipc.RequireCap(ctx, security.CapConfigRead); err != nil {
 		return nil, err
 	}
 	var p listReq
@@ -316,7 +316,7 @@ type previewReq struct {
 }
 
 func (s *ConfigService) preview(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapIPC); err != nil {
+	if err := ipc.RequireCap(ctx, security.CapConfigRead); err != nil {
 		return nil, err
 	}
 	var p previewReq
@@ -344,7 +344,7 @@ func (s *ConfigService) preview(ctx context.Context, req ipc.Request) (any, erro
 }
 
 func (s *ConfigService) cancelPreview(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapIPC); err != nil {
+	if err := ipc.RequireCap(ctx, security.CapConfigRead); err != nil {
 		return nil, err
 	}
 	s.store.CancelPreview(config.QueryOpts{})
@@ -396,7 +396,7 @@ type validateResp struct {
 }
 
 func (s *ConfigService) validate(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapIPC); err != nil {
+	if err := ipc.RequireCap(ctx, security.CapConfigRead); err != nil {
 		return nil, err
 	}
 	var p validateReq
@@ -441,7 +441,7 @@ type explainReq struct {
 }
 
 func (s *ConfigService) explain(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapIPC); err != nil {
+	if err := ipc.RequireCap(ctx, security.CapConfigRead); err != nil {
 		return nil, err
 	}
 	var p explainReq
