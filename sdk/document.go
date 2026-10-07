@@ -14,7 +14,7 @@ type HandoffRequest struct {
 	Version int    `json:"version"`
 	Path    string `json:"path"`
 	AppID   string `json:"app_id,omitempty"`
-	Mode    string `json:"mode,omitempty"` // "read" or "read-write", default "read-write"
+	Mode    string `json:"mode,omitempty"` // "read" or "read-write", default "read"
 }
 
 // Validate checks the handoff request parameters.

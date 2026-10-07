@@ -72,8 +72,10 @@ The runtime distinguishes three classes of actors:
     `/apps/data/<app_id>`. Applications can only read, write, and list within
     their own partition. Other partitions are completely hidden and inaccessible.
   - Scoped VFS grants: Access outside an app's private partition requires an
-    explicit, path-scoped grant issued by an operator (`fs/grant`). Grants are
-    checked per-operation and fail closed on revocation.
+    explicit, path-scoped grant issued by an operator (`fs/grant`) or by a
+    document handoff (`doc/handoff`). Grants are checked per-operation and
+    fail closed on revocation. Handoff grants are session-bound: they are
+    revoked automatically when the receiving application's run ends.
 
 ### 3. Local-Attacker Threat Model (Adversarial)
 

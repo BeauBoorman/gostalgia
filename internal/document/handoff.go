@@ -86,10 +86,12 @@ func (h *HandoffManager) Handoff(ctx context.Context, caller security.Principal,
 		}
 	}
 
-	// Determine requested access mode
+	// Determine requested access mode. The default is least privilege:
+	// a bare "open" confers read access; write access must be requested
+	// explicitly.
 	modeStr := strings.TrimSpace(req.Mode)
 	if modeStr == "" {
-		modeStr = "read-write"
+		modeStr = "read"
 	}
 	accessMode, err := vfs.NormalizeAccessMode(modeStr)
 	if err != nil {
@@ -133,19 +135,9 @@ func (h *HandoffManager) Handoff(ctx context.Context, caller security.Principal,
 		targetApp = defApp
 	}
 
-	// Issue scoped grant for the selected document ONLY to target application
-	var grantID string
-	if h.grants != nil {
-		// recursive: false ensures target app only receives access to cleanPath,
-		// and NOT to any parent directory, siblings, or descendants.
-		grant, err := h.grants.Issue(targetApp, cleanPath, accessMode, false)
-		if err != nil {
-			return nil, fmt.Errorf("handoff: failed to issue scoped grant: %w", err)
-		}
-		grantID = grant.ID
-	}
-
-	// Launch target application if not currently running
+	// Launch target application if not currently running. The grant is
+	// issued only after a successful launch: granting first would leak a
+	// live grant to any app id that fails to launch.
 	launched := false
 	if h.launcher != nil && !h.launcher.IsRunning(targetApp) {
 		launchCtx := h.lifetimeCtx
@@ -158,6 +150,25 @@ func (h *HandoffManager) Handoff(ctx context.Context, caller security.Principal,
 		launched = true
 	}
 
+	// Issue a scoped grant for the selected document ONLY to the target
+	// application. recursive: false ensures the target receives access to
+	// cleanPath and NOT to any parent directory, siblings, or descendants.
+	// The grant is session-bound: it is revoked when the target app's run
+	// ends, and it is revoked below if the open dispatch fails.
+	var grantID string
+	if h.grants != nil {
+		grant, err := h.grants.IssueSession(targetApp, cleanPath, accessMode, false)
+		if err != nil {
+			return nil, fmt.Errorf("handoff: failed to issue scoped grant: %w", err)
+		}
+		grantID = grant.ID
+	}
+	revokeGrant := func() {
+		if grantID != "" && h.grants != nil {
+			_ = h.grants.Revoke(grantID)
+		}
+	}
+
 	// Dispatch document open to the target application
 	if h.dispatcher != nil {
 		openParams := map[string]any{
@@ -168,6 +179,7 @@ func (h *HandoffManager) Handoff(ctx context.Context, caller security.Principal,
 		}
 		raw, err := json.Marshal(openParams)
 		if err != nil {
+			revokeGrant()
 			return nil, err
 		}
 
@@ -179,6 +191,7 @@ func (h *HandoffManager) Handoff(ctx context.Context, caller security.Principal,
 			Params: raw,
 		})
 		if !resp.OK {
+			revokeGrant()
 			return nil, fmt.Errorf("handoff: target %s failed to open document: %s", targetApp, resp.Error)
 		}
 	}

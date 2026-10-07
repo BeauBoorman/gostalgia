@@ -74,9 +74,14 @@ type Grant struct {
 	Path      string     `json:"path"`      // environment path, e.g. "/users/guest/documents/notes.txt"
 	Access    AccessMode `json:"access"`    // "read" or "read-write"
 	Recursive bool       `json:"recursive"` // whether descendants are included
-	CreatedAt time.Time  `json:"created_at"`
-	Revoked   bool       `json:"revoked"`
-	RevokedAt time.Time  `json:"revoked_at,omitempty"`
+	// SessionBound grants live only for the application's current run —
+	// document handoffs use them — and the runtime revokes them when the
+	// app exits. Standing grants (install-time path grants, operator
+	// fs/grant) survive restarts.
+	SessionBound bool      `json:"session_bound,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	Revoked      bool      `json:"revoked"`
+	RevokedAt    time.Time `json:"revoked_at,omitempty"`
 }
 
 // GrantStore manages scoped VFS grants, validation, and revocation.
@@ -97,6 +102,17 @@ func NewGrantStore() *GrantStore {
 
 // Issue generates and records a new path-scoped grant for an application.
 func (s *GrantStore) Issue(appID, envPath string, access AccessMode, recursive bool) (*Grant, error) {
+	return s.issue(appID, envPath, access, recursive, false)
+}
+
+// IssueSession is Issue for grants bound to the application's current
+// run — a document handoff confers access only while the receiving app
+// runs. The runtime revokes session-bound grants when the app exits.
+func (s *GrantStore) IssueSession(appID, envPath string, access AccessMode, recursive bool) (*Grant, error) {
+	return s.issue(appID, envPath, access, recursive, true)
+}
+
+func (s *GrantStore) issue(appID, envPath string, access AccessMode, recursive, sessionBound bool) (*Grant, error) {
 	if strings.TrimSpace(appID) == "" {
 		return nil, errors.New("vfs: app ID is required")
 	}
@@ -126,22 +142,24 @@ func (s *GrantStore) Issue(appID, envPath string, access AccessMode, recursive b
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	g := &Grant{
-		ID:        id,
-		AppID:     appID,
-		Path:      cleanPath,
-		Access:    access,
-		Recursive: recursive,
-		CreatedAt: time.Now(),
+		ID:           id,
+		AppID:        appID,
+		Path:         cleanPath,
+		Access:       access,
+		Recursive:    recursive,
+		SessionBound: sessionBound,
+		CreatedAt:    time.Now(),
 	}
 	s.grants[id] = g
 	s.byApp[appID] = append(s.byApp[appID], id)
 	return &Grant{
-		ID:        g.ID,
-		AppID:     g.AppID,
-		Path:      g.Path,
-		Access:    g.Access,
-		Recursive: g.Recursive,
-		CreatedAt: g.CreatedAt,
+		ID:           g.ID,
+		AppID:        g.AppID,
+		Path:         g.Path,
+		Access:       g.Access,
+		Recursive:    g.Recursive,
+		SessionBound: g.SessionBound,
+		CreatedAt:    g.CreatedAt,
 	}, nil
 }
 
@@ -167,6 +185,22 @@ func (s *GrantStore) RevokeApp(appID string) {
 	now := time.Now()
 	for _, id := range s.byApp[appID] {
 		if g, ok := s.grants[id]; ok && !g.Revoked {
+			g.Revoked = true
+			g.RevokedAt = now
+		}
+	}
+}
+
+// RevokeAppSession invalidates an application's session-bound grants —
+// those issued for a single run, like document handoffs — when that run
+// ends. Standing grants are untouched: install-time path grants and
+// operator fs/grant authorizations survive app restarts.
+func (s *GrantStore) RevokeAppSession(appID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for _, id := range s.byApp[appID] {
+		if g, ok := s.grants[id]; ok && g.SessionBound && !g.Revoked {
 			g.Revoked = true
 			g.RevokedAt = now
 		}

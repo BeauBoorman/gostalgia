@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"gostalgia/internal/security"
 	"gostalgia/internal/vfs"
@@ -349,5 +350,58 @@ func TestAuditRecentsMetadataOracle(t *testing.T) {
 	must(t, json.Unmarshal(resp.Data, &entry))
 	if !entry.Exists || entry.Size == 0 {
 		t.Fatalf("expected real metadata for granted path, got %+v", entry)
+	}
+}
+
+// #92: handoff grants are bound to the target app's run — stopping the
+// app revokes them, while install-time/operator grants survive.
+func TestDocumentHandoffGrantRevokedOnAppExit(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	adminCaps := security.AdminCapabilities()
+	dfs := env.ctx.VFS.(vfs.DocumentFS)
+	v := env.ctx.VFS.(*vfs.VFS)
+
+	doc := "/users/guest/documents/ephemeral.txt"
+	must(t, dfs.SaveAtomic(doc, []byte("temp content"), 0o644))
+
+	// A standing (non-session) grant to the same app must survive.
+	must(t, env.ctx.VFS.MkdirAll("/users/guest/config"))
+	stable, err := v.Grants().Issue("com.gostalgia.notes", "/users/guest/config", vfs.AccessRead, true)
+	must(t, err)
+
+	resp := env.call(ctx, adminCaps, "doc/handoff", sdk.HandoffRequest{
+		Version: sdk.DocumentHandoffVersion,
+		Path:    doc,
+		AppID:   "com.gostalgia.notes",
+	})
+	if !resp.OK {
+		t.Fatalf("doc/handoff failed: %s", resp.Error)
+	}
+	var hResult sdk.HandoffResult
+	must(t, json.Unmarshal(resp.Data, &hResult))
+	if hResult.GrantID == "" {
+		t.Fatal("handoff returned no grant id")
+	}
+	if !env.ctx.Apps.IsRunning("com.gostalgia.notes") {
+		t.Fatal("notes was not launched by handoff")
+	}
+	if g, ok := v.Grants().Get(hResult.GrantID); !ok || !g.SessionBound || g.Revoked {
+		t.Fatalf("handoff grant = %+v (ok=%v), want live session-bound grant", g, ok)
+	}
+
+	must(t, env.ctx.Apps.Stop("com.gostalgia.notes", 5*time.Second))
+
+	if g, ok := v.Grants().Get(hResult.GrantID); !ok || !g.Revoked {
+		t.Fatalf("handoff grant = %+v after app exit, want revoked", g)
+	}
+	if err := v.Grants().CheckAccess("com.gostalgia.notes", doc, vfs.AccessRead); err == nil {
+		t.Fatal("handoff grant still authorizes access after target app exit")
+	}
+	if g, _ := v.Grants().Get(stable.ID); g.Revoked {
+		t.Fatal("standing grant marked revoked on app exit")
+	}
+	if err := v.Grants().CheckAccess("com.gostalgia.notes", "/users/guest/config", vfs.AccessRead); err != nil {
+		t.Fatalf("standing grant revoked by app exit: %v", err)
 	}
 }
