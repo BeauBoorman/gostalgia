@@ -158,6 +158,40 @@ func TestConfigServicePermissions(t *testing.T) {
 	}
 }
 
+// #77: config read routes must require config.read, not baseline ipc.
+func TestConfigServiceReadRequiresCapability(t *testing.T) {
+	env := newTestConfigService(t)
+	app := security.AppPrincipal("com.test.app", 100, "sess-1", security.User{ID: "u-1", Name: "appuser"})
+	ipcOnly := security.NewCapabilities(security.CapIPC)
+
+	for _, tc := range []struct {
+		method string
+		params map[string]any
+	}{
+		{"config/get", map[string]any{"path": "theme"}},
+		{"config/list", nil},
+		{"config/snapshot", nil},
+		{"config/explain", map[string]any{"path": "theme"}},
+		{"config/preview", map[string]any{"path": "theme", "value": "midnight"}},
+		{"config/validate", map[string]any{"path": "theme", "value": "midnight"}},
+		{"config/cancel_preview", nil},
+	} {
+		resp := env.callAs(context.Background(), app, ipcOnly, tc.method, tc.params)
+		if resp.OK {
+			t.Fatalf("%s accepted an app without config.read", tc.method)
+		}
+	}
+
+	// The dedicated capability unlocks the read routes.
+	readCaps := security.NewCapabilities(security.CapIPC, security.CapConfigRead)
+	for _, method := range []string{"config/get", "config/list", "config/explain", "config/validate"} {
+		resp := env.callAs(context.Background(), app, readCaps, method, map[string]any{"path": "theme", "value": "midnight"})
+		if !resp.OK {
+			t.Fatalf("%s rejected an app holding config.read: %s", method, resp.Error)
+		}
+	}
+}
+
 func TestConfigServiceValidationAndConflicts(t *testing.T) {
 	env := newTestConfigService(t)
 
