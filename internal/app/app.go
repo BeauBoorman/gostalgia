@@ -482,6 +482,11 @@ func (m *Manager) launchInProc(ctx context.Context, man Manifest, ra *runningApp
 		if m.tokens != nil && ra.token != "" {
 			m.tokens.Revoke(ra.token)
 		}
+		// Session-bound grants (document handoffs) die with this run,
+		// like the launch-bound token above.
+		if m.grants != nil {
+			m.grants.RevokeAppSession(id)
+		}
 		if registered {
 			for method := range routes {
 				m.router.Unhandle(method)
@@ -1110,6 +1115,10 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 			if m.tokens != nil && ra.token != "" {
 				m.tokens.Revoke(ra.token)
 			}
+			// Session-bound grants (document handoffs) die with this run.
+			if m.grants != nil {
+				m.grants.RevokeAppSession(man.ID)
+			}
 			if registered {
 				for method := range routes {
 					m.router.Unhandle(method)
@@ -1198,6 +1207,7 @@ func (m *Manager) BeginMaintenance(id string, timeout time.Duration) (release fu
 	}
 	m.maintenance[id] = true
 	tokens := m.tokens
+	grants := m.grants
 	m.mu.Unlock()
 	var once sync.Once
 	release = func() {
@@ -1209,6 +1219,9 @@ func (m *Manager) BeginMaintenance(id string, timeout time.Duration) (release fu
 	}
 	if tokens != nil {
 		tokens.RevokeApp(id)
+	}
+	if grants != nil {
+		grants.RevokeAppSession(id)
 	}
 	if running {
 		if err := m.Stop(id, timeout); err != nil {

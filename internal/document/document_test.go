@@ -3,6 +3,7 @@ package document
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,14 +20,16 @@ import (
 
 // mockAppLauncher tracks launched apps and handles IsRunning/Launch.
 type mockAppLauncher struct {
-	mu       sync.Mutex
-	running  map[string]bool
-	launched []string
+	mu        sync.Mutex
+	running   map[string]bool
+	launched  []string
+	launchErr map[string]error
 }
 
 func newMockLauncher() *mockAppLauncher {
 	return &mockAppLauncher{
-		running: make(map[string]bool),
+		running:   make(map[string]bool),
+		launchErr: make(map[string]error),
 	}
 }
 
@@ -39,6 +42,9 @@ func (m *mockAppLauncher) IsRunning(id string) bool {
 func (m *mockAppLauncher) Launch(ctx context.Context, id string) (*process.Process, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.launchErr[id]; err != nil {
+		return nil, err
+	}
 	m.running[id] = true
 	m.launched = append(m.launched, id)
 	return nil, nil
@@ -538,6 +544,137 @@ func TestHandoffIsolationAndScoping(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected permission error when caller lacks document access")
+	}
+}
+
+// #75: an omitted mode must default to read, not read-write — the
+// operator's plain "open" cannot silently hand a write grant to whatever
+// app resolves the type.
+func TestHandoffDefaultsToReadOnly(t *testing.T) {
+	v, grants := setupTestVFS(t)
+	assoc := NewAssociationTable()
+	recents := NewRecentsStore(v, grants, "/users/guest/config/recents.json")
+	launcher := newMockLauncher()
+	dispatcher := newMockDispatcher()
+	handoff := NewHandoffManager(v, grants, assoc, recents, launcher, dispatcher)
+
+	doc := "/users/guest/documents/plain.txt"
+	_ = v.SaveAtomic(doc, []byte("data"), 0o644)
+
+	res, err := handoff.Handoff(context.Background(),
+		security.OperatorPrincipal(security.User{Name: "guest"}),
+		sdk.HandoffRequest{Version: sdk.DocumentHandoffVersion, Path: doc})
+	if err != nil {
+		t.Fatalf("handoff failed: %v", err)
+	}
+	if res.Mode != string(vfs.AccessRead) {
+		t.Fatalf("default mode = %q, want read", res.Mode)
+	}
+	g, ok := grants.Get(res.GrantID)
+	if !ok {
+		t.Fatal("handoff grant missing")
+	}
+	if g.Access != vfs.AccessRead {
+		t.Fatalf("grant access = %q, want read", g.Access)
+	}
+	if err := grants.CheckAccess(g.AppID, doc, vfs.AccessRead); err != nil {
+		t.Fatalf("read grant not honored: %v", err)
+	}
+	if err := grants.CheckAccess(g.AppID, doc, vfs.AccessReadWrite); err == nil {
+		t.Fatal("default-mode handoff conferred read-write access")
+	}
+}
+
+// #76: the scoped grant is issued only after the target launches, and is
+// revoked if the open dispatch fails — a failed handoff never leaves a
+// live grant.
+func TestHandoffGrantRevokedOnFailure(t *testing.T) {
+	v, grants := setupTestVFS(t)
+	assoc := NewAssociationTable()
+	recents := NewRecentsStore(v, grants, "/users/guest/config/recents.json")
+	launcher := newMockLauncher()
+	dispatcher := newMockDispatcher()
+	handoff := NewHandoffManager(v, grants, assoc, recents, launcher, dispatcher)
+
+	doc := "/users/guest/documents/leak.txt"
+	_ = v.SaveAtomic(doc, []byte("data"), 0o644)
+	op := security.OperatorPrincipal(security.User{Name: "guest"})
+
+	// Launch failure: no grant is ever issued.
+	launcher.launchErr["com.gostalgia.notes"] = errors.New("boom")
+	_, err := handoff.Handoff(context.Background(), op, sdk.HandoffRequest{
+		Version: sdk.DocumentHandoffVersion, Path: doc, AppID: "com.gostalgia.notes",
+	})
+	if err == nil {
+		t.Fatal("handoff to a failing launch succeeded")
+	}
+	for _, g := range grants.List("com.gostalgia.notes") {
+		if !g.Revoked {
+			t.Fatalf("launch failure leaked a live grant: %+v", g)
+		}
+	}
+
+	// Dispatch failure after a successful launch: the issued grant is revoked.
+	delete(launcher.launchErr, "com.gostalgia.notes")
+	dispatcher.handler = func(req ipc.Request) ipc.Response {
+		return ipc.Response{ID: req.ID, OK: false, Error: "app rejected the open"}
+	}
+	_, err = handoff.Handoff(context.Background(), op, sdk.HandoffRequest{
+		Version: sdk.DocumentHandoffVersion, Path: doc, AppID: "com.gostalgia.notes",
+	})
+	if err == nil {
+		t.Fatal("handoff with a failing dispatch succeeded")
+	}
+	for _, g := range grants.List("com.gostalgia.notes") {
+		if !g.Revoked {
+			t.Fatalf("dispatch failure leaked a live grant: %+v", g)
+		}
+	}
+}
+
+// #92: handoff grants are session-bound — they die with the target app's
+// run instead of persisting forever.
+func TestHandoffGrantIsSessionBound(t *testing.T) {
+	v, grants := setupTestVFS(t)
+	assoc := NewAssociationTable()
+	recents := NewRecentsStore(v, grants, "/users/guest/config/recents.json")
+	handoff := NewHandoffManager(v, grants, assoc, recents, newMockLauncher(), newMockDispatcher())
+
+	doc := "/users/guest/documents/bound.txt"
+	_ = v.SaveAtomic(doc, []byte("data"), 0o644)
+
+	res, err := handoff.Handoff(context.Background(),
+		security.OperatorPrincipal(security.User{Name: "guest"}),
+		sdk.HandoffRequest{Version: sdk.DocumentHandoffVersion, Path: doc, AppID: "com.gostalgia.notes"})
+	if err != nil {
+		t.Fatalf("handoff failed: %v", err)
+	}
+	g, ok := grants.Get(res.GrantID)
+	if !ok {
+		t.Fatal("handoff grant missing")
+	}
+	if !g.SessionBound {
+		t.Fatal("handoff grant is not session-bound")
+	}
+
+	// A standing grant to the same app is not affected by session cleanup.
+	stable, err := grants.Issue("com.gostalgia.notes", "/users/guest/config", vfs.AccessRead, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants.RevokeAppSession("com.gostalgia.notes")
+
+	if now, _ := grants.Get(res.GrantID); !now.Revoked {
+		t.Fatal("session-bound grant not revoked on app exit")
+	}
+	if err := grants.CheckAccess("com.gostalgia.notes", doc, vfs.AccessRead); err == nil {
+		t.Fatal("session-bound grant still authorizes access after app exit")
+	}
+	if now, _ := grants.Get(stable.ID); now.Revoked {
+		t.Fatal("standing grant marked revoked by session cleanup")
+	}
+	if err := grants.CheckAccess("com.gostalgia.notes", "/users/guest/config", vfs.AccessRead); err != nil {
+		t.Fatalf("standing grant was revoked by session cleanup: %v", err)
 	}
 }
 

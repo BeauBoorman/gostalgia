@@ -365,13 +365,23 @@ func (s *DocumentService) associationsResolve(ctx context.Context, req ipc.Reque
 }
 
 // associationsRegister adds a new association.
+// Registration mutates the shared association table, so it requires the
+// admin capability. Claiming the default handler for a type is
+// additionally operator-only: a hijacked default receives a scoped grant
+// for every matching document the operator opens via handoff.
 func (s *DocumentService) associationsRegister(ctx context.Context, req ipc.Request) (any, error) {
 	var assoc sdk.DocumentTypeAssociation
 	if err := ipc.DecodeParams(req.Params, &assoc); err != nil {
 		return nil, err
 	}
 
+	if err := ipc.RequireCap(ctx, security.CapAdmin); err != nil {
+		return nil, err
+	}
 	principal := ipc.CallerPrincipal(ctx)
+	if principal.IsApp() && assoc.Default {
+		return nil, fmt.Errorf("doc: only an operator may claim a default association")
+	}
 	if principal.IsApp() && assoc.AppID != "" && assoc.AppID != principal.AppID {
 		return nil, fmt.Errorf("doc: apps cannot register associations on behalf of other apps")
 	}

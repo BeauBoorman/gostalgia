@@ -174,7 +174,8 @@ Rather than open-ended access to the entire root, applications receive scoped vi
 - Revocation:
   - Operators revoke grants via `fs/grant/revoke`.
   - Revoked grants fail immediately on subsequent operations with `permission_denied: grant revoked`.
-  - Grants are scoped to `app_id`; active grants persist across application process restarts until explicitly revoked. Revoked grants remain revoked across restarts.
+  - Grants are scoped to `app_id`; standing grants persist across application process restarts until explicitly revoked. Revoked grants remain revoked across restarts.
+  - Session-bound grants (`session_bound`, issued by `doc/handoff`) are bound to the receiving application's run: they are revoked when that app exits, crashes, or is stopped, and on any handoff failure after issuance.
 
 ### 3. Trash Isolation
 - Applications listing the trash (`fs/trash/list`) only see items that originated from paths they are authorized to access.
@@ -225,7 +226,7 @@ The document subsystem provides permission-aware search, indexed lookup, persist
 | `doc/associations` | `ipc` | Lists all registered document type associations. |
 | `doc/associations/resolve` | `ipc` | Resolves target application for a document path or extension. |
 | `doc/associations/register`| `admin` | Registers a custom document type association. |
-| `doc/handoff` | Caller app or `admin` | Versioned open-with contract. Issues a scoped single-document grant without broader directory access, launches target app if needed, and dispatches open. |
+| `doc/handoff` | Caller app or `admin` | Versioned open-with contract. Launches the target app if needed, then issues a scoped single-document session-bound grant (default mode `read`) without broader directory access, and dispatches open. The grant is revoked on dispatch failure and when the target app exits. |
 
 ## Testing
 

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"gostalgia/internal/ipc"
+	"gostalgia/internal/security"
 )
 
 func TestFSListOverSocketWithFIFOCompletes(t *testing.T) {
@@ -88,5 +89,33 @@ func TestFSListOverSocketWithFIFOCompletes(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("fs/list blocked >5s on a FIFO entry")
+	}
+}
+
+// Issue #79: fs/read and fs/write must reject FIFOs (and other special
+// files) promptly instead of blocking forever inside HostFS.Open.
+func TestFSReadWriteOnFIFOFailsFast(t *testing.T) {
+	env := newTestEnv(t)
+	must(t, syscall.Mkfifo(filepath.Join(env.ctx.Root, "vfs", "users", "guest", "fifo"), 0o644))
+
+	admin := security.AdminCapabilities()
+	for _, tc := range []struct {
+		method string
+		params map[string]any
+	}{
+		{"fs/read", map[string]any{"path": "/users/guest/fifo"}},
+		{"fs/read", map[string]any{"path": "/users/guest/fifo", "limit": 16}}, // bounded-read path uses Open
+		{"fs/write", map[string]any{"path": "/users/guest/fifo", "data_base64": "eA=="}},
+	} {
+		done := make(chan ipc.Response, 1)
+		go func() { done <- env.call(context.Background(), admin, tc.method, tc.params) }()
+		select {
+		case resp := <-done:
+			if resp.OK {
+				t.Errorf("%s on a FIFO succeeded; special files must be rejected", tc.method)
+			}
+		case <-time.After(5 * time.Second):
+			t.Errorf("%s on a FIFO did not return within 5s", tc.method)
+		}
 	}
 }

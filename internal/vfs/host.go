@@ -56,11 +56,39 @@ func (h *HostFS) RootPath() string { return h.rootPath }
 // Close releases the backing root handle.
 func (h *HostFS) Close() error { return h.root.Close() }
 
+// openChecked opens name and then verifies the opened handle — not the
+// path — refers to a regular file or a directory. Checking after open
+// is deliberate: a pre-open Lstat leaves a race in which the path is
+// swapped for a special file, and openNonblock keeps the open itself
+// from blocking on a FIFO waiting for a peer. FIFOs, sockets, and
+// devices carry no document content and are refused.
+func (h *HostFS) openChecked(op, name string, flag int, perm fs.FileMode) (*os.File, error) {
+	f, err := h.root.OpenFile(name, flag|openNonblock, perm)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() && !info.IsDir() {
+		_ = f.Close()
+		return nil, &Error{
+			Op:      op,
+			Path:    "/" + name,
+			Code:    ErrInvalid,
+			Message: "special files cannot be opened",
+		}
+	}
+	return f, nil
+}
+
 func (h *HostFS) Open(name string) (fs.File, error) {
 	if err := validFSName("open", name); err != nil {
 		return nil, err
 	}
-	return h.root.Open(name)
+	return h.openChecked("open", name, os.O_RDONLY, 0)
 }
 
 func (h *HostFS) Stat(name string) (fs.FileInfo, error) {
@@ -82,7 +110,7 @@ func (h *HostFS) Stat(name string) (fs.FileInfo, error) {
 	if !info.Mode().IsRegular() && !info.IsDir() {
 		return info, nil
 	}
-	f, err := h.root.Open(name)
+	f, err := h.root.OpenFile(name, os.O_RDONLY|openNonblock, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +122,7 @@ func (h *HostFS) ReadFile(name string) ([]byte, error) {
 	if err := validFSName("read", name); err != nil {
 		return nil, err
 	}
-	f, err := h.root.Open(name)
+	f, err := h.openChecked("read", name, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +134,7 @@ func (h *HostFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	if err := validFSName("readdir", name); err != nil {
 		return nil, err
 	}
-	f, err := h.root.Open(name)
+	f, err := h.root.OpenFile(name, os.O_RDONLY|openNonblock, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +166,7 @@ func (h *HostFS) ReadDir(name string) ([]fs.DirEntry, error) {
 			}
 			continue
 		}
-		if cf, err := h.root.Open(child); err == nil {
+		if cf, err := h.root.OpenFile(child, os.O_RDONLY|openNonblock, 0); err == nil {
 			info, err := cf.Stat()
 			cf.Close()
 			if err == nil {
@@ -179,9 +207,24 @@ func (h *HostFS) WriteFile(name string, data []byte, perm fs.FileMode) error {
 	if perm == 0 {
 		perm = 0o644
 	}
-	f, err := h.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	f, err := h.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|openNonblock, perm)
 	if err != nil {
 		return err
+	}
+	// Same post-open check as reads: without it, a path swapped for a
+	// FIFO (or one created between name lookup and open) would write to
+	// or block on a special file.
+	if info, err := f.Stat(); err != nil {
+		_ = f.Close()
+		return err
+	} else if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return &Error{
+			Op:      "write",
+			Path:    "/" + name,
+			Code:    ErrInvalid,
+			Message: "path is not a regular file",
+		}
 	}
 	defer f.Close()
 	_, err = f.Write(data)

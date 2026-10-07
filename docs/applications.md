@@ -783,10 +783,12 @@ When an application (such as Files) or operator hands off a document to another 
 1. Validates the versioned contract (`sdk.DocumentHandoffVersion = 1`).
 2. Checks that the caller has permission to access the document path.
 3. Resolves the target application via document associations or caller request.
-4. Issues a scoped, non-recursive VFS grant (`recursive: false`) conferring **only** the selected document and mode (`read` or `read-write`) to the target application. This strictly prevents conferring directory-level access or sibling document access.
-5. Launches the target application if not already running (using the runtime-wide lifetime context).
-6. Dispatches `app/<app_id>/open` with document path, mode, and `grant_id`.
+4. Launches the target application if not already running (using the runtime-wide lifetime context).
+5. Issues a scoped, non-recursive, **session-bound** VFS grant (`recursive: false`) conferring **only** the selected document and mode (`read` or `read-write`; default `read`) to the target application. This strictly prevents conferring directory-level access or sibling document access.
+6. Dispatches `app/<app_id>/open` with document path, mode, and `grant_id`. A failed launch or dispatch never leaves a live grant: the grant is issued only after launch succeeds and revoked if dispatch fails.
 7. Automatically records the document access into persistent recents.
+
+Handoff grants are session-bound rather than permanent: the runtime revokes them when the receiving application's run ends (exit, stop, or crash), matching the launch-bound token lifecycle. Revoking on dispatch completion was rejected because the app needs the grant throughout its session to read and write the opened document; a TTL was rejected because any fixed duration either outlives the session (leak) or cuts a live editing session short.
 
 ### Persistent Recents and Favorites Stores
 - Recents and favorites are persisted to user private state: `/users/guest/config/recents.json` and `/users/guest/config/favorites.json`.

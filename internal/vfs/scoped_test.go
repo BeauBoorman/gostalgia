@@ -278,6 +278,52 @@ func TestScopedGrants_Revocation(t *testing.T) {
 	}
 }
 
+// Session-bound grants (document handoffs) die with the app's run via
+// RevokeAppSession; standing grants from the same app are untouched.
+func TestScopedGrants_SessionBound(t *testing.T) {
+	v, _ := setupTestVFS(t)
+	appA := v.ForApp("appA")
+	gs := v.Grants()
+
+	session, err := gs.IssueSession("appA", "/shared/notes.txt", AccessRead, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !session.SessionBound {
+		t.Fatal("IssueSession did not mark the grant session-bound")
+	}
+	stable, err := gs.Issue("appA", "/shared/workspace", AccessReadWrite, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stable.SessionBound {
+		t.Fatal("Issue marked a standing grant session-bound")
+	}
+	other, err := gs.IssueSession("appB", "/shared/notes.txt", AccessRead, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := appA.ReadFile("/shared/notes.txt"); err != nil {
+		t.Fatalf("read with session grant failed: %v", err)
+	}
+
+	gs.RevokeAppSession("appA")
+
+	if _, err := appA.ReadFile("/shared/notes.txt"); err == nil {
+		t.Fatal("session-bound grant survived RevokeAppSession")
+	}
+	if now, _ := gs.Get(session.ID); !now.Revoked {
+		t.Fatal("session-bound grant not marked revoked")
+	}
+	if now, _ := gs.Get(stable.ID); now.Revoked {
+		t.Fatal("standing grant revoked by RevokeAppSession")
+	}
+	if now, _ := gs.Get(other.ID); now.Revoked {
+		t.Fatal("another app's session grant revoked by RevokeAppSession")
+	}
+}
+
 func TestScopedGrants_ConfinementAndSymlinks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink tests require admin privileges on Windows")

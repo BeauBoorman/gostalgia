@@ -601,7 +601,7 @@ func command(ctx context.Context, c Caller, cwd, line string) (string, string, b
 			"version": 1,
 			"path":    target,
 			"app_id":  appID,
-			"mode":    "read-write",
+			"mode":    "read",
 		}, &res); err != nil {
 			return fail(fmt.Errorf("open: %w", err))
 		}
