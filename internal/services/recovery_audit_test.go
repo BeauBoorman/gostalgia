@@ -7,13 +7,28 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
+	"path"
 	"strings"
 	"testing"
 
 	"gostalgia/internal/recovery"
+	"gostalgia/internal/vfs"
 )
+
+// unreadablePathFS wraps an FS so ReadFile of one path fails with a permission
+// error — a portable way to simulate an unreadable live file (os.Chmod 0o000
+// does not block reads on Windows).
+type unreadablePathFS struct {
+	vfs.FS
+	target string
+}
+
+func (u *unreadablePathFS) ReadFile(name string) ([]byte, error) {
+	if path.Clean("/"+name) == u.target {
+		return nil, &vfs.Error{Op: "read", Path: u.target, Code: vfs.ErrPermission, Message: "permission denied"}
+	}
+	return u.FS.ReadFile(name)
+}
 
 // #87: export silently dropped files — user *.zip documents, unreadable files,
 // and /apps/data never made the archive while the export reported success.
@@ -30,12 +45,10 @@ func TestAuditExportSilentlyDropsUserFiles(t *testing.T) {
 	must(t, env.ctx.VFS.MkdirAll("/apps/data/com.test.app"))
 	must(t, env.ctx.VFS.WriteFile("/apps/data/com.test.app/state.json", []byte("{}"), 0o644))
 
-	hostLocked := filepath.Join(env.ctx.Root, "vfs", "users/guest/documents/locked.txt")
-	must(t, os.Chmod(hostLocked, 0o000))
-	t.Cleanup(func() { _ = os.Chmod(hostLocked, 0o644) })
+	lockedVFS := &unreadablePathFS{FS: env.ctx.VFS, target: "/users/guest/documents/locked.txt"}
 
 	var buf bytes.Buffer
-	res, err := recovery.Export(context.Background(), env.ctx.VFS, &buf, recovery.ExportOptions{})
+	res, err := recovery.Export(context.Background(), lockedVFS, &buf, recovery.ExportOptions{})
 	must(t, err)
 
 	names := strings.Join(resArchiveFiles(t, buf.Bytes()), ",")
@@ -83,29 +96,26 @@ func resArchiveFiles(t *testing.T, data []byte) []string {
 func TestAuditRestoreOverwritesUnreadableFile(t *testing.T) {
 	env := newTestEnv(t)
 	target := "/users/guest/documents/locked.txt"
-	hostTarget := filepath.Join(env.ctx.Root, "vfs", "users/guest/documents/locked.txt")
 	must(t, env.ctx.VFS.MkdirAll("/users/guest/documents"))
 	must(t, env.ctx.VFS.WriteFile(target, []byte("ORIGINAL-SECRET"), 0o644))
-	must(t, os.Chmod(hostTarget, 0o000))
-	t.Cleanup(func() { _ = os.Chmod(hostTarget, 0o644) })
+	lockedVFS := &unreadablePathFS{FS: env.ctx.VFS, target: target}
 
 	archive := buildArchive(t, target, "REPLACED")
 
 	// Preview cannot classify the live file either — it must fail loudly.
-	if _, err := recovery.Preview(bytes.NewReader(archive), env.ctx.VFS); err == nil {
+	if _, err := recovery.Preview(bytes.NewReader(archive), lockedVFS); err == nil {
 		t.Error("preview classified an unreadable live file as a create")
 	}
 
 	for _, strategy := range []recovery.ConflictStrategy{
 		recovery.ConflictAbort, recovery.ConflictSkip, recovery.ConflictOverwrite,
 	} {
-		if _, err := recovery.Restore(context.Background(), bytes.NewReader(archive), env.ctx.VFS,
+		if _, err := recovery.Restore(context.Background(), bytes.NewReader(archive), lockedVFS,
 			recovery.RestoreOptions{Strategy: strategy}); err == nil {
 			t.Errorf("strategy %s: restore succeeded over an unreadable live file", strategy)
 		}
 	}
 
-	_ = os.Chmod(hostTarget, 0o644)
 	got, err := env.ctx.VFS.ReadFile(target)
 	must(t, err)
 	if string(got) != "ORIGINAL-SECRET" {
