@@ -50,6 +50,42 @@ type rpcMessage struct {
 	Error  string          `json:"error,omitempty"`
 }
 
+// maxWireFrame bounds one newline-delimited wire frame, matching the
+// runtime's 4 MiB line cap; an oversized frame kills the connection instead
+// of buffering without bound. maxInFlight bounds concurrent
+// environment-initiated handler calls, matching the runtime's per-connection
+// in-flight limit.
+const (
+	maxWireFrame = 4 << 20
+	maxInFlight  = 32
+)
+
+var errWireFrameTooLarge = errors.New("sdk: wire frame exceeds 4 MiB limit")
+
+// readWireLine reads one newline-delimited frame, aborting once it exceeds
+// maxWireFrame. Unlike ReadBytes it cannot buffer an unterminated line
+// without bound.
+func readWireLine(r *bufio.Reader) ([]byte, error) {
+	var line []byte
+	for {
+		frag, err := r.ReadSlice('\n')
+		line = append(line, frag...)
+		if err == bufio.ErrBufferFull {
+			if len(line) > maxWireFrame {
+				return nil, errWireFrameTooLarge
+			}
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(line) > maxWireFrame {
+			return nil, errWireFrameTooLarge
+		}
+		return line, nil
+	}
+}
+
 // ServeWithOptions runs an external application instance with explicit options.
 func ServeWithOptions(ctx context.Context, inst Instance, opts ServeOptions) error {
 	if inst == nil {
@@ -123,7 +159,7 @@ func ServeWithOptions(ctx context.Context, inst Instance, opts ServeOptions) err
 	if err := writeMsg(rpcMessage{ID: 1, Method: "auth", Params: authParams}); err != nil {
 		return fmt.Errorf("sdk: write auth: %w", err)
 	}
-	line, err := reader.ReadBytes('\n')
+	line, err := readWireLine(reader)
 	if err != nil {
 		return fmt.Errorf("sdk: read auth response: %w", err)
 	}
@@ -223,7 +259,7 @@ func ServeWithOptions(ctx context.Context, inst Instance, opts ServeOptions) err
 	if err := writeMsg(rpcMessage{ID: 2, Method: "app/ready", Params: readyParams}); err != nil {
 		return fmt.Errorf("sdk: write ready: %w", err)
 	}
-	line, err = reader.ReadBytes('\n')
+	line, err = readWireLine(reader)
 	if err != nil {
 		return fmt.Errorf("sdk: read ready response: %w", err)
 	}
@@ -250,9 +286,13 @@ func ServeWithOptions(ctx context.Context, inst Instance, opts ServeOptions) err
 		}
 	}()
 
+	// In-flight bound mirrors the runtime side: overflow is rejected with an
+	// error response rather than queued on the read loop, which must keep
+	// draining the connection because call responses share it.
+	inFlight := make(chan struct{}, maxInFlight)
 	go func() {
 		for {
-			l, err := reader.ReadBytes('\n')
+			l, err := readWireLine(reader)
 			if err != nil {
 				appCancel()
 				return
@@ -267,7 +307,14 @@ func ServeWithOptions(ctx context.Context, inst Instance, opts ServeOptions) err
 			}
 			if msg.Method != "" {
 				// Incoming request from environment
+				select {
+				case inFlight <- struct{}{}:
+				default:
+					_ = writeMsg(rpcMessage{ID: msg.ID, OK: false, Error: "sdk: too many in-flight requests"})
+					continue
+				}
 				go func(req rpcMessage) {
+					defer func() { <-inFlight }()
 					routesMu.RLock()
 					h, ok := routes[req.Method]
 					routesMu.RUnlock()
