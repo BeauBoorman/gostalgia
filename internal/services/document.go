@@ -19,6 +19,7 @@ import (
 type DocumentService struct {
 	ctx      *service.Context
 	store    *document.Store
+	grants   *vfs.GrantStore
 	lifetime context.Context
 }
 
@@ -50,6 +51,7 @@ func (s *DocumentService) Init(ctx *service.Context) error {
 	if v, ok := ctx.VFS.(*vfs.VFS); ok {
 		grants = v.Grants()
 	}
+	s.grants = grants
 
 	s.store = document.NewStore(dfs, grants, ctx.Apps, ctx.Router)
 
@@ -167,8 +169,16 @@ func (s *DocumentService) recentsList(ctx context.Context, req ipc.Request) (any
 	}, nil
 }
 
+// appCanRead reports whether appID holds a VFS grant covering envPath.
+func (s *DocumentService) appCanRead(appID, envPath string) bool {
+	return s.grants != nil && s.grants.CheckAccess(appID, envPath, vfs.AccessRead) == nil
+}
+
 // recentsAdd appends or updates an entry in recents.
 func (s *DocumentService) recentsAdd(ctx context.Context, req ipc.Request) (any, error) {
+	if err := ipc.RequireCap(ctx, security.CapFileWrite); err != nil {
+		return nil, err
+	}
 	var p struct {
 		Path  string `json:"path"`
 		AppID string `json:"app_id"`
@@ -191,11 +201,22 @@ func (s *DocumentService) recentsAdd(ctx context.Context, req ipc.Request) (any,
 		return nil, err
 	}
 	_ = s.store.Searcher().IndexDocument(p.Path)
+	if principal.IsApp() && !s.appCanRead(appID, entry.Path) {
+		// Do not leak exists/size/mtime for paths outside the caller's grants.
+		redacted := *entry
+		redacted.Exists = false
+		redacted.Size = 0
+		redacted.ModTime = ""
+		return &redacted, nil
+	}
 	return entry, nil
 }
 
 // recentsRemove deletes an entry from recents.
 func (s *DocumentService) recentsRemove(ctx context.Context, req ipc.Request) (any, error) {
+	if err := ipc.RequireCap(ctx, security.CapFileWrite); err != nil {
+		return nil, err
+	}
 	var p struct {
 		Path string `json:"path"`
 	}
@@ -210,6 +231,9 @@ func (s *DocumentService) recentsRemove(ctx context.Context, req ipc.Request) (a
 
 // recentsClear removes all recents entries.
 func (s *DocumentService) recentsClear(ctx context.Context, req ipc.Request) (any, error) {
+	if err := ipc.RequireCap(ctx, security.CapFileWrite); err != nil {
+		return nil, err
+	}
 	if err := s.store.Recents().Clear(); err != nil {
 		return nil, err
 	}
@@ -238,6 +262,9 @@ func (s *DocumentService) favoritesList(ctx context.Context, req ipc.Request) (a
 
 // favoritesAdd adds a document to favorites.
 func (s *DocumentService) favoritesAdd(ctx context.Context, req ipc.Request) (any, error) {
+	if err := ipc.RequireCap(ctx, security.CapFileWrite); err != nil {
+		return nil, err
+	}
 	var p struct {
 		Path  string `json:"path"`
 		Label string `json:"label"`
@@ -254,11 +281,22 @@ func (s *DocumentService) favoritesAdd(ctx context.Context, req ipc.Request) (an
 		return nil, err
 	}
 	_ = s.store.Searcher().IndexDocument(p.Path)
+	if principal := ipc.CallerPrincipal(ctx); principal.IsApp() && !s.appCanRead(principal.AppID, entry.Path) {
+		// Do not leak exists/size/mtime for paths outside the caller's grants.
+		redacted := *entry
+		redacted.Exists = false
+		redacted.Size = 0
+		redacted.ModTime = ""
+		return &redacted, nil
+	}
 	return entry, nil
 }
 
 // favoritesRemove deletes a favorite.
 func (s *DocumentService) favoritesRemove(ctx context.Context, req ipc.Request) (any, error) {
+	if err := ipc.RequireCap(ctx, security.CapFileWrite); err != nil {
+		return nil, err
+	}
 	var p struct {
 		Path string `json:"path"`
 	}
@@ -273,6 +311,9 @@ func (s *DocumentService) favoritesRemove(ctx context.Context, req ipc.Request) 
 
 // favoritesReorder updates the order of favorites.
 func (s *DocumentService) favoritesReorder(ctx context.Context, req ipc.Request) (any, error) {
+	if err := ipc.RequireCap(ctx, security.CapFileWrite); err != nil {
+		return nil, err
+	}
 	var p struct {
 		Paths []string `json:"paths"`
 	}
@@ -287,6 +328,9 @@ func (s *DocumentService) favoritesReorder(ctx context.Context, req ipc.Request)
 
 // favoritesClear removes all favorites.
 func (s *DocumentService) favoritesClear(ctx context.Context, req ipc.Request) (any, error) {
+	if err := ipc.RequireCap(ctx, security.CapFileWrite); err != nil {
+		return nil, err
+	}
 	if err := s.store.Favorites().Clear(); err != nil {
 		return nil, err
 	}
