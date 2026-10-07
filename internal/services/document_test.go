@@ -276,3 +276,78 @@ func TestDocumentHandoffIPC(t *testing.T) {
 		t.Fatalf("expected not found error, got %s", resp.Error)
 	}
 }
+
+// #82: doc/recents and doc/favorites mutation routes require fs.write, and
+// recents/add must not return stat metadata for paths outside the caller's
+// grants (existence/size/mtime oracle).
+// (PoC: internal/services/audit_findings_test.go on the audit branch.)
+func TestAuditRecentsMetadataOracle(t *testing.T) {
+	env := newTestEnv(t)
+	evilApp := security.AppPrincipal("com.test.evil", 7, "", security.User{Name: "guest"})
+	ipcOnly := security.NewCapabilities(security.CapIPC)
+	must(t, env.ctx.VFS.MkdirAll("/users/guest/documents"))
+	must(t, env.ctx.VFS.WriteFile("/users/guest/documents/secret.txt", []byte("hidden"), 0o644))
+	secret := "/users/guest/documents/secret.txt"
+
+	// Baseline ipc is not enough for any recents/favorites mutation route.
+	for _, tc := range []struct {
+		method string
+		params map[string]any
+	}{
+		{"doc/recents/add", map[string]any{"path": secret}},
+		{"doc/recents/remove", map[string]any{"path": secret}},
+		{"doc/recents/clear", nil},
+		{"doc/favorites/add", map[string]any{"path": secret}},
+		{"doc/favorites/remove", map[string]any{"path": secret}},
+		{"doc/favorites/reorder", map[string]any{"paths": []string{secret}}},
+		{"doc/favorites/clear", nil},
+	} {
+		resp := env.callAs(context.Background(), evilApp, ipcOnly, tc.method, tc.params)
+		if resp.OK {
+			t.Fatalf("%s accepted an app with only 'ipc' cap", tc.method)
+		}
+	}
+
+	// An app holding fs.write may record recents, but the response must not
+	// reveal exists/size/mtime for a path outside its grants.
+	writeCaps := security.NewCapabilities(security.CapIPC, security.CapFileWrite)
+	resp := env.callAs(context.Background(), evilApp, writeCaps,
+		"doc/recents/add", map[string]any{"path": secret})
+	if !resp.OK {
+		t.Fatalf("recents/add rejected an app with fs.write: %s", resp.Error)
+	}
+	var entry struct {
+		Path    string `json:"path"`
+		Exists  bool   `json:"exists"`
+		Size    int64  `json:"size"`
+		ModTime string `json:"mod_time"`
+	}
+	must(t, json.Unmarshal(resp.Data, &entry))
+	if entry.Exists || entry.Size != 0 || entry.ModTime != "" {
+		t.Fatalf("stat metadata leaked for ungranted path: %+v", entry)
+	}
+
+	resp = env.callAs(context.Background(), evilApp, writeCaps,
+		"doc/favorites/add", map[string]any{"path": secret})
+	if !resp.OK {
+		t.Fatalf("favorites/add rejected an app with fs.write: %s", resp.Error)
+	}
+	must(t, json.Unmarshal(resp.Data, &entry))
+	if entry.Exists || entry.Size != 0 || entry.ModTime != "" {
+		t.Fatalf("stat metadata leaked for ungranted path: %+v", entry)
+	}
+
+	// With a read grant, the app sees real metadata again.
+	v := env.ctx.VFS.(*vfs.VFS)
+	_, err := v.Grants().Issue("com.test.evil", "/users/guest/documents", vfs.AccessRead, true)
+	must(t, err)
+	resp = env.callAs(context.Background(), evilApp, writeCaps,
+		"doc/recents/add", map[string]any{"path": secret})
+	if !resp.OK {
+		t.Fatalf("recents/add with grant failed: %s", resp.Error)
+	}
+	must(t, json.Unmarshal(resp.Data, &entry))
+	if !entry.Exists || entry.Size == 0 {
+		t.Fatalf("expected real metadata for granted path, got %+v", entry)
+	}
+}
