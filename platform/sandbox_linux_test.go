@@ -83,26 +83,52 @@ func TestLinuxTrustedNoNamespace(t *testing.T) {
 	}
 }
 
+// procStatAlive reads /proc/<pid>/stat and reports (ppid, pgid, alive).
+// Zombies (state Z/X) still appear in /proc with their ppid/pgid intact but
+// are already dead, so they must not count.
+func procStatAlive(pid int) (ppid, pgid int, alive bool) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, 0, false
+	}
+	s := string(data)
+	i := strings.LastIndexByte(s, ')')
+	if i < 0 || i+2 >= len(s) {
+		return 0, 0, false
+	}
+	fields := strings.Fields(s[i+1:])
+	if len(fields) < 3 {
+		return 0, 0, false
+	}
+	p, err1 := strconv.Atoi(fields[1])
+	g, err2 := strconv.Atoi(fields[2])
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	alive = fields[0] != "Z" && fields[0] != "X"
+	return p, g, alive
+}
+
 // TestLinuxKillDescendantsProcessGroup verifies the pgid sweep kills group
 // members even after they reparent (the classic fork+exit race).
 func TestLinuxKillDescendantsProcessGroup(t *testing.T) {
-	// Parent that forks a child which immediately orphans a grandchild
-	// into the same process group.
+	// Leader execs sleep (so it cannot reap its children); the two background
+	// sleeps share its process group.
 	cmd := exec.Command("sh", "-c", "sleep 60 & sleep 60 & exec sleep 60")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	pid := cmd.Process.Pid
-	defer cmd.Process.Kill()
-	defer cmd.Wait()
+	defer func() { cmd.Process.Kill(); cmd.Wait() }()
 
 	// Give the children a moment to spawn.
 	time.Sleep(150 * time.Millisecond)
 
 	KillDescendants(pid)
 
-	// Everything in the child's process group except the leader must be dead.
+	// Every non-leader member of the child's process group must be dead
+	// (zombies already reaped-or-not do not count).
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		alive := 0
@@ -112,11 +138,7 @@ func TestLinuxKillDescendantsProcessGroup(t *testing.T) {
 			if err != nil || p <= 0 || p == pid {
 				continue
 			}
-			data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", p))
-			if err != nil {
-				continue
-			}
-			_, pgid, ok := linuxParseProcStat(string(data))
+			_, pgid, ok := procStatAlive(p)
 			if ok && pgid == pid {
 				alive++
 			}
@@ -140,8 +162,7 @@ func TestLinuxKillDescendantsOrphaned(t *testing.T) {
 		t.Skipf("cannot spawn test tree: %v", err)
 	}
 	pid := cmd.Process.Pid
-	defer cmd.Process.Kill()
-	defer cmd.Wait()
+	defer func() { cmd.Process.Kill(); cmd.Wait() }()
 
 	time.Sleep(150 * time.Millisecond)
 	KillDescendants(pid)
@@ -156,11 +177,7 @@ func TestLinuxKillDescendantsOrphaned(t *testing.T) {
 			if err != nil || p <= 0 {
 				continue
 			}
-			data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", p))
-			if err != nil {
-				continue
-			}
-			ppid, _, ok := linuxParseProcStat(string(data))
+			ppid, _, ok := procStatAlive(p)
 			if ok && ppid == pid {
 				found = true
 			}
