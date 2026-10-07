@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -271,6 +272,9 @@ func resArchiveFiles(t *testing.T, data []byte) []string {
 // unreadable existing file is planned as a create — overwritten with no
 // conflict check and no rollback journal entry for its content.
 func TestAuditRestoreOverwritesUnreadableFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 000 does not make a file unreadable on Windows")
+	}
 	env := newTestEnv(t)
 	target := "/users/guest/documents/locked.txt"
 	hostTarget := filepath.Join(env.ctx.Root, "vfs", "users/guest/documents/locked.txt")
