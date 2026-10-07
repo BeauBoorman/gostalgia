@@ -93,7 +93,7 @@ type getResp struct {
 }
 
 func (s *ConfigService) get(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapIPC); err != nil {
+	if err := ipc.RequireCap(ctx, security.CapConfigRead); err != nil {
 		return nil, err
 	}
 	var p getReq
@@ -105,13 +105,15 @@ func (s *ConfigService) get(ctx context.Context, req ipc.Request) (any, error) {
 	}
 
 	principal := ipc.CallerPrincipal(ctx)
-	appID := p.AppID
-	if principal.IsApp() && appID == "" {
-		appID = principal.AppID
+	if principal.IsApp() {
+		if p.AppID != "" && p.AppID != principal.AppID {
+			return nil, errors.New("config/get: cannot read preferences for another application")
+		}
+		p.AppID = principal.AppID
 	}
 
 	opts := config.QueryOpts{
-		AppID: appID,
+		AppID: p.AppID,
 		Layer: p.Layer,
 	}
 	val, layer, ok := s.store.Value(p.Path, opts)
@@ -286,11 +288,18 @@ type listResp struct {
 }
 
 func (s *ConfigService) list(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapIPC); err != nil {
+	if err := ipc.RequireCap(ctx, security.CapConfigRead); err != nil {
 		return nil, err
 	}
 	var p listReq
 	_ = ipc.DecodeParams(req.Params, &p)
+
+	if principal := ipc.CallerPrincipal(ctx); principal.IsApp() {
+		if p.AppID != "" && p.AppID != principal.AppID {
+			return nil, errors.New("config/list: cannot read preferences for another application")
+		}
+		p.AppID = principal.AppID
+	}
 
 	opts := config.QueryOpts{AppID: p.AppID}
 	effective := s.store.Snapshot(opts)
@@ -316,7 +325,7 @@ type previewReq struct {
 }
 
 func (s *ConfigService) preview(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapIPC); err != nil {
+	if err := ipc.RequireCap(ctx, security.CapConfigRead); err != nil {
 		return nil, err
 	}
 	var p previewReq
@@ -344,7 +353,7 @@ func (s *ConfigService) preview(ctx context.Context, req ipc.Request) (any, erro
 }
 
 func (s *ConfigService) cancelPreview(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapIPC); err != nil {
+	if err := ipc.RequireCap(ctx, security.CapConfigRead); err != nil {
 		return nil, err
 	}
 	s.store.CancelPreview(config.QueryOpts{})
@@ -396,7 +405,7 @@ type validateResp struct {
 }
 
 func (s *ConfigService) validate(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapIPC); err != nil {
+	if err := ipc.RequireCap(ctx, security.CapConfigRead); err != nil {
 		return nil, err
 	}
 	var p validateReq
@@ -441,7 +450,7 @@ type explainReq struct {
 }
 
 func (s *ConfigService) explain(ctx context.Context, req ipc.Request) (any, error) {
-	if err := ipc.RequireCap(ctx, security.CapIPC); err != nil {
+	if err := ipc.RequireCap(ctx, security.CapConfigRead); err != nil {
 		return nil, err
 	}
 	var p explainReq
@@ -453,11 +462,13 @@ func (s *ConfigService) explain(ctx context.Context, req ipc.Request) (any, erro
 	}
 
 	principal := ipc.CallerPrincipal(ctx)
-	appID := p.AppID
-	if principal.IsApp() && appID == "" {
-		appID = principal.AppID
+	if principal.IsApp() {
+		if p.AppID != "" && p.AppID != principal.AppID {
+			return nil, errors.New("config/explain: cannot read preferences for another application")
+		}
+		p.AppID = principal.AppID
 	}
 
-	exp := s.store.Explain(p.Path, config.QueryOpts{AppID: appID})
+	exp := s.store.Explain(p.Path, config.QueryOpts{AppID: p.AppID})
 	return exp, nil
 }
