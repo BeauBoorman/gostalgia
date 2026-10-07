@@ -248,6 +248,9 @@ func (s *SessionService) attach(ctx context.Context, req ipc.Request) (any, erro
 	}
 
 	ws := s.ctx.Sessions.Workspace(sess.ID)
+	if ws == nil {
+		return nil, fmt.Errorf("session: session %q not found", sess.ID)
+	}
 	wsState := ws.Get()
 
 	return SessionAttachResponse{
@@ -304,6 +307,9 @@ func (s *SessionService) workspaceGet(ctx context.Context, req ipc.Request) (any
 		return nil, err
 	}
 	ws := s.ctx.Sessions.Workspace(sess.ID)
+	if ws == nil {
+		return nil, fmt.Errorf("session: session %q not found", sess.ID)
+	}
 	return ws.Get(), nil
 }
 
@@ -325,6 +331,9 @@ func (s *SessionService) workspaceSet(ctx context.Context, req ipc.Request) (any
 		return nil, err
 	}
 	ws := s.ctx.Sessions.Workspace(sess.ID)
+	if ws == nil {
+		return nil, fmt.Errorf("session: session %q not found", sess.ID)
+	}
 
 	if params.CWD != "" {
 		if err := ws.SetCurrentDir(params.CWD); err != nil {
@@ -361,6 +370,9 @@ func (s *SessionService) workspaceClear(ctx context.Context, req ipc.Request) (a
 		return nil, err
 	}
 	ws := s.ctx.Sessions.Workspace(sess.ID)
+	if ws == nil {
+		return nil, fmt.Errorf("session: session %q not found", sess.ID)
+	}
 	if params.ClearHistory {
 		if err := ws.ClearHistory(); err != nil {
 			return nil, err
