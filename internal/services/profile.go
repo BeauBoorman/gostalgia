@@ -62,14 +62,26 @@ func (s *ProfileService) requireReadCap(ctx context.Context) error {
 	if ipc.RequireCap(ctx, security.CapProfileRead) == nil {
 		return nil
 	}
-	return ipc.RequireCap(ctx, security.CapIPC)
+	if ipc.RequireCap(ctx, security.CapAdmin) == nil {
+		return nil
+	}
+	if ipc.CallerPrincipal(ctx).IsOperator() {
+		return nil
+	}
+	return ipc.RequireCap(ctx, security.CapProfileRead)
 }
 
 func (s *ProfileService) requireWriteCap(ctx context.Context) error {
 	if ipc.RequireCap(ctx, security.CapProfileWrite) == nil {
 		return nil
 	}
-	return ipc.RequireCap(ctx, security.CapIPC)
+	if ipc.RequireCap(ctx, security.CapAdmin) == nil {
+		return nil
+	}
+	if ipc.CallerPrincipal(ctx).IsOperator() {
+		return nil
+	}
+	return ipc.RequireCap(ctx, security.CapProfileWrite)
 }
 
 type ProfileListResponse struct {
