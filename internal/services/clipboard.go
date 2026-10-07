@@ -154,14 +154,18 @@ func (s *ClipboardService) write(ctx context.Context, req ipc.Request) (any, err
 	// Always sanitize input: strip OSC and escape sequences from untrusted inputs
 	cleanText := platform.SanitizeClipboard(p.Text)
 
-	s.mu.Lock()
-	s.internalText = cleanText
-	s.updatedAt = time.Now()
-	s.mu.Unlock()
-
 	policy := security.DefaultOperatorPolicy()
 	if s.ctx != nil && s.ctx.Policy != nil {
 		policy = s.ctx.Policy.Get()
+	}
+
+	// Validate the target and complete any external writes before mutating
+	// internal state: a failed write must leave the clipboard unchanged.
+	commit := func() {
+		s.mu.Lock()
+		s.internalText = cleanText
+		s.updatedAt = time.Now()
+		s.mu.Unlock()
 	}
 
 	switch p.Target {
@@ -175,6 +179,7 @@ func (s *ClipboardService) write(ctx context.Context, req ipc.Request) (any, err
 		if err := platform.WriteHostClipboard(ctx, cleanText); err != nil {
 			return nil, err
 		}
+		commit()
 		return map[string]any{
 			"written": true,
 			"bytes":   len(cleanText),
@@ -182,6 +187,7 @@ func (s *ClipboardService) write(ctx context.Context, req ipc.Request) (any, err
 		}, nil
 
 	case "internal":
+		commit()
 		return map[string]any{
 			"written": true,
 			"bytes":   len(cleanText),
@@ -191,6 +197,7 @@ func (s *ClipboardService) write(ctx context.Context, req ipc.Request) (any, err
 	case "auto":
 		if policy.CheckClipboard(true) == nil && platform.HostClipboardAvailable() {
 			if err := platform.WriteHostClipboard(ctx, cleanText); err == nil {
+				commit()
 				return map[string]any{
 					"written": true,
 					"bytes":   len(cleanText),
@@ -198,6 +205,7 @@ func (s *ClipboardService) write(ctx context.Context, req ipc.Request) (any, err
 				}, nil
 			}
 		}
+		commit()
 		return map[string]any{
 			"written": true,
 			"bytes":   len(cleanText),
