@@ -25,14 +25,22 @@ type ExportOptions struct {
 	Description    string   // Optional user-supplied backup note
 }
 
+// SkippedFile records a path that export observed but did not include in the
+// archive, along with the reason it was omitted.
+type SkippedFile struct {
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
+}
+
 // ExportResult contains summary metrics of a completed export.
 type ExportResult struct {
-	TotalFiles  int       `json:"total_files"`
-	TotalBytes  int64     `json:"total_bytes"`
-	SHA256      string    `json:"sha256"`
-	CreatedAt   time.Time `json:"created_at"`
-	Profiles    []string  `json:"profiles"`
-	ArchivePath string    `json:"archive_path,omitempty"`
+	TotalFiles  int           `json:"total_files"`
+	TotalBytes  int64         `json:"total_bytes"`
+	SHA256      string        `json:"sha256"`
+	CreatedAt   time.Time     `json:"created_at"`
+	Profiles    []string      `json:"profiles"`
+	ArchivePath string        `json:"archive_path,omitempty"`
+	Skipped     []SkippedFile `json:"skipped,omitempty"`
 }
 
 // sanitizeWorkspace removes or redacts sensitive credentials from workspace.json content.
@@ -85,10 +93,16 @@ func Export(ctx context.Context, vfsInstance vfs.FS, out io.Writer, opts ExportO
 	}
 	var payloads []payloadFile
 	var totalBytes int64
+	var skipped []SkippedFile
+
+	recordSkip := func(vfsPath, reason string) {
+		skipped = append(skipped, SkippedFile{Path: vfsPath, Reason: reason})
+	}
 
 	addFile := func(vfsPath string, content []byte, modTime time.Time) error {
 		if !IsAllowedVFSPath(vfsPath) {
-			return nil // silently skip non-portable or forbidden paths
+			recordSkip(vfsPath, "outside the portable backup scope")
+			return nil
 		}
 
 		// Security scan: ensure no live credentials or configured secrets are present in content
@@ -187,27 +201,41 @@ func Export(ctx context.Context, vfsInstance vfs.FS, out io.Writer, opts ExportO
 
 		entries, err := vfsInstance.ReadDir(dirPath)
 		if err != nil {
-			return nil // directory may not exist yet, safe to skip
+			if vfs.IsNotExist(err) {
+				return nil // directory does not exist; nothing to include
+			}
+			// The directory exists but cannot be listed: record the omission
+			// rather than silently dropping its whole subtree.
+			recordSkip(dirPath, "unreadable directory: "+err.Error())
+			return nil
 		}
 		for _, ent := range entries {
 			childPath := path.Join(dirPath, ent.Name())
 			if ent.IsDir() {
-				// Skip trash, temporary, or hidden folders
+				// Skip trash and atomic-save staging folders
 				if ent.Name() == ".trash" || strings.HasPrefix(ent.Name(), ".tmp") {
+					recordSkip(childPath, "transient or trashed directory")
 					continue
 				}
 				if err := walkDir(childPath); err != nil {
 					return err
 				}
 			} else {
-				// Regular file
+				// Skip only artifacts the environment itself owns: atomic-save
+				// staging/recovery files and .gbar archives. Everything else —
+				// including user .zip files — is ordinary data and is exported.
 				lowerName := strings.ToLower(ent.Name())
-				if strings.Contains(ent.Name(), ".tmp.") || strings.HasSuffix(ent.Name(), ".recover") ||
-					strings.HasSuffix(lowerName, FileExtension) || strings.HasSuffix(lowerName, ".zip") {
+				switch {
+				case strings.Contains(ent.Name(), ".tmp."), strings.HasSuffix(ent.Name(), ".recover"):
+					recordSkip(childPath, "atomic-save artifact")
+					continue
+				case strings.HasSuffix(lowerName, FileExtension):
+					recordSkip(childPath, "backup archives are not re-exported")
 					continue
 				}
 				content, err := vfsInstance.ReadFile(childPath)
 				if err != nil {
+					recordSkip(childPath, "unreadable file: "+err.Error())
 					continue
 				}
 
@@ -241,6 +269,18 @@ func Export(ctx context.Context, vfsInstance vfs.FS, out io.Writer, opts ExportO
 		}
 	}
 
+	// /apps/data is app-private storage behind the app isolation boundary;
+	// IsAllowedVFSPath excludes it and ParseArchive refuses /apps paths on
+	// restore, so portable backups deliberately do not carry it. Record the
+	// exclusion so a populated app-data tree is never silently absent.
+	if entries, err := vfsInstance.ReadDir("/apps/data"); err == nil {
+		if len(entries) > 0 {
+			recordSkip("/apps/data", "app-private storage is excluded from portable backups")
+		}
+	} else if !vfs.IsNotExist(err) {
+		recordSkip("/apps/data", "unreadable directory: "+err.Error())
+	}
+
 	if len(payloads) > MaxFiles {
 		return nil, fmt.Errorf("recovery: total file count %d exceeds ceiling of %d", len(payloads), MaxFiles)
 	}
@@ -248,6 +288,9 @@ func Export(ctx context.Context, vfsInstance vfs.FS, out io.Writer, opts ExportO
 	// Sort payloads deterministically by ArcName
 	sort.Slice(payloads, func(i, j int) bool {
 		return payloads[i].entry.ArcName < payloads[j].entry.ArcName
+	})
+	sort.Slice(skipped, func(i, j int) bool {
+		return skipped[i].Path < skipped[j].Path
 	})
 
 	for _, p := range payloads {
@@ -317,6 +360,7 @@ func Export(ctx context.Context, vfsInstance vfs.FS, out io.Writer, opts ExportO
 		SHA256:     ComputeSHA256(archiveBytes),
 		CreatedAt:  createdAt,
 		Profiles:   profileNames,
+		Skipped:    skipped,
 	}, nil
 }
 
