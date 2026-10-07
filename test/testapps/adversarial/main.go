@@ -22,18 +22,26 @@ type adversarialApp struct {
 }
 
 func (a *adversarialApp) Init(ctx *sdk.Context) error {
-	// 1. Host Network Probe
+	// 1. Host Network Probe — "network" may be "tcp" (default) or "unix";
+	// the unix form exercises the remote unix-socket denial (#83), since a
+	// confined child that could connect to arbitrary socket paths could
+	// reach docker.sock, ssh-agent, or the runtime's own IPC endpoint.
 	_ = ctx.Handle("probe_network", func(c context.Context, raw json.RawMessage) (any, error) {
 		var p struct {
-			Target string `json:"target"`
+			Target  string `json:"target"`
+			Network string `json:"network"`
 		}
 		_ = sdk.DecodeParams(raw, &p)
 		target := p.Target
 		if target == "" {
 			target = "1.1.1.1:80"
 		}
+		network := p.Network
+		if network == "" {
+			network = "tcp"
+		}
 		d := net.Dialer{Timeout: 1 * time.Second}
-		conn, err := d.DialContext(c, "tcp", target)
+		conn, err := d.DialContext(c, network, target)
 		if err != nil {
 			return map[string]any{
 				"connected": false,

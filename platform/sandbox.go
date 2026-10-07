@@ -19,10 +19,11 @@ var ErrSandboxUnsupported = errors.New("platform: host sandbox enforcement is un
 // ExecutionPolicy defines the host confinement guarantees applied to a process.
 type ExecutionPolicy struct {
 	Isolation       string   `json:"isolation"`                  // "trusted", "sandbox", "strict"
-	DenyNetwork     bool     `json:"deny_network"`               // block all host network egress
+	DenyNetwork     bool     `json:"deny_network"`               // block all host network egress, including remote unix sockets
 	DenyDescendants bool     `json:"deny_descendants"`           // block or immediately kill descendant processes
 	ReadOnlyFS      bool     `json:"read_only_fs"`               // restrict host filesystem writes
-	AllowedPaths    []string `json:"allowed_paths,omitempty"`    // permitted filesystem paths
+	AllowedPaths    []string `json:"allowed_paths,omitempty"`    // permitted filesystem paths (read; write unless ReadOnlyFS)
+	MaskedPaths     []string `json:"masked_paths,omitempty"`     // host paths hidden from sandboxed children (e.g. env root holding runtime.json)
 	MaxMemoryBytes  uint64   `json:"max_memory_bytes,omitempty"` // maximum address space/memory limit in bytes
 	MaxCPUSeconds   uint64   `json:"max_cpu_seconds,omitempty"`  // maximum CPU time limit in seconds
 	MaxOpenFiles    uint64   `json:"max_open_files,omitempty"`   // maximum open file descriptors

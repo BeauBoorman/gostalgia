@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -145,6 +146,33 @@ func TestSandboxIsolationE2E(t *testing.T) {
 	}
 	if !strings.Contains(netRes.Error, "network is unreachable") && !strings.Contains(netRes.Error, "unreachable") && !strings.Contains(netRes.Error, "operation not permitted") {
 		t.Logf("network error detail: %s", netRes.Error)
+	}
+
+	// Sandboxed children must also be unable to reach remote unix sockets
+	// (#83): their IPC channel is an inherited descriptor, so the sandbox
+	// grants no connect() capability at all. Probe the environment's own
+	// IPC socket — reachable by path from a trusted process.
+	if goRuntime.GOOS != "windows" {
+		var envInfo struct {
+			Endpoint string `json:"endpoint"`
+		}
+		if raw, err := os.ReadFile(filepath.Join(root, "runtime.json")); err == nil {
+			_ = json.Unmarshal(raw, &envInfo)
+		}
+		if strings.HasPrefix(envInfo.Endpoint, "unix://") {
+			var unixRes struct {
+				Connected bool   `json:"connected"`
+				Error     string `json:"error"`
+			}
+			must(t, client.Call(ctx, "app/com.test.sandboxed/probe_network", map[string]string{
+				"network": "unix",
+				"target":  strings.TrimPrefix(envInfo.Endpoint, "unix://"),
+			}, &unixRes))
+			if unixRes.Connected {
+				t.Fatal("sandboxed app connected to the runtime's unix socket (remote unix-socket was allowed)")
+			}
+			t.Logf("unix socket connect denied: %s", unixRes.Error)
+		}
 	}
 
 	// Verify filesystem write to host root is rejected

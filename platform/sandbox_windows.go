@@ -27,5 +27,7 @@ func ConfigureSandbox(cmd *exec.Cmd, policy ExecutionPolicy) (PostStartHook, err
 	return nil, fmt.Errorf("%w: sandbox isolation policy %q is unsupported on Windows", ErrSandboxUnsupported, policy.Isolation)
 }
 
-// KillDescendants is a no-op on Windows.
+// KillDescendants is a no-op on Windows: sandbox isolation fails closed, so
+// no child runs under a DenyDescendants policy here. Confined descendants
+// therefore cannot exist; trusted children are torn down via KillProcessTree.
 func KillDescendants(pid int) {}

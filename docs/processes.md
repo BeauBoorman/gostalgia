@@ -61,9 +61,13 @@ and `platform.KillProcessTree`):
 - **Process group isolation:** Child processes are launched in their own process
   group (`Setpgid: true` on Unix).
 - **Descendant termination:** On `Stop()` or shutdown, `KillProcessTree` sends
-  `SIGKILL` to `-pid` (the process group), guaranteeing that any background
-  worker processes or grandchildren spawned by the child are terminated and do
-  not leak into the host system.
+  `SIGKILL` to `-pid` (the process group), killing any background workers or
+  grandchildren that remained in the child's process group. A descendant that
+  escaped the group (`setpgid`/`setsid`) is only reachable while still linked
+  by ppid — `KillDescendants` (used for `strict` children with
+  `DenyDescendants`) sweeps both sets on Linux. On macOS, `strict` children
+  cannot create descendants at all (`deny process-fork`), and on Windows
+  sandboxed execution fails closed, so no confined descendant can exist.
 
 ## Bounded exit history and process reaping
 
