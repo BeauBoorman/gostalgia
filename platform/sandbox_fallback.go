@@ -28,5 +28,6 @@ func ConfigureSandbox(cmd *exec.Cmd, policy ExecutionPolicy) (PostStartHook, err
 	return nil, fmt.Errorf("%w: sandbox isolation policy %q is unsupported on %s", ErrSandboxUnsupported, policy.Isolation, runtime.GOOS)
 }
 
-// KillDescendants is a no-op on fallback platforms.
+// KillDescendants is a no-op on fallback platforms: sandbox isolation fails
+// closed, so no child runs under a DenyDescendants policy here.
 func KillDescendants(pid int) {}

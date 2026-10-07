@@ -199,8 +199,10 @@ func TestAdversarialHostFilesystemAccess(t *testing.T) {
 		t.Fatal("sandboxed app unexpectedly wrote to /etc/forbidden.txt")
 	}
 
-	// 2. Probing read of runtime.json: the app is NOT passed the runtime.json path,
-	// and even if it guesses <root>/runtime.json, strict isolation restricts access.
+	// 2. Probing read of runtime.json: the app is NOT passed the runtime.json
+	// path, and even if it guesses <root>/runtime.json the environment root is
+	// masked from sandboxed children (#84): reads must fail outright on hosts
+	// that advertise filesystem sandboxing.
 	runtimeJSON := filepath.Join(root, "runtime.json")
 	var readRes struct {
 		Read    bool   `json:"read"`
@@ -208,8 +210,12 @@ func TestAdversarialHostFilesystemAccess(t *testing.T) {
 		Error   string `json:"error"`
 	}
 	must(t, client.Call(ctx, "app/com.test.fsaccess/probe_read", map[string]string{"path": runtimeJSON}, &readRes))
-	if readRes.Read && strings.Contains(readRes.Content, "token") {
-		// If read succeeded, verify that seatbelt or file permissions restrict sensitive token extraction
+	if caps.FilesystemSandbox {
+		if readRes.Read {
+			t.Fatalf("strict app read masked runtime.json: %q", readRes.Content)
+		}
+		t.Logf("runtime.json read denied: %s", readRes.Error)
+	} else if readRes.Read && strings.Contains(readRes.Content, "token") {
 		t.Logf("runtime.json read note: read=%v, err=%s", readRes.Read, readRes.Error)
 	}
 

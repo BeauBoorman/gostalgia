@@ -196,8 +196,9 @@ another app, avoiding cycles of handlers waiting for one another.
 
 External applications run as distinct host child processes (`mode: "external"`)
 supervised by the process manager (`KindChild`). They interact with the
-Gostalgia environment over an authenticated NDJSON protocol via a dedicated,
-ephemeral IPC socket.
+Gostalgia environment over an authenticated NDJSON protocol — via an inherited
+pre-connected descriptor for sandboxed children, or a dedicated, ephemeral IPC
+socket for trusted children.
 
 ```go
 package main
@@ -240,18 +241,33 @@ func main() {
 
 When an external app launches:
 
-1. **Dedicated child socket listener:** The runtime creates a dedicated,
-   ephemeral listener (`unix:///...` domain socket on Unix, loopback TCP on
-   Windows) using `platform.ListenChildIPC`.
+1. **Child IPC channel:** The channel depends on the isolation level:
+   - `sandbox`/`strict` children (Unix): the runtime creates a pre-connected
+     `socketpair` (`platform.ChildIPC`) and passes the child's end as an
+     inherited file descriptor (fd 3). This is deliberate: neither Seatbelt
+     nor network namespaces can scope `connect()` to a single unix-socket
+     path, so a filesystem socket endpoint would force the sandbox to allow
+     connections to *any* remote unix socket — including `docker.sock`,
+     `ssh-agent`, and the runtime's own IPC listener. An inherited,
+     already-connected fd requires no connect capability at all.
+   - `trusted` children, and all children on Windows (which lacks fd
+     passing): the runtime creates a dedicated, ephemeral listener
+     (`unix:///...` domain socket on Unix, loopback TCP on Windows) using
+     `platform.ListenChildIPC`.
 2. **Environment variable injection:** The runtime generates an app token
    bound to the app ID and declared permissions, and starts the child with a
    sanitized environment containing:
-   - `GOSTALGIA_ENDPOINT`: dedicated child IPC listener address.
+   - `GOSTALGIA_IPC_FD`: inherited IPC descriptor number (sandboxed Unix
+     children only; currently `3`).
+   - `GOSTALGIA_ENDPOINT`: dedicated child IPC listener address (trusted and
+     Windows children).
    - `GOSTALGIA_APP_TOKEN`: scoped authentication token.
    - `GOSTALGIA_APP_ID`: application identity.
-   - `GOSTALGIA_APP_PROTOCOL_VERSION`: negotiated protocol version (`1`).
-3. **Connection and authentication:** `sdk.Serve` connects to the endpoint,
-   sends an `auth` request with the token, and verifies authentication success.
+   - `GOSTALGIA_PROTOCOL_VERSION`: negotiated protocol version (`1`).
+3. **Connection and authentication:** `sdk.Serve` uses the inherited
+   descriptor when `GOSTALGIA_IPC_FD` is set, otherwise dials the endpoint;
+   it then sends an `auth` request with the token and verifies
+   authentication success.
 4. **Readiness and version handshake:** `sdk.Serve` invokes `app/ready` with
    its `app_id` and `protocol_version`. If the protocol version does not match
    the runtime's supported protocol (`ProtocolVersion = 1`), the handshake fails.

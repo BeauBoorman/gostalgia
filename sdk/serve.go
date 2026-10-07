@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,8 +27,9 @@ type ServeOptions struct {
 }
 
 // Serve runs an external application instance using the environment protocol.
-// It resolves the endpoint and credentials from GOSTALGIA_ENDPOINT and
-// GOSTALGIA_APP_TOKEN (or GOSTALGIA_TOKEN), connects to the environment,
+// It resolves the channel and credentials from GOSTALGIA_IPC_FD (an inherited
+// pre-connected descriptor used for sandboxed launches) or GOSTALGIA_ENDPOINT
+// (a dialable listener address), plus GOSTALGIA_APP_TOKEN (or GOSTALGIA_TOKEN),
 // performs the startup handshake, declares routes, and runs the instance until
 // termination.
 func Serve(inst Instance) error {
@@ -56,6 +58,7 @@ func ServeWithOptions(ctx context.Context, inst Instance, opts ServeOptions) err
 	if opts.Endpoint == "" {
 		opts.Endpoint = os.Getenv("GOSTALGIA_ENDPOINT")
 	}
+	ipcFD := os.Getenv("GOSTALGIA_IPC_FD")
 	if opts.Token == "" {
 		opts.Token = os.Getenv("GOSTALGIA_APP_TOKEN")
 	}
@@ -65,8 +68,8 @@ func ServeWithOptions(ctx context.Context, inst Instance, opts ServeOptions) err
 	if opts.AppID == "" {
 		opts.AppID = os.Getenv("GOSTALGIA_APP_ID")
 	}
-	if opts.Endpoint == "" {
-		return errors.New("sdk: endpoint is required (set GOSTALGIA_ENDPOINT)")
+	if ipcFD == "" && opts.Endpoint == "" {
+		return errors.New("sdk: channel is required (set GOSTALGIA_IPC_FD or GOSTALGIA_ENDPOINT)")
 	}
 	if opts.Token == "" {
 		return errors.New("sdk: token is required (set GOSTALGIA_APP_TOKEN)")
@@ -78,6 +81,17 @@ func ServeWithOptions(ctx context.Context, inst Instance, opts ServeOptions) err
 	var conn net.Conn
 	var err error
 	switch {
+	case ipcFD != "":
+		// The runtime handed us a pre-connected channel as an inherited
+		// descriptor. This works under network-denying sandboxes because no
+		// connect() is ever performed.
+		fd, convErr := strconv.Atoi(ipcFD)
+		if convErr != nil || fd < 0 {
+			return fmt.Errorf("sdk: invalid GOSTALGIA_IPC_FD %q", ipcFD)
+		}
+		f := os.NewFile(uintptr(fd), "gostalgia-ipc")
+		conn, err = net.FileConn(f)
+		_ = f.Close() // FileConn dups the descriptor
 	case strings.HasPrefix(opts.Endpoint, "unix://"):
 		conn, err = net.Dial("unix", strings.TrimPrefix(opts.Endpoint, "unix://"))
 	case strings.HasPrefix(opts.Endpoint, "tcp://"):
@@ -86,7 +100,7 @@ func ServeWithOptions(ctx context.Context, inst Instance, opts ServeOptions) err
 		return fmt.Errorf("sdk: unsupported endpoint scheme %q", opts.Endpoint)
 	}
 	if err != nil {
-		return fmt.Errorf("sdk: dial %s: %w", opts.Endpoint, err)
+		return fmt.Errorf("sdk: connect: %w", err)
 	}
 	defer conn.Close()
 

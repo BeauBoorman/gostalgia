@@ -181,25 +181,52 @@ Gostalgia supports four explicit isolation levels declared in application manife
   - Unprivileged user and network namespaces (`CLONE_NEWUSER | CLONE_NEWNET`)
     block all host network egress at the kernel level without requiring root or
     setuid helpers.
+  - A mount namespace (`CLONE_NEWNS`) is set up by a re-exec init hook
+    (`/proc/self/exe` + `GOSTALGIA_SANDBOX_INIT` payload): masked paths (the
+    environment root holding `runtime.json`, operator token) are hidden under
+    empty tmpfs/`/dev/null` bind mounts, and `AllowedPaths` are bind-mounted.
+    Because `DenyNetwork` is in force, `/tmp`, `/var/tmp`, `/run`, and
+    `/var/run` are also covered with fresh tmpfs so no host unix socket
+    (docker.sock, ssh-agent, the runtime's IPC socket) is reachable by path.
   - Resource ceilings are enforced via `prlimit64`:
     - Virtual memory address space (`RLIMIT_AS`) capped at 2 GB.
     - Maximum open file descriptors (`RLIMIT_NOFILE`) capped at 1024.
 - **macOS:**
   - Generates a custom Apple Seatbelt profile executed via `/usr/bin/sandbox-exec`.
-  - Disallows network operations (`(deny network*)`).
-  - Restricts host filesystem access to designated runtime roots and system
-    libraries (`/usr/lib`, `/System`, `/Library`).
+  - Denies all network operations (`(deny network*)`) with **no** unix-socket
+    exceptions: Seatbelt cannot path-scope `remote unix-socket` for connect(),
+    so child IPC is a pre-connected socketpair handed down as an inherited
+    file descriptor (`GOSTALGIA_IPC_FD`) instead of a filesystem socket the
+    child dials. A confined child can neither reach `docker.sock`/`ssh-agent`
+    nor open new connections to the runtime's own IPC endpoint.
+  - Reads are confined to an execution allowlist (system libraries, frameworks,
+    temp dirs, the executable itself, and `AllowedPaths`); `MaskedPaths`
+    (including the environment root) are carved out of covering prefixes with
+    `require-not` filters. Host filesystem writes are permitted except into
+    masked paths.
+  - The declared boundary is enforced, not merely documented: if the host
+    lacks `sandbox-exec` the launch fails closed.
 
 #### 4. `strict` (Maximal OS Confinement)
 - Enforces all protections of `sandbox`, plus:
   - **Descendant Process Prevention:**
-    - macOS: Enforces `(deny process-fork)` in Seatbelt profile. Any call to `fork()`
-      or `execve()` immediately fails with `EPERM`.
-    - Linux: Process supervisor monitors child processes and immediately kills
-      any unauthorized descendants.
+    - macOS: Enforces `(deny process-fork)` in Seatbelt profile. Any call to
+      `fork()`/`posix_spawn()`/`execve()` immediately fails with `EPERM`.
+      This is hard prevention — `KillDescendants` is intentionally a no-op
+      because no confined descendant can exist.
+    - Linux: the supervisor sweeps `/proc` on a poll and kills both members
+      of the child's process group (descendants inherit the group, catching
+      reparented grandchildren and fork+exit races) and transitive
+      ppid-tree descendants (catching `setpgid`/`setsid` escapees).
+      Residual: a descendant that both leaves the group and orphans itself
+      within one poll interval can evade tracking until teardown, where
+      `KillProcessTree` SIGKILLs the whole group.
   - **Read-Only Filesystem:**
-    - macOS: Disallows filesystem write operations (`(deny file-write*)`).
-    - Linux: Mounts root filesystem as read-only.
+    - macOS: Disallows filesystem write operations (`(deny file-write*)`)
+      except `/dev/null`, `/dev/zero`, temp/scratch dirs, and `AllowedPaths`.
+    - Linux: every real mount is bind-remounted read-only inside the mount
+      namespace; `AllowedPaths` are re-mounted writable. `MaskedPaths` stay
+      hidden.
   - **Tighter Resource Limits:**
     - Maximum file descriptors capped at 512 (`RLIMIT_NOFILE`).
     - Virtual memory capped at 2 GB (`RLIMIT_AS`).
@@ -281,6 +308,25 @@ explicitly outside Gostalgia's protection guarantees:
    systemd cgroups v2 slices (to avoid requiring root or cgroupfs delegation).
    Consequently, memory limits constrain virtual address space (`RLIMIT_AS`)
    rather than resident set size (RSS).
+
+6. **Linux Descendant Sweep Residual:**
+   `KillDescendants` kills the child's process group and its transitive
+   ppid-tree descendants. A sufficiently adversarial descendant that calls
+   `setpgid`/`setsid` *and* orphans itself (parent exits) inside a single
+   supervisor poll interval can evade tracking until the app is stopped —
+   at which point the process-group `SIGKILL` in `KillProcessTree` still
+   catches anything that stayed in the group. Only a fully escaped daemon
+   survives, and only until teardown of a group it left. Blocking `fork`
+   outright would require seccomp interception, which is not implemented.
+   `PR_SET_CHILD_SUBREAPER` was deliberately rejected: reparenting managed
+   children to the runtime races `os/exec`'s `Wait` and strands zombies.
+
+7. **macOS File Metadata Leakage:**
+   To resolve whitelisted paths, the Seatbelt profile grants
+   `file-read-metadata` on their ancestor directories (e.g. `/private/var`).
+   A confined app can `stat()` those directories — learning names and
+   attributes one level up the whitelist trees — but cannot list them or
+   read contents. Directory listing (`file-read-data`) remains denied.
 
 ---
 
