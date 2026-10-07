@@ -22,6 +22,15 @@ type Attachment struct {
 	AttachedAt time.Time `json:"attached_at"`
 }
 
+// Bounds on session manager state, matching the bounded-everything
+// convention used for process history and event history.
+const (
+	// MaxSessions bounds concurrently tracked sessions; Create errors past it.
+	MaxSessions = 64
+	// MaxAttachmentsPerSession bounds client attachments on one session.
+	MaxAttachmentsPerSession = 32
+)
+
 // Session is one user's login session.
 type Session struct {
 	ID        string        `json:"id"`
@@ -52,11 +61,12 @@ func (s *Session) close() {
 	}
 }
 
-// Attach registers a new client attachment to this session.
+// Attach registers a new client attachment to this session. It returns a
+// zero Attachment if the session is stopped or the attachment cap is reached.
 func (s *Session) Attach(clientType, clientID string) Attachment {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.stopped {
+	if s.stopped || len(s.attachments) >= MaxAttachmentsPerSession {
 		return Attachment{}
 	}
 	if s.attachments == nil {
@@ -169,6 +179,9 @@ func (m *Manager) Create(user security.User) (*Session, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if len(m.sessions) >= MaxSessions {
+		return nil, fmt.Errorf("session: session limit reached (%d)", MaxSessions)
+	}
 	m.next++
 	s := &Session{
 		ID:          fmt.Sprintf("session-%d", m.next),
@@ -182,10 +195,15 @@ func (m *Manager) Create(user security.User) (*Session, error) {
 	return s, nil
 }
 
-// Close closes a session by ID and cleans up its attachments.
+// Close closes a session by ID and reaps it: the session and its workspace
+// are removed so ids cannot resolve or be mutated after close.
 func (m *Manager) Close(id string) error {
 	m.mu.Lock()
 	s, ok := m.sessions[id]
+	if ok {
+		delete(m.sessions, id)
+		delete(m.workspaces, id)
+	}
 	m.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("session: no such session %q", id)
@@ -209,6 +227,9 @@ func (m *Manager) Attach(sessionID, clientType, clientID string) (Attachment, er
 	}
 
 	att := s.Attach(clientType, clientID)
+	if att.ID == "" {
+		return Attachment{}, fmt.Errorf("session: session %q is not active or attachment limit reached", sessionID)
+	}
 	count := s.AttachmentCount()
 	m.bus.Publish("session", AttachEvent{
 		SessionID:    s.ID,
@@ -245,7 +266,8 @@ func (m *Manager) Detach(sessionID, attachmentID string) error {
 	return nil
 }
 
-// Workspace returns or lazily initializes the workspace store for a session.
+// Workspace returns or lazily initializes the workspace store for a live
+// session. It returns nil for unknown or reaped session ids.
 func (m *Manager) Workspace(sessionID string) *WorkspaceStore {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -255,6 +277,9 @@ func (m *Manager) Workspace(sessionID string) *WorkspaceStore {
 	}
 
 	s, ok := m.sessions[sessionID]
+	if !ok {
+		return nil
+	}
 	userName := "guest"
 	if ok && s.User.Name != "" {
 		userName = s.User.Name

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -69,6 +70,72 @@ func TestCreateAndCloseSession(t *testing.T) {
 	}
 	if len(m.Active()) != 0 {
 		t.Fatal("closed session still listed as active")
+	}
+}
+
+// #90: Close must reap the session and its workspace — ids must not
+// resolve afterwards, and the maps must not grow forever.
+func TestCloseReapsSessionState(t *testing.T) {
+	m, _ := newTestManager(t)
+	s, err := m.Create(security.User{ID: "u-guest", Name: "guest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ws := m.Workspace(s.ID); ws == nil {
+		t.Fatal("no workspace for a live session")
+	}
+	if err := m.Close(s.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Get(s.ID); ok {
+		t.Fatal("closed session still resolves via Get")
+	}
+	if ws := m.Workspace(s.ID); ws != nil {
+		t.Fatal("workspace still resolves for a closed session")
+	}
+	if err := m.Close(s.ID); err == nil {
+		t.Fatal("closing an already-reaped session succeeded, want error")
+	}
+}
+
+// #90: unknown session ids must not materialize workspaces.
+func TestWorkspaceUnknownSessionReturnsNil(t *testing.T) {
+	m, _ := newTestManager(t)
+	if ws := m.Workspace("session-ghost"); ws != nil {
+		t.Fatal("workspace created for a nonexistent session")
+	}
+}
+
+// #90: session count is bounded like every other runtime resource.
+func TestSessionCountBound(t *testing.T) {
+	m, _ := newTestManager(t)
+	for i := 0; i < MaxSessions; i++ {
+		if _, err := m.Create(security.User{ID: fmt.Sprintf("u-%d", i), Name: "u"}); err != nil {
+			t.Fatalf("create %d failed: %v", i, err)
+		}
+	}
+	if _, err := m.Create(security.User{ID: "u-overflow"}); err == nil {
+		t.Fatal("create beyond MaxSessions succeeded, want error")
+	}
+}
+
+// #90: attachments per session are bounded.
+func TestAttachmentCountBound(t *testing.T) {
+	m, _ := newTestManager(t)
+	s, err := m.Create(security.User{ID: "u-guest", Name: "guest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < MaxAttachmentsPerSession; i++ {
+		if _, err := m.Attach(s.ID, "shell", ""); err != nil {
+			t.Fatalf("attach %d failed: %v", i, err)
+		}
+	}
+	if _, err := m.Attach(s.ID, "shell", ""); err == nil {
+		t.Fatal("attach beyond MaxAttachmentsPerSession succeeded, want error")
+	}
+	if got := s.AttachmentCount(); got != MaxAttachmentsPerSession {
+		t.Fatalf("attachments = %d, want %d", got, MaxAttachmentsPerSession)
 	}
 }
 

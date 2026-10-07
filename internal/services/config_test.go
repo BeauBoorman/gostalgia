@@ -158,6 +158,91 @@ func TestConfigServicePermissions(t *testing.T) {
 	}
 }
 
+// #77: config read routes must require config.read, not baseline ipc.
+func TestConfigServiceReadRequiresCapability(t *testing.T) {
+	env := newTestConfigService(t)
+	app := security.AppPrincipal("com.test.app", 100, "sess-1", security.User{ID: "u-1", Name: "appuser"})
+	ipcOnly := security.NewCapabilities(security.CapIPC)
+
+	for _, tc := range []struct {
+		method string
+		params map[string]any
+	}{
+		{"config/get", map[string]any{"path": "theme"}},
+		{"config/list", nil},
+		{"config/snapshot", nil},
+		{"config/explain", map[string]any{"path": "theme"}},
+		{"config/preview", map[string]any{"path": "theme", "value": "midnight"}},
+		{"config/validate", map[string]any{"path": "theme", "value": "midnight"}},
+		{"config/cancel_preview", nil},
+	} {
+		resp := env.callAs(context.Background(), app, ipcOnly, tc.method, tc.params)
+		if resp.OK {
+			t.Fatalf("%s accepted an app without config.read", tc.method)
+		}
+	}
+
+	// The dedicated capability unlocks the read routes.
+	readCaps := security.NewCapabilities(security.CapIPC, security.CapConfigRead)
+	for _, method := range []string{"config/get", "config/list", "config/explain", "config/validate"} {
+		resp := env.callAs(context.Background(), app, readCaps, method, map[string]any{"path": "theme", "value": "midnight"})
+		if !resp.OK {
+			t.Fatalf("%s rejected an app holding config.read: %s", method, resp.Error)
+		}
+	}
+}
+
+// #78: caller-supplied app_id on read routes must be pinned to the caller,
+// matching config/set — otherwise any app reads another app's app layer.
+func TestConfigServiceAppIDPinningOnReads(t *testing.T) {
+	env := newTestConfigService(t)
+	evil := security.AppPrincipal("com.test.evil", 101, "sess-1", security.User{ID: "u-1", Name: "appuser"})
+	readCaps := security.NewCapabilities(security.CapIPC, security.CapConfigRead)
+
+	// Seed a secret in the victim's app layer.
+	resp := env.call(context.Background(), security.AdminCapabilities(), "config/set",
+		map[string]any{"path": "token", "value": "victim-secret", "layer": "app", "app_id": "com.victim.app"})
+	if !resp.OK {
+		t.Fatalf("seeding victim app layer failed: %s", resp.Error)
+	}
+
+	// An app may not pass another app's id on any read route.
+	for _, tc := range []struct {
+		method string
+		params map[string]any
+	}{
+		{"config/get", map[string]any{"path": "token", "app_id": "com.victim.app"}},
+		{"config/list", map[string]any{"app_id": "com.victim.app"}},
+		{"config/explain", map[string]any{"path": "token", "app_id": "com.victim.app"}},
+	} {
+		if resp := env.callAs(context.Background(), evil, readCaps, tc.method, tc.params); resp.OK {
+			t.Fatalf("%s accepted a foreign app_id", tc.method)
+		}
+	}
+
+	// Reads without app_id resolve to the caller's own layer, not the victim's.
+	resp = env.callAs(context.Background(), evil, readCaps, "config/get", map[string]any{"path": "token"})
+	if !resp.OK {
+		t.Fatalf("config/get failed: %s", resp.Error)
+	}
+	var getOut getResp
+	must(t, json.Unmarshal(resp.Data, &getOut))
+	if getOut.Found {
+		t.Fatal("app read resolved a value from another app's layer")
+	}
+
+	// Operators can still query a specific app layer.
+	resp = env.call(context.Background(), security.AdminCapabilities(), "config/get",
+		map[string]any{"path": "token", "layer": "app", "app_id": "com.victim.app"})
+	if !resp.OK {
+		t.Fatalf("operator config/get failed: %s", resp.Error)
+	}
+	must(t, json.Unmarshal(resp.Data, &getOut))
+	if !getOut.Found || getOut.Value != "victim-secret" {
+		t.Fatalf("operator read of victim app layer = %+v", getOut)
+	}
+}
+
 func TestConfigServiceValidationAndConflicts(t *testing.T) {
 	env := newTestConfigService(t)
 

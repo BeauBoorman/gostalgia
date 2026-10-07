@@ -597,6 +597,110 @@ func writeWireMessage(conn io.Writer, mu *sync.Mutex, msg rpcWireMessage) error 
 	return err
 }
 
+// maxWireLine bounds one child wire frame, matching the 4 MiB line cap the
+// ipc server enforces (internal/ipc/server.go). maxChildInFlight bounds
+// concurrent child-initiated dispatches, matching the ipc server's
+// per-connection in-flight limit.
+const (
+	maxWireLine      = 4 << 20
+	maxChildInFlight = 32
+)
+
+var errWireFrameTooLarge = errors.New("app: wire frame exceeds 4 MiB limit")
+
+// readWireLine reads one newline-delimited frame, aborting once it exceeds
+// maxWireLine. Unlike ReadBytes it cannot buffer an unterminated line
+// without bound.
+func readWireLine(r *bufio.Reader) ([]byte, error) {
+	var line []byte
+	for {
+		frag, err := r.ReadSlice('\n')
+		line = append(line, frag...)
+		if err == bufio.ErrBufferFull {
+			if len(line) > maxWireLine {
+				return nil, errWireFrameTooLarge
+			}
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(line) > maxWireLine {
+			return nil, errWireFrameTooLarge
+		}
+		return line, nil
+	}
+}
+
+// childWireLoop pumps newline-delimited frames from an external app child to
+// the runtime router until the connection fails. An oversized frame is a
+// protocol violation and closes the connection.
+//
+// Child requests dispatch under a bounded in-flight budget. Overflow is
+// rejected with an error response rather than queued on this goroutine: the
+// loop is the only reader, and call responses share the same connection, so
+// a reader stalled on a full budget would deadlock handlers that are
+// themselves waiting on child replies.
+func childWireLoop(conn net.Conn, reader *bufio.Reader, writeMu *sync.Mutex, pendingMu *sync.Mutex, pendingCalls map[int64]chan rpcWireMessage, dispatch func(rpcWireMessage) rpcWireMessage, log *slog.Logger) {
+	// The wire is dead on exit: close the connection and fail every pending
+	// call so route invokers surface the drop instead of hanging.
+	defer func() {
+		_ = conn.Close()
+		pendingMu.Lock()
+		for id, ch := range pendingCalls {
+			delete(pendingCalls, id)
+			close(ch)
+		}
+		pendingMu.Unlock()
+	}()
+
+	inFlight := make(chan struct{}, maxChildInFlight)
+	for {
+		l, rErr := readWireLine(reader)
+		if rErr != nil {
+			if errors.Is(rErr, errWireFrameTooLarge) {
+				log.Warn("app: child sent oversized wire frame; closing connection", "err", rErr)
+			} else if !errors.Is(rErr, io.EOF) && !errors.Is(rErr, net.ErrClosed) {
+				log.Debug("app: child wire read failed", "err", rErr)
+			}
+			return
+		}
+		l = bytes.TrimSpace(l)
+		if len(l) == 0 {
+			continue
+		}
+		var msg rpcWireMessage
+		if err := json.Unmarshal(l, &msg); err != nil {
+			continue
+		}
+		if msg.Method == "" {
+			pendingMu.Lock()
+			ch, ok := pendingCalls[msg.ID]
+			pendingMu.Unlock()
+			if ok {
+				select {
+				case ch <- msg:
+				default:
+				}
+			}
+			continue
+		}
+		select {
+		case inFlight <- struct{}{}:
+		default:
+			_ = writeWireMessage(conn, writeMu, rpcWireMessage{
+				ID:    msg.ID,
+				Error: "app: too many in-flight child requests",
+			})
+			continue
+		}
+		go func(req rpcWireMessage) {
+			defer func() { <-inFlight }()
+			_ = writeWireMessage(conn, writeMu, dispatch(req))
+		}(msg)
+	}
+}
+
 func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningApp) (*process.Process, error) {
 	forget := func() {
 		m.mu.Lock()
@@ -836,7 +940,7 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 	reader := bufio.NewReader(conn)
 
 	// Read auth request
-	line, err := reader.ReadBytes('\n')
+	line, err := readWireLine(reader)
 	if err != nil {
 		dropConn()
 		_ = m.procs.Stop(proc.ID(), 2*time.Second)
@@ -899,7 +1003,7 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 
 	// Read app/ready request
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	line, err = reader.ReadBytes('\n')
+	line, err = readWireLine(reader)
 	if err != nil {
 		dropConn()
 		_ = m.procs.Stop(proc.ID(), 2*time.Second)
@@ -1120,48 +1224,21 @@ func (m *Manager) launchExternal(ctx context.Context, man Manifest, ra *runningA
 		return nil
 	}
 
-	go func() {
-		for {
-			l, rErr := reader.ReadBytes('\n')
-			if rErr != nil {
-				return
-			}
-			l = bytes.TrimSpace(l)
-			if len(l) == 0 {
-				continue
-			}
-			var msg rpcWireMessage
-			if err := json.Unmarshal(l, &msg); err != nil {
-				continue
-			}
-			if msg.Method != "" {
-				go func(req rpcWireMessage) {
-					childCtx := ipc.WithCapabilities(life, security.NewCapabilities(caps...))
-					m.mu.Lock()
-					curPID := ra.pid
-					m.mu.Unlock()
-					childCtx = ipc.WithPrincipal(childCtx, security.AppPrincipal(man.ID, curPID, "", m.User()))
-					resp := m.router.Dispatch(childCtx, ipc.Request{ID: req.ID, Method: req.Method, Params: req.Params})
-					_ = writeWireMessage(conn, &writeMu, rpcWireMessage{
-						ID:    resp.ID,
-						OK:    resp.OK,
-						Data:  resp.Data,
-						Error: resp.Error,
-					})
-				}(msg)
-			} else {
-				pendingMu.Lock()
-				ch, ok := pendingCalls[msg.ID]
-				pendingMu.Unlock()
-				if ok {
-					select {
-					case ch <- msg:
-					default:
-					}
-				}
-			}
+	dispatch := func(req rpcWireMessage) rpcWireMessage {
+		childCtx := ipc.WithCapabilities(life, security.NewCapabilities(caps...))
+		m.mu.Lock()
+		curPID := ra.pid
+		m.mu.Unlock()
+		childCtx = ipc.WithPrincipal(childCtx, security.AppPrincipal(man.ID, curPID, "", m.User()))
+		resp := m.router.Dispatch(childCtx, ipc.Request{ID: req.ID, Method: req.Method, Params: req.Params})
+		return rpcWireMessage{
+			ID:    resp.ID,
+			OK:    resp.OK,
+			Data:  resp.Data,
+			Error: resp.Error,
 		}
-	}()
+	}
+	go childWireLoop(conn, reader, &writeMu, &pendingMu, pendingCalls, dispatch, m.log)
 
 	go func() {
 		<-proc.Done()

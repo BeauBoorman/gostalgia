@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -115,6 +116,12 @@ func (s *NetService) fetch(ctx context.Context, req ipc.Request) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("net: create request: %w", err)
 	}
+	// Re-validate every redirect hop: the check above covers only the
+	// initial URL, so a 302 could otherwise bounce egress to a blocked or
+	// unlisted host or downgrade HTTPS to plaintext.
+	httpReq = httpReq.WithContext(platform.ContextWithRedirectCheck(httpReq.Context(), func(u *url.URL) error {
+		return policy.CheckNetwork(u.String())
+	}))
 
 	// Parse headers flexibly: either map[string]string or map[string][]string
 	if len(p.Headers) > 0 {

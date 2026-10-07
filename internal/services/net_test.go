@@ -5,9 +5,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"gostalgia/internal/security"
@@ -150,6 +153,102 @@ func TestNetService_FetchAndPolicyEnforcement(t *testing.T) {
 	if !statusOut.PolicyEnabled || len(statusOut.AllowedHosts) != 1 {
 		t.Fatalf("unexpected net/status output: %+v", statusOut)
 	}
+}
+
+// net/fetch must re-run the operator egress policy on every redirect hop:
+// an allowed origin must not bounce egress to a blocked host, an unlisted
+// host, a plaintext downgrade, or an infinite redirect loop.
+func TestNetFetchRedirectPolicyEnforcement(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	capsNet := security.NewCapabilities(security.CapIPC, security.CapNetEgress)
+	op := security.OperatorPrincipal(security.User{Name: "op"})
+
+	env.ctx.Policy.Update(func(p *security.OperatorPolicy) {
+		p.Network.Enabled = true
+		p.Network.AllowInsecure = true
+		p.Network.AllowedHosts = []string{"127.0.0.1"}
+		p.Network.BlockedHosts = []string{"localhost"}
+	})
+
+	t.Run("blocked host", func(t *testing.T) {
+		// httptest binds 127.0.0.1; the localhost spelling reaches the same
+		// listener but is denied by policy, so denial proves the hop was
+		// re-checked rather than merely unreachable.
+		blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, "PWNED-BY-REDIRECT")
+		}))
+		defer blocked.Close()
+		blockedURL := strings.Replace(blocked.URL, "127.0.0.1", "localhost", 1)
+		allowed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, blockedURL, http.StatusFound)
+		}))
+		defer allowed.Close()
+
+		res := env.callAs(ctx, op, capsNet, "net/fetch", map[string]any{"url": allowed.URL})
+		if res.OK {
+			t.Fatal("fetch followed a redirect to a policy-blocked host")
+		}
+		if !strings.Contains(res.Error, "blocked by policy") {
+			t.Fatalf("error = %q, want blocked-host policy denial", res.Error)
+		}
+	})
+
+	t.Run("unlisted host", func(t *testing.T) {
+		allowed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "http://unlisted.invalid/loot", http.StatusFound)
+		}))
+		defer allowed.Close()
+
+		res := env.callAs(ctx, op, capsNet, "net/fetch", map[string]any{"url": allowed.URL})
+		if res.OK {
+			t.Fatal("fetch followed a redirect to a host outside the whitelist")
+		}
+		if !strings.Contains(res.Error, "not in allowed hosts") {
+			t.Fatalf("error = %q, want whitelist denial", res.Error)
+		}
+	})
+
+	t.Run("redirect loop", func(t *testing.T) {
+		var selfURL string
+		loop := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, selfURL, http.StatusFound)
+		}))
+		defer loop.Close()
+		selfURL = loop.URL + "/again"
+
+		res := env.callAs(ctx, op, capsNet, "net/fetch", map[string]any{"url": loop.URL})
+		if res.OK {
+			t.Fatal("fetch followed a redirect loop indefinitely")
+		}
+		if !strings.Contains(res.Error, "stopped after") {
+			t.Fatalf("error = %q, want redirect cap error", res.Error)
+		}
+	})
+
+	t.Run("allowed redirect still works", func(t *testing.T) {
+		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, "REDIRECT-OK")
+		}))
+		defer target.Close()
+		hop := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, target.URL, http.StatusFound)
+		}))
+		defer hop.Close()
+
+		res := env.callAs(ctx, op, capsNet, "net/fetch", map[string]any{"url": hop.URL})
+		if !res.OK {
+			t.Fatalf("allowed redirect rejected: %s", res.Error)
+		}
+		var out struct {
+			Data string `json:"data_base64"`
+		}
+		must(t, json.Unmarshal(res.Data, &out))
+		decoded, _ := base64.StdEncoding.DecodeString(out.Data)
+		if string(decoded) != "REDIRECT-OK" {
+			t.Fatalf("body = %q, want REDIRECT-OK", decoded)
+		}
+	})
 }
 
 func TestSysService_PolicyGetAndUpdate(t *testing.T) {
