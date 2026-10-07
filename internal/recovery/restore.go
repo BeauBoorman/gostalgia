@@ -42,9 +42,14 @@ func Preview(r io.Reader, vfsInstance vfs.FS) (*PreviewReport, error) {
 
 		liveData, err := vfsInstance.ReadFile(entry.VFSPath)
 		if err != nil {
-			// File does not exist live -> new file to be created
-			report.Create = append(report.Create, entry.VFSPath)
-			continue
+			if vfs.IsNotExist(err) {
+				// File does not exist live -> new file to be created
+				report.Create = append(report.Create, entry.VFSPath)
+				continue
+			}
+			// The file exists but cannot be read: its live state is unknown,
+			// so a preview that claims "create" would be a lie.
+			return nil, fmt.Errorf("recovery: cannot assess live file %q: %w", entry.VFSPath, err)
 		}
 
 		liveHash := ComputeSHA256(liveData)
@@ -117,10 +122,13 @@ func Restore(ctx context.Context, r io.Reader, vfsInstance vfs.FS, opts RestoreO
 	affectedProfiles := make(map[string]bool)
 
 	for _, entry := range va.Manifest.Files {
-		// Profile filter check
+		// Profile filter: a profile-scoped restore must only touch the
+		// profile's own tree. Anything else — including global /config/*
+		// state such as package-trust.json — is skipped.
 		if opts.ProfileFilter != "" {
 			profilePrefix := "/users/" + opts.ProfileFilter + "/"
-			if strings.HasPrefix(entry.VFSPath, "/users/") && !strings.HasPrefix(entry.VFSPath, profilePrefix) {
+			if !strings.HasPrefix(entry.VFSPath, profilePrefix) {
+				skippedCount++
 				continue
 			}
 		}
@@ -136,6 +144,13 @@ func Restore(ctx context.Context, r io.Reader, vfsInstance vfs.FS, opts RestoreO
 		content := va.Files[entry.ArcName]
 		liveData, err := vfsInstance.ReadFile(entry.VFSPath)
 		if err != nil {
+			if !vfs.IsNotExist(err) {
+				// The file exists but cannot be read: we cannot tell whether
+				// it conflicts, and its content could not be journaled for
+				// rollback. Refuse under every strategy rather than silently
+				// overwriting unknown data.
+				return nil, fmt.Errorf("recovery: cannot assess live file %q: %w", entry.VFSPath, err)
+			}
 			// Does not exist -> planned for creation
 			planned = append(planned, plannedFile{
 				vfsPath: entry.VFSPath,
