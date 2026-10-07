@@ -5,6 +5,7 @@ package apps
 import (
 	"fmt"
 
+	"gostalgia/apps/compendium"
 	"gostalgia/apps/echo"
 	"gostalgia/apps/files"
 	"gostalgia/apps/notes"
@@ -31,10 +32,13 @@ func Register(r Registrar) error {
 	if err := r.RegisterBuiltin(settings.Manifest(), settings.Factory); err != nil {
 		return fmt.Errorf("apps: register %s: %w", settings.ID, err)
 	}
+	if err := r.RegisterBuiltin(compendium.Manifest(), compendium.Factory); err != nil {
+		return fmt.Errorf("apps: register %s: %w", compendium.ID, err)
+	}
 	return nil
 }
 
 // Manifests returns fresh builtin declarations, without filesystem access.
 func Manifests() []sdk.Manifest {
-	return []sdk.Manifest{echo.Manifest(), notes.Manifest(), files.Manifest(), settings.Manifest()}
+	return []sdk.Manifest{echo.Manifest(), notes.Manifest(), files.Manifest(), settings.Manifest(), compendium.Manifest()}
 }

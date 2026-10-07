@@ -253,10 +253,14 @@ func TestBubbleTeaSocketAppLifecycle(t *testing.T) {
 	}
 	submit("dir")
 	p.Send(tea.KeyMsg{Type: tea.KeyF2})
+	// Filter the shelf to Echo: the first app by ID is not necessarily Echo.
+	p.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("echo")})
 	p.Send(tea.KeyMsg{Type: tea.KeyF3})
 	await() // stop through the app shelf
 	p.Send(tea.KeyMsg{Type: tea.KeyEnter})
 	await() // relaunch through the app shelf
+	// The first Esc clears the shelf filter; the second returns to the prompt.
+	p.Send(tea.KeyMsg{Type: tea.KeyEsc})
 	p.Send(tea.KeyMsg{Type: tea.KeyEsc})
 	submit("exit")
 	// Bubble Tea flushes its renderer on quit; verify the actual rendered UI.
