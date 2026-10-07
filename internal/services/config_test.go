@@ -192,6 +192,57 @@ func TestConfigServiceReadRequiresCapability(t *testing.T) {
 	}
 }
 
+// #78: caller-supplied app_id on read routes must be pinned to the caller,
+// matching config/set — otherwise any app reads another app's app layer.
+func TestConfigServiceAppIDPinningOnReads(t *testing.T) {
+	env := newTestConfigService(t)
+	evil := security.AppPrincipal("com.test.evil", 101, "sess-1", security.User{ID: "u-1", Name: "appuser"})
+	readCaps := security.NewCapabilities(security.CapIPC, security.CapConfigRead)
+
+	// Seed a secret in the victim's app layer.
+	resp := env.call(context.Background(), security.AdminCapabilities(), "config/set",
+		map[string]any{"path": "token", "value": "victim-secret", "layer": "app", "app_id": "com.victim.app"})
+	if !resp.OK {
+		t.Fatalf("seeding victim app layer failed: %s", resp.Error)
+	}
+
+	// An app may not pass another app's id on any read route.
+	for _, tc := range []struct {
+		method string
+		params map[string]any
+	}{
+		{"config/get", map[string]any{"path": "token", "app_id": "com.victim.app"}},
+		{"config/list", map[string]any{"app_id": "com.victim.app"}},
+		{"config/explain", map[string]any{"path": "token", "app_id": "com.victim.app"}},
+	} {
+		if resp := env.callAs(context.Background(), evil, readCaps, tc.method, tc.params); resp.OK {
+			t.Fatalf("%s accepted a foreign app_id", tc.method)
+		}
+	}
+
+	// Reads without app_id resolve to the caller's own layer, not the victim's.
+	resp = env.callAs(context.Background(), evil, readCaps, "config/get", map[string]any{"path": "token"})
+	if !resp.OK {
+		t.Fatalf("config/get failed: %s", resp.Error)
+	}
+	var getOut getResp
+	must(t, json.Unmarshal(resp.Data, &getOut))
+	if getOut.Found {
+		t.Fatal("app read resolved a value from another app's layer")
+	}
+
+	// Operators can still query a specific app layer.
+	resp = env.call(context.Background(), security.AdminCapabilities(), "config/get",
+		map[string]any{"path": "token", "layer": "app", "app_id": "com.victim.app"})
+	if !resp.OK {
+		t.Fatalf("operator config/get failed: %s", resp.Error)
+	}
+	must(t, json.Unmarshal(resp.Data, &getOut))
+	if !getOut.Found || getOut.Value != "victim-secret" {
+		t.Fatalf("operator read of victim app layer = %+v", getOut)
+	}
+}
+
 func TestConfigServiceValidationAndConflicts(t *testing.T) {
 	env := newTestConfigService(t)
 
