@@ -229,10 +229,143 @@ func TestSessionService_Permissions(t *testing.T) {
 		t.Fatalf("session/list with CapSessionRead failed: %s", resp.Error)
 	}
 
-	// With CapIPC
+	// The baseline CapIPC alone is not enough (#73).
 	ipcCaps := security.NewCapabilities(security.CapIPC)
 	resp = env.call(ctx, ipcCaps, "session/list", nil)
+	if resp.OK {
+		t.Fatal("session/list with only CapIPC succeeded, want error")
+	}
+}
+
+// #73: app principals may only address the session they are bound to.
+func TestSessionService_AppScopedToOwnSession(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	resp := env.call(ctx, security.AdminCapabilities(), "session/list", nil)
 	if !resp.OK {
-		t.Fatalf("session/list with CapIPC failed: %s", resp.Error)
+		t.Fatalf("session/list failed: %s", resp.Error)
+	}
+	var list []SessionDetail
+	must(t, json.Unmarshal(resp.Data, &list))
+	if len(list) == 0 {
+		t.Fatal("no sessions")
+	}
+	operatorSessID := list[0].ID
+
+	appCaps := security.NewCapabilities(security.CapIPC, security.CapSessionRead, security.CapSessionWrite)
+
+	// An app bound to a different session cannot read, mutate, or close the
+	// operator's session even with session capabilities.
+	foreignApp := security.AppPrincipal("com.test.foreign", 7, "session-does-not-exist", security.User{ID: "u-1", Name: "appuser"})
+	for _, tc := range []struct {
+		method string
+		params map[string]any
+	}{
+		{"session/get", map[string]any{"id": operatorSessID}},
+		{"session/close", map[string]any{"id": operatorSessID}},
+		{"session/workspace/get", map[string]any{"session_id": operatorSessID}},
+		{"session/workspace/set", map[string]any{"session_id": operatorSessID, "cmd": "evil"}},
+		{"session/attach", map[string]any{"session_id": operatorSessID, "client_type": "shell"}},
+		{"session/detach", map[string]any{"session_id": operatorSessID, "attachment_id": "att-1"}},
+	} {
+		if resp := env.callAs(ctx, foreignApp, appCaps, tc.method, tc.params); resp.OK {
+			t.Fatalf("%s by foreign-bound app succeeded, want error", tc.method)
+		}
+	}
+
+	// An app with no bound session cannot reach the implicit current session.
+	unboundApp := security.AppPrincipal("com.test.unbound", 8, "", security.User{ID: "u-1", Name: "appuser"})
+	if resp := env.callAs(ctx, unboundApp, appCaps, "session/workspace/get", nil); resp.OK {
+		t.Fatal("unbound app resolved the operator's implicit session")
+	}
+	if resp := env.callAs(ctx, unboundApp, appCaps, "session/list", nil); !resp.OK {
+		t.Fatalf("session/list failed for unbound app: %s", resp.Error)
+	} else {
+		var appList []SessionDetail
+		must(t, json.Unmarshal(resp.Data, &appList))
+		if len(appList) != 0 {
+			t.Fatalf("unbound app listed %d sessions, want 0", len(appList))
+		}
+	}
+
+	// An app bound to a real session can use it.
+	resp = env.call(ctx, security.AdminCapabilities(), "session/create", map[string]any{"user_id": "u-1", "user_name": "appuser"})
+	if !resp.OK {
+		t.Fatalf("session/create failed: %s", resp.Error)
+	}
+	var created SessionDetail
+	must(t, json.Unmarshal(resp.Data, &created))
+	boundApp := security.AppPrincipal("com.test.bound", 9, created.ID, security.User{ID: "u-1", Name: "appuser"})
+	if resp := env.callAs(ctx, boundApp, appCaps, "session/workspace/set", map[string]any{"cmd": "ls"}); !resp.OK {
+		t.Fatalf("bound app could not write own workspace: %s", resp.Error)
+	}
+
+	// An app cannot mint a session for a different user identity.
+	if resp := env.callAs(ctx, boundApp, appCaps, "session/create", map[string]any{"user_id": "root"}); resp.OK {
+		t.Fatal("app created a session for another user")
+	}
+}
+
+// #73: session/* must not accept the baseline ipc cap — an app with only
+// 'ipc' can no longer inject into the user's persistent shell history.
+// (PoC: internal/services/audit_findings_test.go on the audit branch.)
+func TestAuditSessionHistoryInjection(t *testing.T) {
+	env := newTestEnv(t)
+	evilApp := security.AppPrincipal("com.test.evil", 7, "", security.User{Name: "guest"})
+	ipcOnly := security.NewCapabilities(security.CapIPC)
+	resp := env.callAs(context.Background(), evilApp, ipcOnly,
+		"session/workspace/set", map[string]any{"cmd": "open /users/guest/documents/diary.txt"})
+	if resp.OK {
+		t.Fatal("workspace/set accepted an app with only 'ipc' cap")
+	}
+	// The operator's workspace history must be untouched.
+	resp = env.call(context.Background(), security.AdminCapabilities(), "session/workspace/get", nil)
+	if !resp.OK {
+		t.Fatalf("workspace/get failed: %s", resp.Error)
+	}
+	var ws struct {
+		History []string `json:"history"`
+	}
+	must(t, json.Unmarshal(resp.Data, &ws))
+	for _, h := range ws.History {
+		if strings.Contains(h, "diary.txt") {
+			t.Fatal("injected command found in workspace history")
+		}
+	}
+}
+
+// #73: session routes require session.read/session.write (or operator), not
+// the baseline ipc cap every app holds.
+func TestAuditSessionCloseByApp(t *testing.T) {
+	env := newTestEnv(t)
+	evilApp := security.AppPrincipal("com.test.evil", 7, "", security.User{Name: "guest"})
+	ipcOnly := security.NewCapabilities(security.CapIPC)
+	// discover a session id as operator
+	resp := env.call(context.Background(), security.AdminCapabilities(), "session/list", nil)
+	var list []struct {
+		ID string `json:"id"`
+	}
+	must(t, json.Unmarshal(resp.Data, &list))
+	if len(list) == 0 {
+		t.Fatal("no sessions")
+	}
+	for _, tc := range []struct {
+		method string
+		params map[string]any
+	}{
+		{"session/list", nil},
+		{"session/close", map[string]any{"id": list[0].ID}},
+		{"session/create", map[string]any{"user_id": "attacker"}},
+	} {
+		resp = env.callAs(context.Background(), evilApp, ipcOnly, tc.method, tc.params)
+		if resp.OK {
+			t.Fatalf("%s accepted an app with only 'ipc' cap", tc.method)
+		}
+	}
+	// The operator session is still open.
+	resp = env.call(context.Background(), security.AdminCapabilities(), "session/get", map[string]any{"id": list[0].ID})
+	if !resp.OK {
+		t.Fatalf("operator session is gone: %s", resp.Error)
 	}
 }

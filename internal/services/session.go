@@ -84,19 +84,39 @@ func (s *SessionService) requireReadCap(ctx context.Context) error {
 	if ipc.RequireCap(ctx, security.CapSessionRead) == nil {
 		return nil
 	}
-	return ipc.RequireCap(ctx, security.CapIPC)
+	if ipc.RequireCap(ctx, security.CapAdmin) == nil {
+		return nil
+	}
+	if ipc.CallerPrincipal(ctx).IsOperator() {
+		return nil
+	}
+	return ipc.RequireCap(ctx, security.CapSessionRead)
 }
 
 func (s *SessionService) requireWriteCap(ctx context.Context) error {
 	if ipc.RequireCap(ctx, security.CapSessionWrite) == nil {
 		return nil
 	}
-	return ipc.RequireCap(ctx, security.CapIPC)
+	if ipc.RequireCap(ctx, security.CapAdmin) == nil {
+		return nil
+	}
+	if ipc.CallerPrincipal(ctx).IsOperator() {
+		return nil
+	}
+	return ipc.RequireCap(ctx, security.CapSessionWrite)
 }
 
-func (s *SessionService) resolveSession(sessionID string) (*session.Session, error) {
+func (s *SessionService) resolveSession(ctx context.Context, sessionID string) (*session.Session, error) {
 	if s.ctx.Sessions == nil {
 		return nil, fmt.Errorf("session: manager unavailable")
+	}
+	principal := ipc.CallerPrincipal(ctx)
+	if principal.IsApp() {
+		// Apps may only address the session they were launched into.
+		if sessionID != "" && sessionID != principal.SessionID {
+			return nil, fmt.Errorf("session: apps may only access their own session")
+		}
+		sessionID = principal.SessionID
 	}
 	if sessionID != "" {
 		sess, ok := s.ctx.Sessions.Get(sessionID)
@@ -104,6 +124,9 @@ func (s *SessionService) resolveSession(sessionID string) (*session.Session, err
 			return nil, fmt.Errorf("session: session %q not found", sessionID)
 		}
 		return sess, nil
+	}
+	if principal.IsApp() {
+		return nil, fmt.Errorf("session: no bound session for calling app")
 	}
 	if s.ctx.Profiles != nil {
 		p := s.ctx.Profiles.Active()
@@ -128,9 +151,13 @@ func (s *SessionService) list(ctx context.Context, req ipc.Request) (any, error)
 	if s.ctx.Sessions == nil {
 		return []SessionDetail{}, nil
 	}
+	principal := ipc.CallerPrincipal(ctx)
 	active := s.ctx.Sessions.Active()
 	out := make([]SessionDetail, 0, len(active))
 	for _, sess := range active {
+		if principal.IsApp() && sess.ID != principal.SessionID {
+			continue
+		}
 		out = append(out, SessionDetail{
 			ID:          sess.ID,
 			User:        sess.User,
@@ -153,7 +180,7 @@ func (s *SessionService) get(ctx context.Context, req ipc.Request) (any, error) 
 	if len(req.Params) > 0 {
 		_ = json.Unmarshal(req.Params, &params)
 	}
-	sess, err := s.resolveSession(params.ID)
+	sess, err := s.resolveSession(ctx, params.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -178,13 +205,20 @@ func (s *SessionService) create(ctx context.Context, req ipc.Request) (any, erro
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		return nil, fmt.Errorf("session/create: invalid parameters: %w", err)
 	}
-	if params.UserID == "" {
+	user := security.User{ID: params.UserID, Name: params.UserName}
+	if principal := ipc.CallerPrincipal(ctx); principal.IsApp() {
+		// Apps cannot mint sessions for a different user identity.
+		if params.UserID != "" && params.UserID != principal.User.ID {
+			return nil, fmt.Errorf("session/create: apps may only create sessions for their own user")
+		}
+		user = principal.User
+	}
+	if user.ID == "" {
 		return nil, fmt.Errorf("session/create: user_id is required")
 	}
-	if params.UserName == "" {
-		params.UserName = params.UserID
+	if user.Name == "" {
+		user.Name = user.ID
 	}
-	user := security.User{ID: params.UserID, Name: params.UserName}
 	sess, err := s.ctx.Sessions.Create(user)
 	if err != nil {
 		return nil, err
@@ -207,6 +241,9 @@ func (s *SessionService) close(ctx context.Context, req ipc.Request) (any, error
 	}
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.ID == "" {
 		return nil, fmt.Errorf("session/close: id is required")
+	}
+	if principal := ipc.CallerPrincipal(ctx); principal.IsApp() && params.ID != principal.SessionID {
+		return nil, fmt.Errorf("session/close: apps may only close their own session")
 	}
 	if err := s.ctx.Sessions.Close(params.ID); err != nil {
 		return nil, err
@@ -237,7 +274,7 @@ func (s *SessionService) attach(ctx context.Context, req ipc.Request) (any, erro
 	if len(req.Params) > 0 {
 		_ = json.Unmarshal(req.Params, &params)
 	}
-	sess, err := s.resolveSession(params.SessionID)
+	sess, err := s.resolveSession(ctx, params.SessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -248,6 +285,9 @@ func (s *SessionService) attach(ctx context.Context, req ipc.Request) (any, erro
 	}
 
 	ws := s.ctx.Sessions.Workspace(sess.ID)
+	if ws == nil {
+		return nil, fmt.Errorf("session: session %q not found", sess.ID)
+	}
 	wsState := ws.Get()
 
 	return SessionAttachResponse{
@@ -272,7 +312,7 @@ func (s *SessionService) detach(ctx context.Context, req ipc.Request) (any, erro
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.AttachmentID == "" {
 		return nil, fmt.Errorf("session/detach: attachment_id is required")
 	}
-	sess, err := s.resolveSession(params.SessionID)
+	sess, err := s.resolveSession(ctx, params.SessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -299,11 +339,14 @@ func (s *SessionService) workspaceGet(ctx context.Context, req ipc.Request) (any
 	if len(req.Params) > 0 {
 		_ = json.Unmarshal(req.Params, &params)
 	}
-	sess, err := s.resolveSession(params.SessionID)
+	sess, err := s.resolveSession(ctx, params.SessionID)
 	if err != nil {
 		return nil, err
 	}
 	ws := s.ctx.Sessions.Workspace(sess.ID)
+	if ws == nil {
+		return nil, fmt.Errorf("session: session %q not found", sess.ID)
+	}
 	return ws.Get(), nil
 }
 
@@ -320,11 +363,14 @@ func (s *SessionService) workspaceSet(ctx context.Context, req ipc.Request) (any
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		return nil, fmt.Errorf("session/workspace/set: invalid parameters: %w", err)
 	}
-	sess, err := s.resolveSession(params.SessionID)
+	sess, err := s.resolveSession(ctx, params.SessionID)
 	if err != nil {
 		return nil, err
 	}
 	ws := s.ctx.Sessions.Workspace(sess.ID)
+	if ws == nil {
+		return nil, fmt.Errorf("session: session %q not found", sess.ID)
+	}
 
 	if params.CWD != "" {
 		if err := ws.SetCurrentDir(params.CWD); err != nil {
@@ -356,11 +402,14 @@ func (s *SessionService) workspaceClear(ctx context.Context, req ipc.Request) (a
 	if len(req.Params) > 0 {
 		_ = json.Unmarshal(req.Params, &params)
 	}
-	sess, err := s.resolveSession(params.SessionID)
+	sess, err := s.resolveSession(ctx, params.SessionID)
 	if err != nil {
 		return nil, err
 	}
 	ws := s.ctx.Sessions.Workspace(sess.ID)
+	if ws == nil {
+		return nil, fmt.Errorf("session: session %q not found", sess.ID)
+	}
 	if params.ClearHistory {
 		if err := ws.ClearHistory(); err != nil {
 			return nil, err

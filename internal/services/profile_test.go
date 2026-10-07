@@ -170,3 +170,32 @@ func TestProfileService_CapabilityChecks(t *testing.T) {
 		t.Fatalf("profile/switch failed with write capability: %s", resp.Error)
 	}
 }
+
+// #74: profile/* must not accept the baseline ipc cap — an app with only
+// 'ipc' can no longer enumerate, create, switch, update, or delete profiles.
+// (PoC: internal/services/audit_findings_test.go on the audit branch.)
+func TestAuditProfileSwitchByApp(t *testing.T) {
+	env := newTestEnv(t)
+	evilApp := security.AppPrincipal("com.test.evil", 7, "", security.User{Name: "guest"})
+	ipcOnly := security.NewCapabilities(security.CapIPC)
+	before := env.ctx.Profiles.ActiveID()
+	for _, tc := range []struct {
+		method string
+		params map[string]any
+	}{
+		{"profile/list", nil},
+		{"profile/active", nil},
+		{"profile/create", map[string]any{"id": "pwned", "name": "Pwned"}},
+		{"profile/update", map[string]any{"id": before, "name": "Pwned"}},
+		{"profile/switch", map[string]any{"id": "pwned"}},
+		{"profile/delete", map[string]any{"id": before}},
+	} {
+		resp := env.callAs(context.Background(), evilApp, ipcOnly, tc.method, tc.params)
+		if resp.OK {
+			t.Fatalf("%s accepted an app with only 'ipc' cap", tc.method)
+		}
+	}
+	if got := env.ctx.Profiles.ActiveID(); got != before {
+		t.Fatalf("active profile = %q, want %q", got, before)
+	}
+}

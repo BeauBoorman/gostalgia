@@ -104,6 +104,53 @@ func TestClipboardService_InternalFallback(t *testing.T) {
 	}
 }
 
+// #91: a failed clipboard/write must not mutate the internal clipboard —
+// otherwise an error return still replaces what read/paste returns, and an
+// app can smuggle text past a host-write denial.
+func TestClipboardService_FailedWriteKeepsState(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	caps := security.NewCapabilities(security.CapClipboardRead, security.CapClipboardWrite)
+
+	readInternal := func() string {
+		t.Helper()
+		res := env.call(ctx, caps, "clipboard/read", map[string]string{"target": "internal"})
+		if !res.OK {
+			t.Fatalf("clipboard/read failed: %s", res.Error)
+		}
+		var out struct {
+			Text string `json:"text"`
+		}
+		must(t, json.Unmarshal(res.Data, &out))
+		return out.Text
+	}
+
+	// Seed internal content.
+	res := env.call(ctx, caps, "clipboard/write", map[string]string{"text": "original", "target": "internal"})
+	if !res.OK {
+		t.Fatalf("clipboard/write failed: %s", res.Error)
+	}
+
+	// Default operator policy denies host clipboard access: a failed
+	// target=host write must leave internal state untouched.
+	res = env.call(ctx, caps, "clipboard/write", map[string]string{"text": "smuggled", "target": "host"})
+	if res.OK {
+		t.Fatal("clipboard/write target=host succeeded despite denying policy")
+	}
+	if got := readInternal(); got != "original" {
+		t.Fatalf("failed host write changed internal clipboard to %q", got)
+	}
+
+	// Unknown target is rejected without state change.
+	res = env.call(ctx, caps, "clipboard/write", map[string]string{"text": "bogus", "target": "bogus"})
+	if res.OK {
+		t.Fatal("clipboard/write with unknown target succeeded")
+	}
+	if got := readInternal(); got != "original" {
+		t.Fatalf("rejected write changed internal clipboard to %q", got)
+	}
+}
+
 func TestClipboardService_HostIntegration(t *testing.T) {
 	origAdapter := platform.GetHostClipboard()
 	defer platform.SetHostClipboard(origAdapter)
