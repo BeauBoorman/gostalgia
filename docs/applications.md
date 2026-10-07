@@ -799,3 +799,324 @@ When an application (such as Files) or operator hands off a document to another 
 - `doc/search` performs recursive directory traversal bounded by depth (max 16) and result count (max 100), respecting directory boundaries and caller permissions.
 - In-memory index provides fast exact name and extension lookups, verifying existence and checking caller permissions at query time.
 
+## 12. Compendium: local-first knowledge base
+
+`apps/compendium` (display name **Compendium**, ID `com.gostalgia.compendium`)
+is a personal knowledge base: Markdown notes with `[[wikilinks]]`, backlinks,
+`#tags`, ranked full-text search, a daily note, and a note graph. It is
+standard-library only and follows the presentation contract (§7): it
+publishes items, fields, and actions; the shell renders them. The package
+directory is lowercase like every other app directory.
+
+### Manifest and capabilities
+
+```json
+{
+  "id": "com.gostalgia.compendium",
+  "name": "Compendium",
+  "version": "0.1.0",
+  "entrypoint": "compendium",
+  "permissions": ["ipc"],
+  "description": "Local-first knowledge base: Markdown notes, wikilinks, backlinks, search, tags, and a note graph."
+}
+```
+
+`ipc` is the whole grant. Compendium keeps everything in its automatic
+app-private partition, which needs no `fs.read`/`fs.write`. It has no path
+grants, so it cannot see `/users/...`. Import from and export to a
+user-visible location work only for paths an operator grants it
+(`fs/grant`, or a single-document `doc/handoff`). Those calls use
+Compendium's own grant and fail closed without one.
+
+### Storage layout
+
+Everything lives under `/apps/data/com.gostalgia.compendium/`:
+
+| Path | Role |
+|---|---|
+| `vault/<stem>.md` | **Source of truth.** One plain Markdown file per note, bytes exactly as written. |
+| `index.json` | Derived cache: per note, title, size, SHA-256, links, and tags. Verified against the sources on every open. |
+| `history/<stem>/<seq>.md` | Previous versions (the last 20) captured before each save. |
+| `drafts/<stem>.json` | Unsaved edits (crash recovery). |
+| `trash/<id>/` | A trashed note with its `history/` and `draft.json`. |
+| `journal.json` | Present only while a multi-file operation runs (redo log). |
+| `exports/` | The most recent single-note and vault exports. |
+| `quarantine/` | Only if something could not be used: a journal that could not be completed, or an unreadable draft. Kept for inspection, never deleted. |
+
+A note's title is its identity. The file stem is the title with host-reserved
+bytes percent-encoded (`% / \ : * ? " < > |`, controls, a leading dot,
+trailing dots or spaces, and Windows device names), so `Colon: A*B?` is
+stored as `Colon%3A A%2AB%3F.md`. Titles are case-insensitive (`[[b]]`
+resolves to `B`), and two notes cannot differ only by case. Case is compared
+with Unicode simple case folding (the same rule as `strings.EqualFold`), so
+final and medial sigma, long s, and the Kelvin sign fold together.
+
+Titles are not Unicode-normalized (the standard library has no NFC/NFD),
+but titles that a normalization-insensitive host such as APFS would store
+under one file name (`Caf\u00e9` and `Cafe\u0301`) can never overwrite
+each other. Two layers enforce it:
+
+1. *Logical:* every title also has a collision key, `normKey`: case fold,
+   decompose with a generated canonical-decomposition table
+   (`normtable.go`: Latin-1 Supplement, Latin Extended-A/B and Additional,
+   Greek and Greek Extended, Cyrillic, and the Ohm/Kelvin/Angstrom
+   singletons; Hangul syllables algorithmically), fold again, then sort
+   each run of combining marks. A new note, draft, rename target, restore,
+   or import whose key matches an existing note or draft under a different
+   title is refused with an error naming both. The key is deliberately
+   conservative (sorting marks can call two titles equal that real NFD
+   would keep apart); it only ever refuses a title, it never merges or
+   rewrites one. Links still resolve by case fold only, so `[[Caf\u00e9]]`
+   does not resolve to a note spelled `Cafe\u0301`.
+2. *Physical:* new note files and new draft files are created with
+   `overwrite: false`, so the host itself refuses a name it already
+   resolves to another file, even for characters outside the table or a
+   file written by someone else after the vault was loaded. On-disk
+   collision checks before a rename or restore compare names by `normKey`.
+
+A rename that changes only case or normalization of the same note goes
+through a temporary name, so it works on case- and
+normalization-insensitive hosts. A title may not contain `[ ] | # / \` or control characters, and is
+at most 200 bytes. Each note is limited to 1 MiB, each vault to 10,000
+notes and 256 MiB.
+
+### Links, tags, rendering
+
+- `[[Title]]`, `[[Title|alias]]`, and `[[Title#heading]]` are links;
+  `[[Title\|alias]]` (pipe escaped inside a table cell) works too. Links
+  and tags inside fenced code blocks and inline code are ignored, following
+  CommonMark: a fence closes only on a run of the same character at least
+  as long as the opener with nothing after it, and a code span closes only
+  on a backtick run of exactly the opener's length, possibly on a later
+  line of the same paragraph. One scanner serves indexing, rendering,
+  backlinks, and rename rewriting, so they never disagree about what counts
+  as a link. It runs in linear time on any input.
+- Rendering is plain text: `«Title»`, `«alias → Title»`, or
+  `«Title (missing)»`. In the note view, each broken link is an item, and
+  **Follow** on it creates the target note and opens it (one key).
+- `#tag` starts after whitespace or punctuation and must contain a letter
+  (`#42` is not a tag). Tags are lowercase and may nest (`#garden/herbs`).
+  A `#` in a markdown anchor link (`[x](#sec)`) or inside a URL-like word
+  (`scheme://…`, `www.…`, `mailto:…`) is not a tag.
+- Backlinks list every live note linking to this one, with the line that
+  contains the link.
+
+### Search
+
+The inverted index lives in memory only. It is built from the sources at
+load and updated on every mutation, so there is no on-disk search index to
+go stale. Words are case-folded like titles; combining marks stay inside
+their word; Han, Hiragana, and Katakana characters are indexed one by one
+(so a word inside unspaced CJK text is found, a multi-character query
+matching as the conjunction of its characters); words longer than 64 bytes
+are indexed by their first 64 bytes. Queries match all terms; a term of two
+or more characters also matches as a prefix (prefix matches carry less
+weight). Prefix expansion has no cap, so a conjunction is exact however
+many words a prefix matches; terms are evaluated cheapest first, and once
+the candidates are few a broad prefix is checked against each candidate's
+own words instead of every posting. An empty or punctuation-only query matches nothing. Results are ranked by
+BM25 with a title boost. Snippets come from the note text with matches
+marked `«like this»`; an excerpt never starts or ends inside a word, a
+snippet is at most 320 bytes (rune-safe), and a matched word is shown to
+at most 80 bytes, so a page of results stays small even for notes that
+hold one enormous word. With 2,000 synthetic notes, `BenchmarkSearch2000`
+measures about 1.2 ms per query through the route. `TestAcceptanceSearchUnder100ms`
+enforces the 100 ms bound for every query.
+
+### Graph as presentation data
+
+The `graph` route returns `{nodes, edges, dead_ends, orphans, unresolved}`.
+A **dead end** has incoming links but no outgoing resolved links. An
+**orphan** has no resolved links in either direction. Unresolved targets are
+listed with the notes that link to them. The graph view uses only the
+existing item vocabulary: a summary item, one item per note (`in`/`out`
+counts, `→`/`←` neighbours, role, tags), and one item per missing target.
+No shell changes were needed. The view is capped at 100 items with
+explicit "more" items; the route always returns the full graph.
+
+### Crash safety
+
+Every mutation is one or more single atomic VFS operations, ordered so that a
+kill between any two of them leaves a consistent, recoverable state:
+
+- **Edit**: the buffer is staged to `drafts/` atomically.
+- **Save**: (1) the old version goes to `history/`, (2) the note is replaced
+  atomically, (3) `index.json` is replaced, (4) the draft is removed. Before
+  (2) completes, the old note is intact and the draft holds the edit. After
+  (2) completes, the new note is committed, and a leftover draft identical to
+  it is dropped on the next open.
+- **Rename, trash, restore**: all steps (file moves and link rewrites across
+  notes and drafts) go into `journal.json`, which is written atomically
+  before the first step. Each step is idempotent. On open, an existing
+  journal is replayed to completion. So a rename is all-or-nothing:
+  either every `[[Old]]` is still `[[Old]]` or every one is `[[New]]`.
+  A capitalization-only rename (`note` → `Note`) moves each file through a
+  deterministic temporary name inside the journal step, so it works on
+  case-insensitive hosts (APFS, NTFS) and replays from any intermediate
+  state. Rename and restore reject a destination that is taken *before*
+  writing the journal: another note, a pending draft with that title, or a
+  vault, history, or draft entry whose name matches ignoring case and
+  normalization. Rename also preflights every derived write: a rewritten
+  note or draft that would exceed 1 MiB, or growth past the vault's byte
+  limit, rejects the rename with an error naming the notes, so a rename can
+  never make a note unloadable. Restore checks the note and vault limits
+  the same way.
+- **A journal that cannot be completed never stops the vault from
+  opening.** The steps that are safe are finished (moves whose destination
+  is free; writes to existing files that are not the destination of a
+  move that failed), the journal is moved to `quarantine/`, and the
+  problem is reported in `status` (`index.warnings`) and on the home view.
+  Salvage never deletes what a failed move left behind: a remove step is
+  skipped when a move from inside it failed, a trash entry whose note could
+  not move out stays whole (note, history, and draft, still listed and
+  restorable), and a note that could not move into the trash keeps its
+  history and draft beside it.
+  If a restore already moved its note but cannot move its history or draft,
+  the journal stays pending instead of being quarantined. The draft remains
+  visible in recovery, and the next mutation completes the restore once
+  storage works again. Until then, mutations are refused without changing
+  the retained files.
+- **Ordinary I/O failures** (the process keeps running) during a journaled
+  operation leave the journal pending. Every later change first completes
+  it and reloads the vault from storage, or is refused with an error until
+  it can; a pending journal is never overwritten. Reopening (or
+  `rebuild`) applies the open-time rule above. Completing a pending
+  operation reloads memory, so it is done before any route or action looks
+  anything up; no note or draft reference is held across that reload.
+- **Index**: on open, each entry is checked against the SHA-256 of its
+  source file. Missing, corrupt, or stale entries are reparsed and the index
+  is rewritten. Deleting `index.json` causes a full rebuild with no content
+  loss. The index is only a cache: one over ~2.9 MiB (the IPC frame after
+  base64) or unreadable is discarded and rebuilt; if a new one cannot be
+  written it is simply not persisted (`status` shows `index_problem`) and
+  the notes are reparsed on the next open. Writing the index never fails
+  the operation that triggered it. Note files over 1 MiB, unreadable ones,
+  and anything past the note-count or byte limits are skipped with a
+  warning and left untouched on disk.
+- **Interrupted saves**: an orphaned `*.tmp.*` staging file is deleted.
+  A `.recover` artifact from a save whose final rename failed becomes a
+  recovery draft, or a draft under a `(recovered)` title if the user already
+  has a different draft. A draft's own artifact replaces the staged draft
+  only when it is strictly newer (by `staged_at`); an older or equally old
+  one is kept beside it under a `(recovered)` title. The artifact is
+  removed only after its content is durably written; if staging fails, the
+  artifact stays and is reported. A successful draft save removes the
+  artifact an earlier failed save of the same draft left in this process,
+  so a stale edit is never offered over a newer one.
+- **External edits**: save and rename compare each file they would replace
+  with the hash Compendium loaded. A file changed outside Compendium is
+  never overwritten: save reports a conflict, keeps the edit as a draft on
+  top of the external version (which the note now shows; restoring the
+  draft saves over it deliberately, sending the external version to
+  history). A deleted source is removed from the cached model, so explicitly
+  restoring its draft can recreate it. Rename checks every loaded note
+  before selecting backlinks, and is refused with changed notes reloaded
+  so a retry also rewrites links newly introduced by an external edit.
+- On launch, drafts that differ from disk open the **Recovery drafts**
+  view (`restore_draft` / `discard_draft`).
+- **Editor revisions**: the note editor remembers the hash of the version
+  it was opened on (a restored draft carries its own). **Save** in a clean
+  editor writes nothing; if the note changed through the routes meanwhile,
+  the editor reloads it. **Save** in a dirty editor whose base is no longer
+  current is a conflict: nothing is written, the edits stay staged as a
+  draft, and the view offers **Overwrite with mine** (`overwrite`) and
+  **Reload saved version** (`reload`).
+
+These guarantees are proven with failure injection at every mutating
+fs call: kill before or after the call, torn staging file, and failed final
+rename. A second suite injects failures inside the real HostFS
+stage/rename path. For each case the tests reopen the vault and check
+committed content, draft recoverability, and that the index matches a full
+rebuild.
+
+### Rename propagation
+
+Renaming rewrites the target of every link to the old title in live notes
+and pending drafts. Aliases and `#heading` anchors are kept byte for byte.
+Links inside trashed notes are not rewritten. They are reported in
+`orphaned`, and the view status names them. Remaining broken links always
+appear as unresolved in the graph.
+
+### Import and export
+
+- `export {title}` returns the note's exact bytes (base64) and writes
+  `exports/<stem>.md`. `export {}` zips every note as `<stem>.md`
+  (`archive/zip`). Exports are byte-identical to the stored Markdown. An
+  optional `dest` also writes the export to a granted VFS path.
+- `import` accepts `{title, content}`, `{zip_base64}`, or `{path}` (a
+  granted `.md` or `.zip`). Existing titles are skipped unless
+  `overwrite: true`. Zip entries are path-checked, and the archive is
+  bounded by what is actually inflated, counted while reading (header
+  sizes are not trusted): at most 10,000 entries, 1 MiB per note, and
+  32 MiB in total. There is no compression-ratio rule (ordinary repetitive
+  Markdown compresses far past 100:1); the inflated-byte limits bound what
+  an archive can cost. The import is planned before anything is written
+  (invalid, oversized, existing, unchanged, duplicate, and colliding files
+  are skipped), and the note and byte limits are checked against exactly
+  what will be written, including intermediate growth in archive order, so
+  a capacity refusal writes nothing. Folded titles and normalization keys
+  use separate duplicate sets; a literal title such as `norm:X` cannot
+  collide with the bookkeeping for `X`. Each imported
+  note is created atomically, so re-running an interrupted import finishes
+  it.
+- Exports are limited to about 2.9 MiB, under the 4 MiB IPC frame after
+  base64, and a vault export is refused when the vault is larger than one
+  import accepts (32 MiB or 10,000 notes), so every archive Compendium
+  writes imports again. Export larger vaults note by note.
+
+### Presentation and routes
+
+- Home: a search/command field (`today`, `new <title>`, `open <title>`,
+  `tag <name>`, `graph`, `tags`, `trash`, `drafts`, `help`; anything else
+  is a search). Actions: `run`, `open`, `new`, `today`, `graph`, `tags`,
+  `trash_bin`, `recovery`, `export_vault`, `rebuild_index`, `help`,
+  `home`.
+- Note: rendered text, link, backlink, and tag items; a `Markdown` field
+  (only when the note fits the 4,096-byte field limit, so a larger note is
+  never truncated by an edit) and a `Rename to` field. Actions: `save`,
+  `follow`, `reload`, `rename`, `trash`, `export_note`, `today`, `home`,
+  plus `overwrite` while a save conflict is pending.
+- Graph, Tags, Tag, Trash (`restore`), Recovery drafts, and Help views.
+
+Programmatic routes under `app/com.gostalgia.compendium/`: `create`, `open`,
+`save`, `edit`, `rename`, `trash`, `trash_list`, `restore`, `history`,
+`search`, `graph`, `tags`, `tag`, `today`, `list`, `export`, `import`,
+`drafts`, `recover`, `rebuild`, `status`.
+
+Responses stay inside the 4 MiB IPC frame for any note. `encoding/json`
+writes `<`, `>`, `&`, and control bytes as six bytes each, so a 1 MiB note
+can encode to 6 MiB: `open` sends text that would not fit as
+`content_base64` (and omits `rendered`, flagged `rendered_omitted`), and
+`drafts` lists drafts with content while it fits, the rest flagged
+`content_omitted`, fetched one at a time with `{"title": ...}`. Drafts are
+stored without HTML escaping so a 1 MiB markup draft fits the write frame.
+
+`open` budgets the complete response, including JSON-escaped links,
+backlinks, and tags. Large collections return a prefix with `<collection>_total`
+and `<collection>_next_offset`; fetch the next page with `links_offset`,
+`backlinks_offset`, or `tags_offset`. Offsets must be between zero and the
+collection's total. Use `include_content: false` for metadata-only pages,
+and set offsets for collections already consumed to their totals. A single
+metadata item too large for a response is counted in
+`<collection>_omitted_items`; its exact text remains in the note's source
+content or byte-identical export.
+
+### Known limitations
+
+- **No encryption at rest.** Notes, history, drafts, and exports are plain
+  files in the app-private partition on the host. Partition isolation
+  protects them from other apps, not from anyone who can read the host
+  directory. Use host disk encryption if that matters.
+- No sync, sharing, accounts, plugins, query language, HTML preview, or
+  WYSIWYG editing (non-goals). Version 1 fields are single-line, so
+  multi-line editing in the shell is limited; the `edit`/`save` routes
+  carry full documents.
+- The daily note uses the runtime host's local date.
+- Titles are not Unicode-normalized (stdlib only): normalization variants
+  are refused as collisions rather than unified, and links resolve by case
+  fold only; see Storage layout.
+- `graph` and `list` return the whole vault in one response; a very large
+  vault with long titles can exceed the 4 MiB IPC frame there (not
+  paginated yet).
+- A vault whose index exceeds ~2.9 MiB (roughly tens of thousands of links)
+  runs without a persisted index and reparses every note on open.
