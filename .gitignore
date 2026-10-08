@@ -9,5 +9,8 @@
 # local environment roots used during development
 /gs-root/
 
+# agent/tooling scratch state
+/.freebuff/
+
 # go
 *.out
