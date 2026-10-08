@@ -1311,7 +1311,63 @@ and registered — Dogcalc imports its `Evaluate` core and `Pad` state machine �
 so existing headless `calc` calls and v1 views keep working, but it is no
 longer the face of arithmetic on the shelf.
 
-## 15. Pomodoro: a focus timer (`com.gostalgia.pomodoro`)
+## 15. Todo: a persistent task list (`com.gostalgia.todo`)
+
+`apps/todo` (display name **Todo**) is the pack's plain task list, built to
+prove app-private persistence: tasks added, completed, deleted, and cleared
+survive relaunch and reboot. It is a pure version-1 surface — tasks as
+items, one new-task field, labeled actions — so a version-2 request gets
+exactly the same snapshot a version-1 request does.
+
+```json
+{
+  "id": "com.gostalgia.todo",
+  "permissions": ["ipc", "fs.read", "fs.write"]
+}
+```
+
+`ipc` covers routes and presentation; `fs.read`/`fs.write` cover the
+app-private state file. There is no path grant: the app never touches user
+documents, only `/apps/data/com.gostalgia.todo/`. If the fs grants are
+absent or revoked the app keeps working in memory — reads report the
+denial on the error banner, saves report `save failed: ...` on the status
+line, and the next mutation after the grant lands persists everything.
+
+### The list
+
+Every task is an item: pending rows read `[ ] title`, done rows `[x]
+title`, with the timing in the detail (`added 34m ago`,
+`done 2h ago · added 5h ago`). The field `new_task` feeds `add_task`;
+`complete` and `delete` act on the selected item; `clear_done` drops every
+completed task; `filter` cycles all → active → done (a view preference,
+deliberately not persisted). Actions disable themselves when they cannot
+apply — `complete`/`delete` when nothing is shown, `clear_done` when
+nothing is done, `add_task` at the 250-task storage cap. Domain rejections
+(empty title, unknown item, completing a done task, clearing with nothing
+done) land in the status line, never as IPC errors.
+
+An empty list is a friendly notice — "No tasks yet" plus how to add one —
+and a filter that matches nothing says so instead of showing a blank area.
+The snapshot caps at 64 rows; a longer list shows the first 63 plus a
+trailing `… and N more` indicator item rather than silently dropping
+tasks. The indicator is a notice, not a task: selecting it is an honest
+domain rejection.
+
+### Persistence and routes
+
+One document, `/apps/data/com.gostalgia.todo/tasks.json`
+(`{version, tasks, seq}`), written with atomic `fs/save` after every
+mutation and flushed again on Stop if a save is still pending. State loads
+lazily on first view, action, or route. A missing file is just an empty
+list; a corrupt or wrong-version file is an honest error banner over a
+usable empty list, and the bad bytes are left alone until the next real
+change saves over them. Loading repairs before rendering — duplicate or
+reserved ids reassigned, untitled entries labeled, timestamps pinned —
+and the healed copy is written back. Programmatic routes under
+`app/com.gostalgia.todo/`: `list` (optional `filter`), `add`, `complete`,
+`delete`, `clear_done`.
+
+## 16. Pomodoro: a focus timer (`com.gostalgia.pomodoro`)
 
 `apps/pomodoro` (display name **Pomodoro**) is a work/break interval timer:
 work sessions alternate with short breaks, and every Nth work session earns a
