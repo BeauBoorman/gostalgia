@@ -5,6 +5,7 @@ package apps
 import (
 	"fmt"
 
+	"gostalgia/apps/calculator"
 	"gostalgia/apps/compendium"
 	"gostalgia/apps/echo"
 	"gostalgia/apps/files"
@@ -32,6 +33,9 @@ func Register(r Registrar) error {
 	if err := r.RegisterBuiltin(settings.Manifest(), settings.Factory); err != nil {
 		return fmt.Errorf("apps: register %s: %w", settings.ID, err)
 	}
+	if err := r.RegisterBuiltin(calculator.Manifest(), calculator.Factory); err != nil {
+		return fmt.Errorf("apps: register %s: %w", calculator.ID, err)
+	}
 	if err := r.RegisterBuiltin(compendium.Manifest(), compendium.Factory); err != nil {
 		return fmt.Errorf("apps: register %s: %w", compendium.ID, err)
 	}
@@ -40,5 +44,5 @@ func Register(r Registrar) error {
 
 // Manifests returns fresh builtin declarations, without filesystem access.
 func Manifests() []sdk.Manifest {
-	return []sdk.Manifest{echo.Manifest(), notes.Manifest(), files.Manifest(), settings.Manifest(), compendium.Manifest()}
+	return []sdk.Manifest{echo.Manifest(), notes.Manifest(), files.Manifest(), settings.Manifest(), calculator.Manifest(), compendium.Manifest()}
 }
