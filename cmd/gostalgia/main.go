@@ -17,11 +17,33 @@ import (
 	"os/signal"
 	"path/filepath"
 
+	"gostalgia/internal/experience/notifications"
 	"gostalgia/internal/experience/shell"
 	"gostalgia/internal/ipc"
 	"gostalgia/internal/runtime"
+	"gostalgia/internal/service"
 	"gostalgia/platform"
 )
+
+// notifSink adapts the experience-layer notification manager to the
+// service.NotificationSink boundary.
+type notifSink struct{ mgr *notifications.Manager }
+
+func (s *notifSink) Record(r service.NotificationRecord) bool {
+	return s.mgr.Record(notifications.Notification{
+		Title:     r.Title,
+		Message:   r.Message,
+		Level:     notifications.Level(r.Level),
+		Source:    r.Source,
+		PID:       r.PID,
+		Timestamp: r.Timestamp,
+	})
+}
+
+func newNotifications() (*notifications.Manager, service.NotificationSink) {
+	mgr := notifications.NewManager(notifications.DefaultMaxHistory, notifications.DefaultMaxActiveToasts, notifications.DefaultToastTicks)
+	return mgr, &notifSink{mgr}
+}
 
 const usageText = `gostalgia — the Gostalgia environment runtime
 
@@ -75,7 +97,8 @@ func cmdBoot(args []string) error {
 	verbose := fs.Bool("verbose", false, "enable debug logging")
 	fs.Parse(args)
 
-	rt, err := runtime.Boot(context.Background(), runtime.Options{Root: *root, Verbose: *verbose})
+	_, sink := newNotifications()
+	rt, err := runtime.Boot(context.Background(), runtime.Options{Root: *root, Verbose: *verbose, Notifications: sink})
 	if err != nil {
 		return err
 	}
@@ -154,7 +177,8 @@ func cmdShell(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), platform.ShutdownSignals()...)
 	defer stop()
-	rt, err := runtime.Boot(context.Background(), runtime.Options{Root: *root, Verbose: *verbose, LogOutput: io.Discard})
+	notifs, sink := newNotifications()
+	rt, err := runtime.Boot(context.Background(), runtime.Options{Root: *root, Verbose: *verbose, LogOutput: io.Discard, Notifications: sink})
 	if err != nil {
 		return err
 	}
@@ -178,7 +202,7 @@ func cmdShell(args []string) error {
 		return err
 	}
 	defer client.Close()
-	return shell.Run(ctx, client, rt.Done())
+	return shell.Run(ctx, client, rt.Done(), notifs)
 }
 
 func cmdInit(args []string) error {

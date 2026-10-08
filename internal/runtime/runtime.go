@@ -46,6 +46,9 @@ type Options struct {
 	// LogOutput overrides console logging. Interactive hosts pass io.Discard
 	// so service logs cannot corrupt a TUI; file logging remains enabled.
 	LogOutput io.Writer
+	// Notifications records user-facing notifications from services.
+	// When nil, notify/post fails closed with "notification pipeline unavailable".
+	Notifications service.NotificationSink
 }
 
 // Runtime is a booted Gostalgia environment.
@@ -216,22 +219,23 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 	rt.Apps.SetPolicyStore(policyStore)
 
 	svcCtx := &service.Context{
-		Root:     root,
-		Version:  Version,
-		Config:   cfg,
-		Layered:  layeredCfg,
-		Events:   rt.Bus,
-		Log:      log,
-		Router:   rt.Router,
-		VFS:      rt.VFS,
-		Procs:    rt.Procs,
-		Apps:     rt.Apps,
-		Sessions: rt.Sessions,
-		Profiles: rt.Profiles,
-		Tokens:   tokens,
-		Policy:   policyStore,
-		Token:    token,
-		BootedAt: time.Now(),
+		Root:          root,
+		Version:       Version,
+		Config:        cfg,
+		Layered:       layeredCfg,
+		Events:        rt.Bus,
+		Log:           log,
+		Router:        rt.Router,
+		VFS:           rt.VFS,
+		Procs:         rt.Procs,
+		Apps:          rt.Apps,
+		Sessions:      rt.Sessions,
+		Profiles:      rt.Profiles,
+		Tokens:        tokens,
+		Policy:        policyStore,
+		Notifications: opts.Notifications,
+		Token:         token,
+		BootedAt:      time.Now(),
 	}
 	rt.svcCtx = svcCtx
 
@@ -255,6 +259,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		services.NewProfile(),
 		services.NewPackage(),
 		services.NewRecovery(),
+		services.NewNotify(),
 	} {
 		if err := sm.Register(s); err != nil {
 			logFile.Close()

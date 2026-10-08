@@ -232,6 +232,17 @@ func New(ctx context.Context, c Caller, closed <-chan struct{}) *Model {
 // NewWithTheme makes appearance and color capability explicit. Plain rendering
 // is useful for snapshots and terminals without ANSI styling.
 func NewWithTheme(ctx context.Context, c Caller, closed <-chan struct{}, t theme.Theme, mode ui.ColorMode) *Model {
+	return NewWithThemeAndNotifs(ctx, c, closed, t, mode, notifications.NewManager(100, 3, 8))
+}
+
+// NewWithNotifs creates a shell that shares the supplied notification manager.
+func NewWithNotifs(ctx context.Context, c Caller, closed <-chan struct{}, notifs *notifications.Manager) *Model {
+	return NewWithThemeAndNotifs(ctx, c, closed, theme.Nostalgia(), ui.ANSI256, notifs)
+}
+
+// NewWithThemeAndNotifs makes appearance and color capability explicit and
+// shares the supplied notification manager with services.
+func NewWithThemeAndNotifs(ctx context.Context, c Caller, closed <-chan struct{}, t theme.Theme, mode ui.ColorMode, notifs *notifications.Manager) *Model {
 	return &Model{
 		ctx: ctx, client: c, closed: closed, kit: ui.New(t, mode), width: 80, height: 24, cwd: "/users/guest",
 		mode: modeHome,
@@ -240,7 +251,7 @@ func NewWithTheme(ctx context.Context, c Caller, closed <-chan struct{}, t theme
 			{"Type help to explore, or F2 to open your app shelf.", "muted"},
 		},
 		tasks:     taskmanager.New(),
-		notifs:    notifications.NewManager(100, 3, 8),
+		notifs:    notifs,
 		receipts:  receipts.NewStore(50),
 		lastProcs: make(map[int32]procTracking),
 		user:      "guest",
@@ -1619,12 +1630,12 @@ func Restore(w io.Writer) {
 
 // Run takes over the terminal, restoring it on every exit. Passing options is
 // useful for tests; production runs in the alternate screen with bracketed paste.
-func Run(ctx context.Context, c Caller, closed <-chan struct{}, options ...tea.ProgramOption) (err error) {
+func Run(ctx context.Context, c Caller, closed <-chan struct{}, notifs *notifications.Manager, options ...tea.ProgramOption) (err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	opts := []tea.ProgramOption{tea.WithAltScreen(), tea.WithContext(ctx)}
 	opts = append(opts, options...)
-	model := New(ctx, c, closed)
+	model := NewWithNotifs(ctx, c, closed, notifs)
 	defer func() {
 		if cleanup := model.dismissView(); cleanup != nil {
 			cleanup()

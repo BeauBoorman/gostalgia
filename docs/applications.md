@@ -346,7 +346,9 @@ builtin manifests are approved by compilation/registration.
 | `net.egress` | `net/fetch` | `{"url":"...","method?":"GET","headers?":{},"body_base64?":""}` | `{status,headers,data_base64,size}` |
 | `shutdown` | `sys/shutdown` | `{reason?}` | `{stopping:true,reason}`; teardown may close connection |
 
-`sys/ping` returns `{pong:true,version}`. `session/whoami` returns
+|| `notify` | `notify/post` | `{"severity":"info|warning|error","title":"...","body":"..."}` | `{posted:true}`; bounded toasts and notification center history |
+
+|`sys/ping` returns `{pong:true,version}`. `session/whoami` returns
 `{user,user_id,session,capabilities}`. These two service methods have no
 additional method grant, but **SDK calls still require ipc**. Files use
 standard base64 (`encoding/base64`); all filesystem paths are environment

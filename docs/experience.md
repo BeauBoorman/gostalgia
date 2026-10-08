@@ -245,6 +245,9 @@ scrollable table:
   continues recording silently.
 - **Flood Bounding**: Active toasts and stored notification entries are capped to
   fixed bounds to ensure zero runaway memory growth.
+- **App Posting**: Applications granted `notify` can post user-facing toasts and
+  notification center entries via `notify/post` with bounded `severity`/`title`/`body`.
+  Posts are attributed to the calling app and are subject to DND and flood caps.
 - **Access**: Press `F6` or execute `notifications` or `alerts` from the prompt.
 
 ### Crash Receipts (`internal/experience/receipts`)
