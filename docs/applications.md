@@ -1451,3 +1451,79 @@ Programmatic routes under `app/com.gostalgia.pomodoro/`: `state`, `start`
 (optional length params), `pause`, `skip`, `reset`, `configure`. Timer-driven
 transitions post an `info` alert ("work session done — short break (5m)
 started") and mirror the same text in the status line.
+
+## 19. Weather: current conditions + forecast (`com.gostalgia.weather`)
+
+`apps/weather` is Gostalgia's weather app: current conditions and a five-day
+forecast for a bounded list of saved places, fetched from the keyless
+Open-Meteo API — no account, no key, no secrets infrastructure. It is the
+reference consumer of capability-gated network egress.
+
+```json
+{
+  "id": "com.gostalgia.weather",
+  "permissions": ["ipc", "net.egress", "fs.read", "fs.write"]
+}
+```
+
+`ipc` covers routes and presentation; `fs.read`/`fs.write` cover the state
+file; `net.egress` covers `net/fetch`. **The grant alone is not enough:**
+outbound network is disabled by operator policy. The operator must enable
+egress and allowlist both Open-Meteo hosts — `geocoding-api.open-meteo.com`
+(place search) and `api.open-meteo.com` (forecast) — for anything to load:
+
+```sh
+gctl call sys/policy/update '{"clipboard":{"enabled":false},"hostfs":{"enabled":false},"network":{"enabled":true,"allowed_hosts":["geocoding-api.open-meteo.com","api.open-meteo.com"]}}'
+```
+
+(Pass the full `OperatorPolicy` — update replaces the whole document.) HTTPS
+is required by default; the app never requests plaintext.
+
+### Places, candidates, and the cache
+
+A `place` field plus the `search` action geocodes a name into at most five
+candidate rows; `save` keeps the selected row as a `loc_N` place (dedupe by
+name+near-identical coordinates, cap 8), selects it, and loads its forecast.
+`select` switches the shown place, `remove` drops the selected place and its
+cache, `refresh` forces a refetch. Programmatic routes under
+`app/com.gostalgia.weather/` mirror the actions: `state`, `search`, `save`,
+`select`, `remove`, `refresh`; `state` also reports `egress_hosts`, the two
+hosts an operator must allowlist.
+
+Each successful fetch replaces the place's cached snapshot (current
+conditions plus up to five daily rows) and is persisted with it. A snapshot
+younger than a 30-minute TTL is served without refetching — a `select` or
+relaunch inside the window costs no network. Past the TTL the next select
+refetches; `refresh` always fetches. Fetches happen only inside actions,
+never in the passive view the shell polls, so a running app cannot hammer
+the free API.
+
+### Honest failure modes
+
+Every fetch failure lands in the status line with recovery guidance, never
+a stack trace: egress disabled names `sys/policy/update` and both hosts; an
+unallowlisted host names `network.allowed_hosts` and both hosts; a missing
+`net.egress` grant, transport errors, non-200 statuses (with the API's own
+`reason` when present), unreadable bodies, and a geocode miss ("no places
+match … — try a larger nearby town") each get their own plain sentence. A
+failed refresh keeps the stale snapshot and says how old it is ("… —
+showing data from 2h ago"); with no cache at all the place still saves and
+the status explains the failure. Corrupt or denied state storage surfaces
+the same way — an honest banner over a working in-memory list.
+
+### Persistence
+
+`/apps/data/com.gostalgia.weather/state.json` holds `{version, locations,
+selected, seq, cache}` via atomic `fs/save` — saved places, the selection,
+and last-good forecasts survive relaunch, so a relaunched app renders the
+previous conditions with their real age ("updated 2h ago", marked stale
+past the TTL) instead of pretending freshness. Load sanitizes: out-of-range
+coordinates are dropped, duplicate or reserved item ids reassigned, the
+selection pinned to a real place, cache entries for removed places pruned,
+and a healed document is written back immediately.
+
+Version-1 snapshots carry everything as items — a `current` conditions row,
+`day_N` forecast rows, `loc_N` saved places, and `cand_N` search results —
+plus the one `place` field and five actions. Version-2 adds a `weather_art`
+block (a small ASCII glyph per condition family) and `m_humidity` /
+`m_precip` meters. There is no background poll: refresh-on-demand only.
