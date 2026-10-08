@@ -4,5 +4,5 @@
   "version": "0.1.0",
   "entrypoint": "calculator",
   "permissions": ["ipc"],
-  "description": "A simple desk calculator: digits, operators, and honest error text."
+  "description": "Retired desk calculator: superseded by Dogcalc (com.gostalgia.dogcalc), which shares its arithmetic core."
 }

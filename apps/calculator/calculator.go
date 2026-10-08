@@ -263,6 +263,275 @@ func formatResult(r *big.Rat) (string, error) {
 
 func isOpChar(c byte) bool { return c == '+' || c == '-' || c == '*' || c == 'x' || c == '/' }
 
+// Pad is the calculator's interactive keypad state machine: digit entry,
+// chained left-to-right operators, equals, clear, plus the decimal and
+// sign-flip keys the version-2 grid pad affords. The version-1 Calculator
+// and Dogcalc share it so every pad does identical math. A Pad is not
+// concurrency-safe; the owning app serializes presses. A sticky error resets
+// the pad on the next press, like a hardware calculator's error state.
+type Pad struct {
+	left        *big.Rat
+	leftInput   string
+	leftIsInput bool
+	rightInput  string
+	op          string
+	err         string
+}
+
+// NewPad returns a cleared pad ready for input.
+func NewPad() *Pad {
+	p := new(Pad)
+	p.Clear()
+	return p
+}
+
+// Err reports the sticky error text, or "" when the pad is clean.
+func (p *Pad) Err() string { return p.err }
+
+// HasDot reports whether the operand currently being edited already contains
+// a decimal point, so a pad may disable its dot key. A computed result or an
+// operand not yet started counts as dot-free.
+func (p *Pad) HasDot() bool {
+	if p.op != "" {
+		return strings.Contains(p.rightInput, ".")
+	}
+	return p.leftIsInput && strings.Contains(p.leftInput, ".")
+}
+
+// Display renders the current entry or the pending expression.
+func (p *Pad) Display() string {
+	var leftStr string
+	if p.leftIsInput {
+		leftStr = p.leftInput
+	} else {
+		var err error
+		leftStr, err = formatResult(p.left)
+		if err != nil {
+			leftStr = "0"
+		}
+	}
+	if p.op == "" {
+		return leftStr
+	}
+	if p.rightInput == "" {
+		return leftStr + " " + opLabel(p.op)
+	}
+	return leftStr + " " + opLabel(p.op) + " " + p.rightInput
+}
+
+// Digit appends the digit n to the operand being edited.
+func (p *Pad) Digit(n int) {
+	p.clearErr()
+	digit := strconv.Itoa(n)
+	if p.op == "" {
+		if !p.leftIsInput {
+			p.leftInput = digit
+			p.left = big.NewRat(int64(n), 1)
+			p.leftIsInput = true
+			p.rightInput = ""
+			p.op = ""
+			return
+		}
+		if p.leftInput == "0" {
+			p.leftInput = digit
+		} else if p.leftInput == "-0" {
+			p.leftInput = "-" + digit
+		} else if len(p.leftInput) < maxDigits {
+			p.leftInput += digit
+		} else {
+			p.err = "overflow"
+			return
+		}
+		left, err := parseDecimal(p.leftInput)
+		if err != nil {
+			p.err = err.Error()
+			return
+		}
+		p.left = left
+		return
+	}
+	if p.rightInput == "" || p.rightInput == "0" {
+		p.rightInput = digit
+	} else if p.rightInput == "-0" {
+		p.rightInput = "-" + digit
+	} else if len(p.rightInput) < maxDigits {
+		p.rightInput += digit
+	} else {
+		p.err = "overflow"
+		return
+	}
+}
+
+// Dot appends a decimal point to the operand being edited, or starts a fresh
+// fractional entry over a computed result.
+func (p *Pad) Dot() {
+	p.clearErr()
+	if p.op == "" {
+		if !p.leftIsInput {
+			p.leftInput = "0."
+			p.left = big.NewRat(0, 1)
+			p.leftIsInput = true
+			p.rightInput = ""
+			p.op = ""
+			return
+		}
+		if p.HasDot() {
+			return
+		}
+		if !p.appendDot(&p.leftInput) {
+			return
+		}
+		left, err := parseDecimal(p.leftInput)
+		if err != nil {
+			p.err = err.Error()
+			return
+		}
+		p.left = left
+		return
+	}
+	if p.rightInput == "" {
+		p.rightInput = "0."
+		return
+	}
+	p.appendDot(&p.rightInput)
+}
+
+// appendDot adds a decimal point to in unless one is present or the input is
+// at its length budget; it reports whether the input changed.
+func (p *Pad) appendDot(in *string) bool {
+	if strings.Contains(*in, ".") {
+		return false
+	}
+	if len(*in) >= maxDigits {
+		p.err = "overflow"
+		return false
+	}
+	*in += "."
+	return true
+}
+
+// Neg flips the sign of the operand being edited, or of a computed result.
+func (p *Pad) Neg() {
+	p.clearErr()
+	if p.op == "" {
+		if !p.leftIsInput {
+			p.left.Neg(p.left)
+			return
+		}
+		if !p.flip(&p.leftInput) {
+			return
+		}
+		left, err := parseDecimal(p.leftInput)
+		if err != nil {
+			p.err = err.Error()
+			return
+		}
+		p.left = left
+		return
+	}
+	if p.rightInput == "" {
+		p.rightInput = "-0"
+		return
+	}
+	p.flip(&p.rightInput)
+}
+
+// flip toggles in's leading minus sign within the input length budget; it
+// reports whether the input changed.
+func (p *Pad) flip(in *string) bool {
+	if strings.HasPrefix(*in, "-") {
+		*in = (*in)[1:]
+		return true
+	}
+	if len(*in) >= maxDigits {
+		p.err = "overflow"
+		return false
+	}
+	*in = "-" + *in
+	return true
+}
+
+// Op presses a binary operator, chaining a pending operation first.
+func (p *Pad) Op(op string) {
+	p.clearErr()
+	if p.leftIsInput {
+		p.leftIsInput = false
+	}
+	if p.op == "" {
+		p.op = op
+		p.rightInput = ""
+		return
+	}
+	if p.rightInput != "" {
+		right, err := parseDecimal(p.rightInput)
+		if err != nil {
+			p.err = err.Error()
+			p.rightInput = ""
+			p.op = ""
+			return
+		}
+		res, err := compute(p.left, right, p.op)
+		if err != nil {
+			p.err = err.Error()
+			p.rightInput = ""
+			p.op = ""
+			return
+		}
+		p.left = res
+		p.leftIsInput = false
+		p.rightInput = ""
+	}
+	p.op = op
+}
+
+// Eq completes the pending operation.
+func (p *Pad) Eq() {
+	p.clearErr()
+	if p.op == "" || p.rightInput == "" {
+		return
+	}
+	if p.leftIsInput {
+		p.leftIsInput = false
+	}
+	right, err := parseDecimal(p.rightInput)
+	if err != nil {
+		p.err = err.Error()
+		p.rightInput = ""
+		p.op = ""
+		return
+	}
+	res, err := compute(p.left, right, p.op)
+	if err != nil {
+		p.err = err.Error()
+		p.rightInput = ""
+		p.op = ""
+		return
+	}
+	p.left = res
+	p.leftIsInput = false
+	p.rightInput = ""
+	p.op = ""
+}
+
+// Clear resets the pad to a zeroed, ready state.
+func (p *Pad) Clear() {
+	p.left = big.NewRat(0, 1)
+	p.leftInput = "0"
+	p.leftIsInput = true
+	p.rightInput = ""
+	p.op = ""
+	p.err = ""
+}
+
+// clearErr resets a sticky error before the next press; Clear itself already
+// is that reset, so callers simply run before applying their own edit.
+func (p *Pad) clearErr() {
+	if p.err != "" {
+		p.Clear()
+	}
+	p.err = ""
+}
+
 func opLabel(op string) string {
 	switch op {
 	case "*":
@@ -279,23 +548,14 @@ func opLabel(op string) string {
 
 // Calc is the running in-process instance of the calculator.
 type Calc struct {
-	app         *sdk.Context
-	mu          sync.Mutex
-	left        *big.Rat
-	leftInput   string
-	leftIsInput bool
-	rightInput  string
-	op          string
-	err         string
+	app *sdk.Context
+	mu  sync.Mutex
+	pad *Pad
 }
 
 // Factory returns a fresh, uninitialized Calc instance.
 func Factory() (sdk.Instance, error) {
-	return &Calc{
-		left:        big.NewRat(0, 1),
-		leftInput:   "0",
-		leftIsInput: true,
-	}, nil
+	return &Calc{pad: NewPad()}, nil
 }
 
 // Init registers the presentation surface and the headless calc route.
@@ -327,36 +587,16 @@ func (c *Calc) viewLocked() sdk.View {
 	v := sdk.View{
 		Title:   "Calculator",
 		State:   sdk.ViewReady,
-		Items:   []sdk.Item{{ID: "display", Label: "Display", Detail: c.displayLocked()}},
+		Items:   []sdk.Item{{ID: "display", Label: "Display", Detail: c.pad.Display()}},
 		Actions: c.actionsLocked(),
 		Status:  "Enter a calculation",
 	}
-	if c.err != "" {
+	if err := c.pad.Err(); err != "" {
 		v.State = sdk.ViewError
-		v.Error = c.err
-		v.Status = c.err
+		v.Error = err
+		v.Status = err
 	}
 	return v
-}
-
-func (c *Calc) displayLocked() string {
-	var leftStr string
-	if c.leftIsInput {
-		leftStr = c.leftInput
-	} else {
-		var err error
-		leftStr, err = formatResult(c.left)
-		if err != nil {
-			leftStr = "0"
-		}
-	}
-	if c.op == "" {
-		return leftStr
-	}
-	if c.rightInput == "" {
-		return leftStr + " " + opLabel(c.op)
-	}
-	return leftStr + " " + opLabel(c.op) + " " + c.rightInput
 }
 
 func (c *Calc) actionsLocked() []sdk.Action {
@@ -384,141 +624,30 @@ func (c *Calc) act(ctx context.Context, p sdk.ActionRequest) (sdk.View, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.err != "" && p.Action != "clear" {
-		c.reset()
-	}
-
 	switch {
 	case strings.HasPrefix(p.Action, "digit_"):
 		n, err := strconv.Atoi(strings.TrimPrefix(p.Action, "digit_"))
 		if err != nil || n < 0 || n > 9 {
 			return sdk.View{}, fmt.Errorf("unknown action %q", p.Action)
 		}
-		c.pressDigit(n)
+		c.pad.Digit(n)
 	case p.Action == "add":
-		c.pressOp("+")
+		c.pad.Op("+")
 	case p.Action == "sub":
-		c.pressOp("-")
+		c.pad.Op("-")
 	case p.Action == "mul":
-		c.pressOp("*")
+		c.pad.Op("*")
 	case p.Action == "div":
-		c.pressOp("/")
+		c.pad.Op("/")
 	case p.Action == "eq":
-		c.pressEq()
+		c.pad.Eq()
 	case p.Action == "clear":
-		c.reset()
+		c.pad.Clear()
 	default:
 		return sdk.View{}, fmt.Errorf("unknown action %q", p.Action)
 	}
 
 	return c.viewLocked(), nil
-}
-
-func (c *Calc) pressDigit(n int) {
-	digit := strconv.Itoa(n)
-	c.err = ""
-	if c.op == "" {
-		if !c.leftIsInput {
-			c.leftInput = digit
-			c.left = big.NewRat(int64(n), 1)
-			c.leftIsInput = true
-			c.rightInput = ""
-			c.op = ""
-			return
-		}
-		if c.leftInput == "0" {
-			c.leftInput = digit
-		} else if len(c.leftInput) < maxDigits {
-			c.leftInput += digit
-		} else {
-			c.err = "overflow"
-			return
-		}
-		left, err := parseDecimal(c.leftInput)
-		if err != nil {
-			c.err = err.Error()
-			return
-		}
-		c.left = left
-		return
-	}
-	if c.rightInput == "" || c.rightInput == "0" {
-		c.rightInput = digit
-	} else if len(c.rightInput) < maxDigits {
-		c.rightInput += digit
-	} else {
-		c.err = "overflow"
-		return
-	}
-}
-
-func (c *Calc) pressOp(op string) {
-	c.err = ""
-	if c.leftIsInput {
-		c.leftIsInput = false
-	}
-	if c.op == "" {
-		c.op = op
-		c.rightInput = ""
-		return
-	}
-	if c.rightInput != "" {
-		right, err := parseDecimal(c.rightInput)
-		if err != nil {
-			c.err = err.Error()
-			c.rightInput = ""
-			c.op = ""
-			return
-		}
-		res, err := compute(c.left, right, c.op)
-		if err != nil {
-			c.err = err.Error()
-			c.rightInput = ""
-			c.op = ""
-			return
-		}
-		c.left = res
-		c.leftIsInput = false
-		c.rightInput = ""
-	}
-	c.op = op
-}
-
-func (c *Calc) pressEq() {
-	c.err = ""
-	if c.op == "" || c.rightInput == "" {
-		return
-	}
-	if c.leftIsInput {
-		c.leftIsInput = false
-	}
-	right, err := parseDecimal(c.rightInput)
-	if err != nil {
-		c.err = err.Error()
-		c.rightInput = ""
-		c.op = ""
-		return
-	}
-	res, err := compute(c.left, right, c.op)
-	if err != nil {
-		c.err = err.Error()
-		c.rightInput = ""
-		c.op = ""
-		return
-	}
-	c.left = res
-	c.leftIsInput = false
-	c.rightInput = ""
-	c.op = ""
-}
-
-func (c *Calc) reset() {
-	c.left = big.NewRat(0, 1)
-	c.leftInput = "0"
-	c.leftIsInput = true
-	c.rightInput = ""
-	c.op = ""
-	c.err = ""
 }
 
 // calc is the headless route that evaluates a full expression string.

@@ -1183,3 +1183,71 @@ content or byte-identical export.
   paginated yet).
 - A vault whose index exceeds ~2.9 MiB (roughly tens of thousands of links)
   runs without a persisted index and reparses every note on open.
+
+## 13. Dogcalc: the calculator, but every button is a dog
+
+`apps/dogcalc` (display name **Dogcalc**, ID `com.gostalgia.dogcalc`) is the
+pack's calculator rendered as a real pad: digit keys are named breeds and the
+operator keys are dog verbs, laid out through the contract-v2 `grid` element.
+It shares the v1 Calculator's arithmetic core — the same `Evaluate` route math
+and the same exported `Pad` key-press state machine — so chained left-to-right
+operations, decimals, overflow, and divide-by-zero behave identically.
+
+```json
+{
+  "id": "com.gostalgia.dogcalc",
+  "name": "Dogcalc",
+  "version": "0.1.0",
+  "entrypoint": "dogcalc",
+  "permissions": ["ipc"],
+  "description": "The calculator, but every button is a dog: breed digits and BOOP/WAG/FETCH keys on a real grid pad."
+}
+```
+
+### The pad
+
+A version-2 snapshot carries a 4-column `Grid` ("Paw pad") of 18 cells with a
+short final row, every cell declaring the shared `press` action and routing by
+`cell_id`:
+
+| `WAG C` (clear) | `ROLL ±` (neg) | `SHARE /` (div) | `LITTER x` (mul) |
+|---|---|---|---|
+| `7 Poodle` | `8 Boxer` | `9 Shiba` | `BURY -` (sub) |
+| `4 Husky` | `5 Dachshund` | `6 Labrador` | `FETCH +` (add) |
+| `1 Corgi` | `2 Beagle` | `3 Pug` | `BOOP =` (eq) |
+| `0 Basset` | `PAW .` (dot) | | |
+
+Labels keep the arithmetic symbol visible next to the dog so the math still
+reads plainly. The `PAW .` cell disables itself while the operand being edited
+already has a decimal point, and `ROLL ±` flips the sign of the entry or of a
+computed result. The version-2 grid frees the pad from the 16-action bound, so
+the `.` and `±` keys that the v1 Calculator could not afford ship here.
+
+A version-1 snapshot gets the fallback instead: the original sixteen keys
+(`digit_0`–`digit_9`, `add`, `sub`, `mul`, `div`, `eq`, `clear`) as labeled
+actions with the same dog names — no `dot`, no `neg`, no grid. Cell presses
+arrive on the ordinary `action` route as `{"action":"press","cell_id":...}`;
+v1 presses arrive as `{"action":"<key>"}` with no `cell_id`, and both dispatch
+onto the same key map.
+
+### Routes and grants
+
+`app/com.gostalgia.dogcalc/calc` accepts `{"expr":"1+2+3"}` and returns
+`{"result":"6"}`, the same headless contract as `app/com.gostalgia.calculator/calc`
+running through `calculator.Evaluate`.
+
+The grant is `ipc` alone. The `BOOP =` key is wired for an optional bark:
+after an equals press the app checks its own grant via `session/whoami` (once
+per launch) for a `sound` capability, and only then calls `sound/play` with
+`{"sound":"bark"}`. The audio adapter and capability are still pending
+(issue #105), and the SDK does not yet define the grant, so the bark is
+dormant by construction: no grant, no route, or a failed call all ship
+silently rather than surfacing as calculator errors.
+
+### Calculator retirement
+
+`com.gostalgia.calculator` is **retired**: its shelf description says so, and
+the pack's arithmetic story continues through Dogcalc. The app stays compiled
+and registered — Dogcalc imports its `Evaluate` core and `Pad` state machine —
+so existing headless `calc` calls and v1 views keep working, but it is no
+longer the face of arithmetic on the shelf.
