@@ -1,0 +1,9 @@
+{
+  "id": "com.gostalgia.markview",
+  "name": "Markview",
+  "version": "0.1.0",
+  "entrypoint": "markview",
+  "permissions": ["ipc"],
+  "document_types": [".md", ".markdown"],
+  "description": "Read-only Markdown viewer: renders handed-off documents as structured presentation data."
+}
