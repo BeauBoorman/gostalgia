@@ -1532,7 +1532,7 @@ and the healed copy is written back. Programmatic routes under
 (optional `id`), `list` (optional `feed`, `unread_only`), `mark_read`,
 `mark_unread`.
 
-## 20. Sysmon: process monitor (`com.gostalgia.sysmon`)
+## 18. Sysmon: process monitor (`com.gostalgia.sysmon`)
 
 `apps/sysmon` (display name **Sysmon**) is the shelf-launchable sibling of
 the shell's Task Manager: uptime, a live process table with
@@ -1598,7 +1598,7 @@ the same assembly the view renders (`uptime_seconds`, `user`, `version`,
 `sort`, `selected_pid`, `self_pid`, `processes`, `history`, and an
 `errors` map naming each failed call), so scripts get one call instead of
 three.
-## 22. Musictoy: a step sequencer (`com.gostalgia.musictoy`)
+## 19. Musictoy: a step sequencer (`com.gostalgia.musictoy`)
 
 `apps/musictoy` (display name **Musictoy**) is the pack's chiptune music toy
 and the flagship consumer of the `sound` capability: a 16-step, 4-row step
@@ -1680,7 +1680,7 @@ settings, library, and the probed sound story), `toggle` (`{row, step}`),
 `{played:false, reason}` — the silent path is a state, not an error),
 `save` (`{name}`), `load` (`{id}`), `delete` (`{id}`), and `list`.
 
-## 21. Adventure: a text adventure (`com.gostalgia.adventure`)
+## 20. Adventure: a text adventure (`com.gostalgia.adventure`)
 
 `apps/adventure` (display name **Adventure**) is a hand-authored interactive
 fiction, "The Brass Elephant": six rooms around a manor foyer, a verb+noun
