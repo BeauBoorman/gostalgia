@@ -145,8 +145,12 @@ same kit, never app-supplied widgets:
   `cell_id` request. Disabled cells dim like disabled actions and never
   activate. Theme focus markers (`›`, `»`, `>`) highlight the selected cell.
 
-All three degrade to ASCII in monochrome and clip without overflow at every
-viewport; golden snapshots pin them per theme.
+The shell chrome for all three — panel borders, focus markers, and the gauge
+vocabulary — degrades to ASCII in monochrome and clips without overflow at
+every viewport. App-supplied block text is sanitized but rendered verbatim, so
+monochrome only guarantees the shell's own chrome is ASCII, not app content;
+apps targeting monochrome terminals should keep their block text to ASCII.
+Golden snapshots pin the elements per theme.
 
 ## Navigation, home screen, and command palette
 

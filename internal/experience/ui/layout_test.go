@@ -73,7 +73,7 @@ func TestFitAndWrap(t *testing.T) {
 
 func TestSanitizeExternalText(t *testing.T) {
 	text := "\x1b[31mred\x1b[0m\x1b]52;c;clipboard\a\x1bPpayload\x1b\\\r\nnext\t\x00\x7f"
-	if got := Sanitize(text); got != "red\nnext " {
+	if got := Sanitize(text); got != "red\nnext    " {
 		t.Fatalf("Sanitize = %q", got)
 	}
 	if got := Sanitize("e\u0301 👩‍💻 界"); got != "e\u0301 👩‍💻 界" {
@@ -171,9 +171,9 @@ func TestEscapeSequenceFiltering(t *testing.T) {
 			want:  "PrefixClean",
 		},
 		{
-			name:  "Preserves newlines, spaces, tabs to spaces, combining runes",
+			name:  "Preserves newlines, expands tabs to tab stops, combining runes",
 			input: "Line 1\tTabbed\r\nLine 2 with e\u0301 and 界 and 👩‍💻",
-			want:  "Line 1 Tabbed\nLine 2 with e\u0301 and 界 and 👩‍💻",
+			want:  "Line 1  Tabbed\nLine 2 with e\u0301 and 界 and 👩‍💻",
 		},
 	}
 

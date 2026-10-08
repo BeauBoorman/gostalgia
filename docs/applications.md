@@ -444,8 +444,8 @@ version. Requests may name any version in `[sdk.MinPresentationVersion,
 sdk.PresentationVersion]` (currently 1–2); the response is stamped with the
 requested version and must validate under it, so version-2 elements served to
 a version-1 request are an error rather than silently dropped content. The
-shell asks for the newest version it supports and falls back on an
-unsupported-version reply, so version-1 apps keep rendering. Inside both
+shell asks for the newest version it supports and steps down one version at a
+time on an unsupported-version reply, so version-1 apps keep rendering. Inside both
 callbacks, `sdk.PresentationRequestVersion(ctx)` reports the negotiated
 version (0 outside a presentation callback) so one snapshot can adapt its
 content to older and newer clients. Missing/unsupported versions, unknown
@@ -474,24 +474,31 @@ vocabulary is:
 - `sdk.Block` (version 2): a preformatted multi-line text region for ASCII art
   or pre-wrapped content. `id`, optional `label` caption, and `text`. Lines are
   rendered verbatim in order: the shell clips each line at the viewport edge
-  and never wraps, so apps can draw fixed-width figures.
+  and never wraps, so apps can draw fixed-width figures. Tabs expand to the
+  next 8-cell tab stop during sanitization; use spaces for pixel-exact
+  alignment. One trailing newline terminates the last line rather than
+  counting as an extra line.
 - `sdk.Meter` (version 2): `id`, `label`, and a finite `value` fraction. The
   shell clamps `value` to [0,1] and draws it in the theme's progress vocabulary
   (ASCII `#`/`-` in monochrome).
 - `sdk.Grid` (version 2): `label`, `columns` (1–16), and `cells` filled
   row-major with a possibly short final row; rows are implicit
-  (`ceil(len(cells)/columns)`).
+  (`ceil(len(cells)/columns)`). A grid carries 1–64 cells; an empty grid is a
+  contract error, not a hidden element — omit `grid` to hide the pad.
 - `sdk.Cell` (version 2): `id`, `label`, optional `action`, and `disabled`.
   `action` names the request sent when the cell is activated and does not have
-  to appear in `actions` — a cell-declared action is enabled only together
-  with that cell's `cell_id`. An empty `action` makes the cell a plain
-  selection datum whose ID still rides along on action requests. A disabled
-  cell is drawn dimmed and never activates, like a disabled `sdk.Action`.
+  to appear in `actions`. Both share one enabled/disabled namespace: a
+  cell-declared action is enabled only together with that cell's `cell_id`,
+  and a same-named entry in `actions` with `disabled` set disables the cell's
+  declaration too. An empty `action` makes the cell a plain selection datum
+  whose ID still rides along on action requests while the cell is enabled. A
+  disabled cell is drawn dimmed and never activates, like a disabled
+  `sdk.Action`.
 
 IDs are unique within each collection and match `[a-z][a-z0-9_-]*`, up to 64
 bytes. Collections are bounded to 100 items, 16 fields, 16 actions, 4 blocks,
-and 8 meters; each block holds at most 32 lines and 16384 bytes, and a grid at
-most 64 cells. Titles/labels are bounded to 256 bytes; field values, item
+and 8 meters; each block holds at most 32 lines and 16384 bytes, and a grid
+1–64 cells. Titles/labels are bounded to 256 bytes; field values, item
 details, status, and error to 4096 bytes each. New collections carry their own
 deliberate budgets instead of reusing item byte limits. `View.Validate()`
 checks the contract, including rejecting blocks, meters, and grid on a
@@ -505,8 +512,9 @@ unrecognized item/field/cell IDs, disabled cells, and oversized inputs, and
 checks required fields. `values` is a `map[string]string` keyed by field ID;
 `item_id` and `cell_id` are optional selections. `cell_id` must name an
 enabled cell in the current grid, and a cell-declared action is rejected
-without its own `cell_id`. App callbacks still validate domain rules and
-authorization, and must synchronize shared state.
+without its own `cell_id` and while a same-named top-level action is disabled.
+App callbacks still validate domain rules and authorization, and must
+synchronize shared state.
 
 This deliberately supports a concrete list/text-form/action screen plus
 bounded art, gauge, and pad regions, not a speculative layout or widget
@@ -528,7 +536,8 @@ the last stop when a version-2 snapshot carries one. Enter invokes the focused
 action (the first action when a field is focused) or the focused cell's
 declared action; Up/Down select an item, and all four arrows move the cell
 selection while the grid is focused. A list action's request carries the
-current `item_id` and `cell_id` selections. F2 always returns to the shelf,
+current `item_id` and `cell_id` selections (`cell_id` is omitted while a
+disabled cell is selected). F2 always returns to the shelf,
 Ctrl-C/Ctrl-D always exit, and apps cannot intercept these global hotkeys.
 
 The same operations run without any UI:

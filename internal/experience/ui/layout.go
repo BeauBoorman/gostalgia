@@ -39,21 +39,30 @@ func GraphemeWidth(s string) int {
 }
 
 // Sanitize removes terminal sequences and controls from external text. Newlines
-// are preserved and tabs become spaces. Rendered component output is trusted
+// are preserved and tabs expand to the next 8-cell tab stop so preformatted,
+// tab-indented text keeps its alignment. Rendered component output is trusted
 // ANSI; don't sanitize it a second time when composing panels.
 func Sanitize(s string) string {
-	return strings.Map(func(r rune) rune {
+	s = ansi.Strip(strings.ToValidUTF8(s, "�"))
+	var b strings.Builder
+	b.Grow(len(s))
+	col := 0
+	for _, r := range s {
 		switch {
 		case r == '\n':
-			return r
+			b.WriteRune(r)
+			col = 0
 		case r == '\t':
-			return ' '
+			n := 8 - col%8
+			b.WriteString(strings.Repeat(" ", n))
+			col += n
 		case unicode.IsControl(r):
-			return -1
 		default:
-			return r
+			b.WriteRune(r)
+			col += ansi.StringWidth(string(r))
 		}
-	}, ansi.Strip(strings.ToValidUTF8(s, "�")))
+	}
+	return b.String()
 }
 
 func label(s string) string {

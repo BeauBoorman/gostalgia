@@ -93,6 +93,7 @@ func TestPresentationValidation(t *testing.T) {
 		func(v *View) { v.Meters = []Meter{{ID: "fuel", Label: "Fuel", Value: math.Inf(1)}} },
 		func(v *View) { v.Grid = &Grid{Columns: 0} },
 		func(v *View) { v.Grid = &Grid{Columns: 17} },
+		func(v *View) { v.Grid = &Grid{Label: "Pad", Columns: 1} },
 		func(v *View) {
 			v.Grid = &Grid{Columns: 1, Cells: []Cell{{ID: "a", Label: "A"}, {ID: "a", Label: "B"}}}
 		},
@@ -113,6 +114,13 @@ func TestPresentationValidation(t *testing.T) {
 		if err := v.Validate(); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// One trailing newline terminates the last line rather than counting as
+	// another: exactly maxBlockLines lines ending in a newline still pass.
+	v := good
+	v.Blocks = []Block{{ID: "art", Text: strings.Repeat("x\n", maxBlockLines)}}
+	if err := v.Validate(); err != nil {
+		t.Fatalf("trailing newline counted as an extra line: %v", err)
 	}
 }
 
@@ -261,6 +269,7 @@ func gridView() View {
 			{ID: "ne", Label: "NE", Action: "move"},
 			{ID: "sw", Label: "SW"},
 			{ID: "se", Label: "SE", Disabled: true},
+			{ID: "ko", Label: "KO", Action: "off"},
 		}},
 	}
 }
@@ -304,7 +313,7 @@ func TestPresentationV2ElementsAndCellActions(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := out.(View)
-	if v.Version != 2 || len(v.Blocks) != 1 || len(v.Meters) != 1 || v.Grid == nil || len(v.Grid.Cells) != 4 {
+	if v.Version != 2 || len(v.Blocks) != 1 || len(v.Meters) != 1 || v.Grid == nil || len(v.Grid.Cells) != 5 {
 		t.Fatalf("version 2 snapshot dropped elements: %+v", v)
 	}
 	instance := v.Instance
@@ -323,6 +332,11 @@ func TestPresentationV2ElementsAndCellActions(t *testing.T) {
 		{"cell action with wrong cell", func(p *ActionRequest) { p.Action, p.CellID = "move", "sw" }, false},
 		{"disabled cell", func(p *ActionRequest) { p.Action, p.CellID = "move", "se" }, false},
 		{"unknown cell", func(p *ActionRequest) { p.CellID = "cell-404" }, false},
+		{"empty action via datum cell", func(p *ActionRequest) { p.CellID = "sw" }, false},
+		{"empty action via action cell", func(p *ActionRequest) { p.CellID = "nw" }, false},
+		{"cell action vetoed by disabled top-level", func(p *ActionRequest) {
+			p.Action, p.CellID = "off", "ko"
+		}, false},
 		{"list action with datum cell", func(p *ActionRequest) { p.Action, p.CellID = "submit", "sw" }, true},
 		{"list action with item and cell", func(p *ActionRequest) {
 			p.Action, p.ItemID, p.CellID = "submit", "one", "nw"

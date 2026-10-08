@@ -95,24 +95,50 @@ func TestPresentationV2Snapshots(t *testing.T) {
 		name          string
 		theme         theme.Theme
 		width, height int
+		mutate        func(*sdk.View)
+		setup         func(*appView)
+		want          string
 	}{
-		{"app-v2", theme.Nostalgia(), 80, 24},
-		{"app-v2-monochrome", theme.Monochrome(), 80, 24},
-		{"app-v2-highcontrast", theme.HighContrast(), 80, 24},
-		{"app-v2-small", theme.Nostalgia(), 30, 10},
+		{"app-v2", theme.Nostalgia(), 80, 24, nil, nil, ""},
+		{"app-v2-monochrome", theme.Monochrome(), 80, 24, nil, nil, ""},
+		{"app-v2-highcontrast", theme.HighContrast(), 80, 24, nil, nil, ""},
+		{"app-v2-small", theme.Nostalgia(), 30, 10, nil, nil, ""},
+		// An unfocused grid keeps a theme marker on the selected cell.
+		{"app-v2-mono-unfocused", theme.Monochrome(), 80, 24, nil,
+			func(v *appView) { v.focus = 1 }, "> [NE]"},
+		// A focused cursor on a disabled cell stays visible: marker + dimmed.
+		{"app-v2-mono-disabled-cell", theme.Monochrome(), 80, 24, nil,
+			func(v *appView) { v.cell = 3 }, "> [SE] (disabled)"},
+		// Art wider than the viewport clips honestly with an ellipsis.
+		{"app-v2-clip", theme.Monochrome(), 40, 24, func(v *sdk.View) {
+			v.Blocks[0].Text = strings.Repeat("=", 60) + "\n" + v.Blocks[0].Text
+		}, nil, "=====…"},
+		// A focused grid keeps its selection marker on a small screen.
+		{"app-v2-grid-small", theme.Nostalgia(), 40, 18, nil, nil, "› [NE]"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := NewWithTheme(context.Background(), noopCaller{}, nil, tc.theme, ui.Plain)
 			m.Update(tea.WindowSizeMsg{Width: tc.width, Height: tc.height})
-			m.presentation = &appView{
-				data: padData(), instance: "launch", version: 2,
+			data := padData()
+			if tc.mutate != nil {
+				tc.mutate(&data)
+			}
+			v := &appView{
+				data: data, instance: "launch", version: 2,
 				values: map[string]string{"text": "draft"}, focus: 2, cell: 1,
 			}
+			if tc.setup != nil {
+				tc.setup(v)
+			}
+			m.presentation = v
 			rendered := strings.Split(m.View(), "\n")
 			for i := range rendered {
 				rendered[i] = strings.TrimRight(rendered[i], " ")
 			}
 			got := strings.Join(rendered, "\n") + "\n"
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Fatalf("%s lacks %q:\n%s", tc.name, tc.want, got)
+			}
 			path := filepath.Join("testdata", tc.name+".golden")
 			if *updateVisual {
 				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

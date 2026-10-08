@@ -3,6 +3,7 @@ package shell
 import (
 	"context"
 	"crypto/rand"
+	"fmt"
 	"strings"
 	"time"
 
@@ -46,26 +47,37 @@ type viewCheckMsg struct {
 	epoch, seq uint64
 	apps       []appStatus
 	data       *sdk.View
+	version    int
 	err        error
 	viewErr    error
 }
 type viewCancelMsg struct{ err error }
 
 // fetchView requests a snapshot at the newest version the shell supports and
-// falls back to the oldest on an unsupported-version reply, so apps speaking
-// only the v1 contract keep rendering. The stamped snapshot version is the
-// negotiated version callers reuse on action and cancel requests.
+// steps down one version at a time while the app reports an unsupported
+// version, so an app speaking only an older contract keeps rendering and a
+// future newer shell does not strand mid-version apps at the oldest contract.
+// The fallback matches error text because the protocol has no structured
+// unsupported-version error; keep the message check this narrow. The stamped
+// snapshot version is the negotiated version callers reuse on action and
+// cancel requests. A reply stamped newer than requested is rejected: an app
+// speaking raw IPC must not serve elements the shell never asked for.
 func fetchView(ctx context.Context, client Caller, id string, version int) (sdk.View, int, error) {
 	var data sdk.View
-	err := client.Call(ctx, "app/"+id+"/view", sdk.ViewRequest{Version: version}, &data)
-	if err != nil && version > sdk.MinPresentationVersion && strings.Contains(err.Error(), "unsupported version") {
-		version = sdk.MinPresentationVersion
-		err = client.Call(ctx, "app/"+id+"/view", sdk.ViewRequest{Version: version}, &data)
+	for {
+		err := client.Call(ctx, "app/"+id+"/view", sdk.ViewRequest{Version: version}, &data)
+		if err != nil {
+			if version > sdk.MinPresentationVersion && strings.Contains(err.Error(), "unsupported version") {
+				version--
+				continue
+			}
+			return data, data.Version, err
+		}
+		if data.Version > version {
+			return data, data.Version, fmt.Errorf("presentation: view stamped version %d exceeds requested %d", data.Version, version)
+		}
+		return data, data.Version, data.Validate()
 	}
-	if err == nil {
-		err = data.Validate()
-	}
-	return data, data.Version, err
 }
 
 func (m *Model) openView(a appStatus) tea.Cmd {
@@ -120,6 +132,7 @@ func (m *Model) cancelViewAction(v *appView) tea.Cmd {
 func (m *Model) checkView() tea.Cmd {
 	v := m.presentation
 	epoch, seq, id, pid, busy, version := v.epoch, v.seq, v.id, v.pid, v.busy, v.version
+	negotiated := v.instance != ""
 	ctx, client := m.ctx, m.client
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -129,12 +142,26 @@ func (m *Model) checkView() tea.Cmd {
 		if msg.err == nil && !busy {
 			for _, a := range msg.apps {
 				if a.Manifest.ID == id && a.Running && a.PID == pid {
-					var data sdk.View
-					msg.viewErr = client.Call(ctx, "app/"+id+"/view", sdk.ViewRequest{Version: version}, &data)
-					if msg.viewErr == nil {
-						msg.viewErr = data.Validate()
+					if !negotiated {
+						// The open fetch failed before negotiation finished, so
+						// renegotiate instead of polling at a version the app
+						// may not speak.
+						var data sdk.View
+						data, msg.version, msg.viewErr = fetchView(ctx, client, id, sdk.PresentationVersion)
 						if msg.viewErr == nil {
 							msg.data = &data
+						}
+					} else {
+						var data sdk.View
+						msg.viewErr = client.Call(ctx, "app/"+id+"/view", sdk.ViewRequest{Version: version}, &data)
+						if msg.viewErr == nil {
+							msg.viewErr = data.Validate()
+						}
+						if msg.viewErr == nil && data.Version > version {
+							msg.viewErr = fmt.Errorf("presentation: view stamped version %d exceeds requested %d", data.Version, version)
+						}
+						if msg.viewErr == nil {
+							msg.data, msg.version = &data, data.Version
 						}
 					}
 					break
@@ -258,9 +285,14 @@ func (m *Model) updatePresentation(msg tea.Msg) tea.Cmd {
 		if msg.seq == v.seq && msg.viewErr != nil {
 			v.banner = safe(msg.viewErr.Error())
 		}
-		if msg.seq == v.seq && msg.data != nil && !m.applyView(*msg.data) {
-			m.append(entry{"App instance changed; view closed.", "error"})
-			return m.dismissView()
+		if msg.seq == v.seq && msg.data != nil {
+			if msg.version != 0 {
+				v.version = msg.version
+			}
+			if !m.applyView(*msg.data) {
+				m.append(entry{"App instance changed; view closed.", "error"})
+				return m.dismissView()
+			}
 		}
 		return viewTick(v.epoch)
 	case viewCancelMsg:
@@ -282,6 +314,18 @@ func (v *appView) grid() *sdk.Grid {
 
 func (v *appView) gridFocused() bool {
 	return v.grid() != nil && v.focus == len(v.data.Fields)+len(v.data.Actions)
+}
+
+// topActionDisabled reports whether a same-named top-level action is
+// disabled; cell and list actions share one namespace, so the flag vetoes a
+// cell's declaration too (the SDK enforces the same rule).
+func (v *appView) topActionDisabled(id string) bool {
+	for _, a := range v.data.Actions {
+		if a.ID == id {
+			return a.Disabled
+		}
+	}
+	return false
 }
 
 // moveCell walks the selection clamped to row/column edges; a short final row
@@ -320,6 +364,9 @@ func (m *Model) viewRun(p sdk.ActionRequest) tea.Cmd {
 		err := client.Call(ctx, "app/"+id+"/action", p, &data)
 		if err == nil {
 			err = data.Validate()
+			if err == nil && data.Version > p.Version {
+				err = fmt.Errorf("presentation: view stamped version %d exceeds requested %d", data.Version, p.Version)
+			}
 		} else {
 			// A timeout/disconnect of the local wait is not server-side
 			// cancellation. Best-effort cancel using a fresh deadline.
@@ -391,7 +438,7 @@ func (m *Model) viewKey(key tea.KeyMsg) tea.Cmd {
 		}
 		if v.gridFocused() {
 			c := v.grid().Cells[v.cell]
-			if c.Disabled || c.Action == "" {
+			if c.Disabled || c.Action == "" || v.topActionDisabled(c.Action) {
 				return nil
 			}
 			return m.viewRun(sdk.ActionRequest{Action: c.Action, CellID: c.ID})
@@ -407,7 +454,9 @@ func (m *Model) viewKey(key tea.KeyMsg) tea.Cmd {
 		if len(v.data.Items) > 0 {
 			p.ItemID = v.data.Items[v.item].ID
 		}
-		if g := v.grid(); g != nil {
+		// A disabled cell's id is meaningless input the SDK rejects; omit it
+		// so list actions keep working while one is selected.
+		if g := v.grid(); g != nil && !g.Cells[v.cell].Disabled {
 			p.CellID = g.Cells[v.cell].ID
 		}
 		return m.viewRun(p)
@@ -524,11 +573,21 @@ func (m *Model) viewLines(height int) []string {
 				text := "[" + viewText(c.Label) + "]"
 				switch {
 				case c.Disabled:
-					text = m.kit.StatusText(text+" (disabled)", theme.Disabled)
+					text += " (disabled)"
+					if i == v.cell {
+						// Keep the cursor visible on a disabled cell: theme
+						// marker plus the dimmed label.
+						text = m.kit.StatusText(m.kit.Theme().Focus.Marker+" "+text, theme.Disabled)
+					} else {
+						text = m.kit.StatusText(text, theme.Disabled)
+					}
 				case focused && i == v.cell:
 					text = m.kit.FocusText(text)
 				case i == v.cell:
-					text = m.kit.Selection(text)
+					// Selection has no fill in plain/monochrome; the theme
+					// marker keeps the selected cell visible, matching item
+					// selection.
+					text = m.kit.Text(m.kit.Theme().Focus.Marker + " " + text)
 				default:
 					text = m.kit.Text(text)
 				}

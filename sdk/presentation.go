@@ -65,7 +65,7 @@ type Field struct {
 type Action struct {
 	ID       string `json:"id"`
 	Label    string `json:"label"`
-	Disabled bool   `json:"disabled"`
+	Disabled bool   `json:"disabled,omitempty"`
 }
 
 // Block is a preformatted multi-line text region, such as ASCII art. Lines are
@@ -87,10 +87,12 @@ type Meter struct {
 }
 
 // Cell is one selectable element of a Grid. Action names the request sent
-// when the cell is activated; it does not have to appear in Actions. An empty
-// Action makes the cell a plain selection datum whose id rides along as
-// cell_id on action requests. Disabled cells are drawn dimmed and activating
-// one is a no-op, like a disabled Action. Version 2 and later.
+// when the cell is activated; it does not have to appear in Actions. Both
+// share one enabled/disabled namespace, so a same-named entry in Actions
+// with Disabled set also disables the cell's declaration. An empty Action
+// makes the cell a plain selection datum whose id rides along as cell_id on
+// action requests. Disabled cells are drawn dimmed and activating one is a
+// no-op, like a disabled Action. Version 2 and later.
 type Cell struct {
 	ID       string `json:"id"`
 	Label    string `json:"label"`
@@ -134,7 +136,8 @@ type ViewRequest struct {
 // operation for cancellation; it is not a durable idempotency key. ItemID is
 // the selected item and CellID the selected grid cell, when those collections
 // exist; an action declared on a cell is only enabled together with that
-// cell's cell_id.
+// cell's cell_id, and a same-named top-level action's Disabled flag disables
+// the cell's declaration too.
 type ActionRequest struct {
 	Version   int               `json:"version"`
 	Instance  string            `json:"instance"`
@@ -231,8 +234,11 @@ func (v View) Validate() error {
 		}
 		seen[block.ID] = true
 		// Art gets its own cell budget, not item bytes: bounded lines and total
-		// size. Lines are never wrapped; the renderer clips them honestly.
-		if len(block.Text) > maxBlockBytes || strings.Count(block.Text, "\n")+1 > maxBlockLines {
+		// size. Lines are never wrapped; the renderer clips them honestly. One
+		// trailing newline merely terminates the last line and is not counted
+		// as an extra line.
+		text := strings.TrimSuffix(block.Text, "\n")
+		if len(block.Text) > maxBlockBytes || strings.Count(text, "\n")+1 > maxBlockLines {
 			return fmt.Errorf("presentation: block %q exceeds line or size budget", block.ID)
 		}
 	}
@@ -246,7 +252,10 @@ func (v View) Validate() error {
 		}
 	}
 	if g := v.Grid; g != nil {
-		if g.Columns < 1 || g.Columns > maxGridColumns || len(g.Cells) > maxGridCells || len(g.Label) > 256 {
+		// An empty grid is a contract error, not a hidden element: omit Grid
+		// entirely when a snapshot has no pad to show.
+		if g.Columns < 1 || g.Columns > maxGridColumns || len(g.Cells) < 1 ||
+			len(g.Cells) > maxGridCells || len(g.Label) > 256 {
 			return fmt.Errorf("presentation: invalid grid dimensions or label")
 		}
 		seen = make(map[string]bool)
@@ -382,10 +391,15 @@ func (c *Context) Present(snapshot func(context.Context) (View, error), action f
 }
 
 func validateAction(v View, p ActionRequest) error {
+	// Cell-declared and top-level actions share one namespace: an action id
+	// Disabled in Actions is disabled everywhere, including on a cell that
+	// declares it.
 	enabled := false
+	topDisabled := false
 	for _, a := range v.Actions {
-		if a.ID == p.Action && !a.Disabled {
-			enabled = true
+		if a.ID == p.Action {
+			enabled = !a.Disabled
+			topDisabled = a.Disabled
 		}
 	}
 	if p.CellID != "" {
@@ -400,8 +414,9 @@ func validateAction(v View, p ActionRequest) error {
 		if cell == nil || cell.Disabled {
 			return fmt.Errorf("presentation: unknown or disabled cell %q", p.CellID)
 		}
-		// A cell-declared action is enabled only alongside its own cell_id.
-		if cell.Action == p.Action {
+		// A cell-declared action is enabled only alongside its own enabled
+		// cell, and only while a same-named top-level action is not disabled.
+		if cell.Action != "" && cell.Action == p.Action && !topDisabled {
 			enabled = true
 		}
 	}
