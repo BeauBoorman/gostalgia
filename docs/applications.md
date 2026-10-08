@@ -1184,7 +1184,66 @@ content or byte-identical export.
 - A vault whose index exceeds ~2.9 MiB (roughly tens of thousands of links)
   runs without a persisted index and reparses every note on open.
 
-## 13. Dogcalc: the calculator, but every button is a dog
+## 13. Petwatch: Tamagotchi task manager (`com.gostalgia.petwatch`)
+
+`apps/petwatch` (display name **Petwatch**) is a desktop pet that lives on a
+task list: completing tasks is the only food, and neglect starves it. It is
+the showcase consumer of the version-2 presentation contract: the pet is a
+multi-line ASCII `sdk.Block`, its hunger/happiness/energy stats are
+`sdk.Meter` gauges, and version-1 requests get an honest one-line face plus
+stats in the item detail instead.
+
+```json
+{
+  "id": "com.gostalgia.petwatch",
+  "permissions": ["ipc", "fs.read", "fs.write", "notify"]
+}
+```
+
+`ipc` covers routes and presentation; `fs.read`/`fs.write` cover the
+app-private state file; `notify` lets a starving pet post `notify/post`
+alerts. If `notify` is absent or revoked, posting fails, the app logs once,
+and keeps working — the pet still goes hungry, it just cannot say so.
+
+### The pet
+
+A `Pet` has three 0–100 stats — hunger (fullness), happiness, energy — that
+decay by **elapsed wall-clock time**, applied from the persisted
+`updated_at` anchor on load plus a 30-second live tick while running.
+Awake: hunger −5/h, happiness −4/h, energy −2.5/h. Asleep: needs decay at
+half rate, energy regenerates +25/h. Energy at or below 10 collapses the
+pet into sleep; it wakes itself at 90 and cannot be woken before then.
+Lifecycle is age-derived: egg under 1 h (its art cracks in the last third),
+chick to 24 h, adult after. A hatched pet is sick while hunger or
+happiness sits at or below 15, and recovers only when both pass 30. All
+stats clamp to [0,100]; backward clock movement re-anchors `updated_at`
+without rewinding stats.
+
+Tasks are the food. `add_task` (field `new_task`) appends a pending item
+and completes with `complete` on the selected item: +30 hunger, +15
+happiness, +5 energy, a brief eating frame (90 s), and a persisted feed
+count. `play` (hatched, awake, costs 8 energy) and `toggle_sleep` (labeled
+Nap/Wake, refused while collapsed) round out the actions. Domain
+rejections land in the status line, not IPC errors.
+
+### Alerts
+
+`checkAlertsLocked` is level-triggered with an 8 h cooldown per kind,
+persisted in `alerts` so cooldowns survive restarts: `hatched` (info,
+once ever), `hunger` (warning at ≤25, cleared on recovery past 40),
+`sick` (error while sick), `collapsed` (warning while asleep at ≤10
+energy, cleared on waking).
+
+### Persistence and routes
+
+One document, `/apps/data/com.gostalgia.petwatch/state.json`, written with
+atomic `fs/save` after every mutation, on each tick, and on Stop. A missing
+file starts a fresh egg; a corrupt one starts fresh with an honest note.
+Version-1 presentation responses carry no blocks/meters/grid. Programmatic
+routes under `app/com.gostalgia.petwatch/`: `state`, `add`, `complete`,
+`play`, `sleep`.
+
+## 14. Dogcalc: the calculator, but every button is a dog
 
 `apps/dogcalc` (display name **Dogcalc**, ID `com.gostalgia.dogcalc`) is the
 pack's calculator rendered as a real pad: digit keys are named breeds and the
