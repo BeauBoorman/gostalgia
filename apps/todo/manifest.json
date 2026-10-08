@@ -1,0 +1,8 @@
+{
+  "id": "com.gostalgia.todo",
+  "name": "Todo",
+  "version": "0.1.0",
+  "entrypoint": "todo",
+  "permissions": ["ipc", "fs.read", "fs.write"],
+  "description": "A persistent task list: add, complete, delete, and clear tasks that survive relaunch and reboot."
+}
