@@ -1451,3 +1451,84 @@ Programmatic routes under `app/com.gostalgia.pomodoro/`: `state`, `start`
 (optional length params), `pause`, `skip`, `reset`, `configure`. Timer-driven
 transitions post an `info` alert ("work session done — short break (5m)
 started") and mirror the same text in the status line.
+## 22. Musictoy: a step sequencer (`com.gostalgia.musictoy`)
+
+`apps/musictoy` (display name **Musictoy**) is the pack's chiptune music toy
+and the flagship consumer of the `sound` capability: a 16-step, 4-row step
+sequencer where each row is a pitched voice. Toggle cells to compose a loop,
+press Play to hear one pass of it, save the pattern to a bounded library.
+
+```json
+{
+  "id": "com.gostalgia.musictoy",
+  "permissions": ["ipc", "fs.read", "fs.write", "sound"]
+}
+```
+
+`ipc` covers routes and presentation; `fs.read`/`fs.write` cover the
+app-private pattern document; `sound` covers `sound/play` (and `ipc` covers
+the `sound/status` probe).
+
+### The step grid and the rows
+
+A version-2 snapshot carries a 16-column `Grid` of exactly 64 cells — the
+pad maximum — where cell `r{row}s{step}` declares the shared `step` action
+and a press toggles the cell (`x` on, `·` off). A version-1 snapshot gets
+the fallback instead: the four rows rendered as items with their encoded
+step strings, plus a `row_edit` field and `apply_row` action that accept
+`<row> <16 x/. glyphs>` (e.g. `lead x.x..x..x....x`) or `<row> clear`. Rows
+are named or 1-indexed: `lead`, `high`, `low`, `bass` — top to bottom,
+highest pitch to lowest.
+
+Each row is a fixed voice: sawtooth lead, two square middle rows, triangle
+bass. Pitches come from a data-driven scale table — `pentatonic` (minor:
+root, ♭3, 5th, octave), `major` (root, 3rd, 5th, octave), and `chromatic`
+(the diminished stack) — each mapping row to semitone offset over a 110Hz
+root. `scale` cycles the table live; the `set` route takes a name. Tempo is
+the `tempo_bpm` field plus the `tempo` action, validated to 60–240 bpm; the
+field is prefilled with the current value.
+
+### Playback and the clip bounds
+
+`sound/play` bounds a clip at 64 notes and 10 seconds, and the route is
+monophonic — there are no chords, only sequences. Musictoy resolves both
+honestly: a step with several rows set **arpeggiates them bottom-up inside
+the step's own timeslice** (the classic chip chord trick), and Play fires
+**one bounded pass** per press. One pass can never exceed the contract:
+64 cells emit at most 64 notes, and at the 60bpm tempo floor a full loop
+lasts 4 seconds, far under the 10s ceiling. There is no Stop action — the
+host player is fire-and-forget and the clip always self-terminates within a
+few seconds — and there is no loop mode, because looping would mean
+re-issuing play calls on a timer the primitive does not provide. The status
+line and the `play` route both report the single pass plainly ("playing one
+pass: N notes over Xs").
+
+Playback availability is probed once per launch exactly like Dogcalc's
+bark: `session/whoami` for the `sound` grant, then `sound/status` for host
+support. Without the grant, on an unsupported host, or when the audio
+service is unreachable, the Play action renders disabled and the status
+line says why — "playback unavailable — \<reason\>; composing and saving
+still work" — while editing, saving, and loading all keep working. A
+saturated adapter (`ErrAudioBusy`) surfaces once as "audio busy" on the
+status line and is never retry-looped; an adapter that vanishes between
+probe and press relatches the probe so later views disable Play honestly.
+
+### Persistence and routes
+
+One versioned document, `/apps/data/com.gostalgia.musictoy/patterns.json`
+(`{version, bpm, scale, rows, patterns, seq}`), written with atomic
+`fs/save` after every mutation and flushed again on Stop if a save is still
+pending. `rows` is the working pattern as four 16-character strings; the
+library holds at most 16 named snapshots of `{id, name, bpm, scale, rows,
+saved_at}` (saving an existing name replaces it in place). A missing file
+is a fresh blank pattern; a corrupt or wrong-version file is an honest
+error banner over usable fresh state, and loading heals before rendering —
+tempo and scale clamped to known values, malformed row strings rebuilt,
+duplicate ids reassigned — with the repaired copy written back. Without the
+fs grants the app keeps working in memory and reports each failed save.
+
+Programmatic routes under `app/com.gostalgia.musictoy/`: `state` (pattern,
+settings, library, and the probed sound story), `toggle` (`{row, step}`),
+`set` (`{bpm?, scale?}`), `play` (returns `{played, notes, duration_ms}` or
+`{played:false, reason}` — the silent path is a state, not an error),
+`save` (`{name}`), `load` (`{id}`), `delete` (`{id}`), and `list`.
