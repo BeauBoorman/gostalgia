@@ -260,6 +260,7 @@ func Boot(ctx context.Context, opts Options) (_ *Runtime, retErr error) {
 		services.NewPackage(),
 		services.NewRecovery(),
 		services.NewNotify(),
+		services.NewSound(),
 	} {
 		if err := sm.Register(s); err != nil {
 			logFile.Close()

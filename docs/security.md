@@ -62,8 +62,12 @@ The runtime distinguishes three classes of actors:
 - **Capability Scoping:**
   - Manifest grants: Applications declare requested capabilities (`ipc`,
     `fs.read`, `fs.write`, `proc.list`, `proc.stop`, `app.list`, `app.launch`,
-    `shutdown`) in their JSON manifest. The runtime verifies that only
-    permitted non-admin capabilities are requested.
+    `shutdown`, `config.read`, `config.write`, `clipboard.read`,
+    `clipboard.write`, `hostfs.read`, `hostfs.write`, `net.egress`,
+    `session.read`, `session.write`, `profile.read`, `profile.write`,
+    `package.read`, `package.write`, `backup.read`, `backup.write`,
+    `notify`, `sound`) in their JSON manifest. The runtime verifies that
+    only permitted non-admin capabilities are requested.
   - Confused-deputy boundary: When an operator or another application invokes an
     application's exported handlers, the runtime executes that handler strictly
     under the application's declared grants. An operator calling an app does not
@@ -273,6 +277,18 @@ strictly disabled/internal-only and require two distinct levels of authorization
      and HTTPS-only transport requirements (`allow_insecure: false`). In addition, for external
      sandboxed apps, host network access at the kernel/sandbox level is denied unless both the app
      manifest grants `net.egress` and the operator policy permits network egress.
+
+Audio output (`sound` capability, `sound/play`) is intentionally not part of
+the opt-in policy set: it carries output-only, bounded, synthesized PCM that
+the runtime renders in-process. Applications pass only a declarative tone
+sequence — a preset name or a capped list of `{frequency_hz, duration_ms,
+wave}` notes (≤64 notes, ≤10 s total, 20–8000 Hz, fixed 22050 Hz 16-bit mono)
+— never file paths, host commands, or unbounded audio. The platform adapter
+hands a finished WAV clip to a discovered host player (`afplay`,
+`pw-play`/`paplay`/`aplay`, or PowerShell `System.Media.SoundPlayer`) spawned
+detached and reaped under a hard timeout, so playback can never block IPC.
+Hosts without a player get an explicit `ErrAudioUnsupported` denial, not a
+silent drop.
 
 ---
 

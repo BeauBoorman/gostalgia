@@ -27,13 +27,17 @@ const padColumns = 4
 // which key was booped.
 const pressAction = "press"
 
-// soundCapability and soundRoute name the optional audio grant and route from
-// the host audio adapter work. The manifest cannot declare a grant the SDK
-// does not yet define, so the bark stays wired but dormant: it plays only if
-// this instance's grant ever reports the capability and the route exists.
+// soundCapability, soundRoute, and soundStatusRoute name the optional
+// audio grant and the routes served by the host audio adapter. The
+// manifest declares the grant, but the grant alone is not proof the host
+// can render audio: the bark also probes sound/status once and latches
+// off when the host reports unsupported, so a headless host never sees
+// the doomed sound/play call. Every failure is swallowed — never a
+// calculator error.
 const (
-	soundCapability = "sound"
-	soundRoute      = "sound/play"
+	soundCapability  = sdk.CapSound
+	soundRoute       = "sound/play"
+	soundStatusRoute = "sound/status"
 )
 
 // Tri-state for the sound probe: unknown until checked once, then latched.
@@ -232,9 +236,10 @@ func (d *Dog) pressLocked(key string) bool {
 }
 
 // bark plays the equals-key bark when this instance's grant reports the sound
-// capability and a host audio adapter answers soundRoute. It probes the grant
-// once per launch and swallows every failure: no grant, no route, or a dead
-// adapter must never turn into a calculator error.
+// capability and the host audio adapter reports itself supported. It probes
+// both once per launch and swallows every failure: no grant, an unsupported
+// or unreachable status, no route, or a dead adapter must never turn into a
+// calculator error.
 func (d *Dog) bark(ctx context.Context) {
 	d.mu.Lock()
 	sound := d.sound
@@ -249,6 +254,17 @@ func (d *Dog) bark(ctx context.Context) {
 				if cap == soundCapability {
 					sound = soundOn
 				}
+			}
+		}
+		if sound == soundOn {
+			// An unreachable status means the sound service is absent, so
+			// play would fail just the same — latch off and never spend
+			// the call.
+			var st struct {
+				Supported bool `json:"supported"`
+			}
+			if err := d.app.Call(ctx, soundStatusRoute, nil, &st); err != nil || !st.Supported {
+				sound = soundOff
 			}
 		}
 		d.mu.Lock()

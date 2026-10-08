@@ -346,14 +346,36 @@ builtin manifests are approved by compilation/registration.
 | `net.egress` | `net/fetch` | `{"url":"...","method?":"GET","headers?":{},"body_base64?":""}` | `{status,headers,data_base64,size}` |
 | `shutdown` | `sys/shutdown` | `{reason?}` | `{stopping:true,reason}`; teardown may close connection |
 | `notify` | `notify/post` | `{"severity":"info|warning|error","title":"...","body":"..."}` | `{posted:true}`; bounded toasts and notification center history |
+| `sound` | `sound/play` | `{"sound":"bark"}` or `{"notes":[{"frequency_hz":440,"duration_ms":150,"wave":"sine"}]}` | `{played:true,player,notes,duration_ms,bytes}`; bounded synthesized tones |
 
 `sys/ping` returns `{pong:true,version}`. `session/whoami` returns
 `{user,user_id,session,capabilities}`. These two service methods have no
-additional method grant, but **SDK calls still require ipc**. Files use
-standard base64 (`encoding/base64`); all filesystem paths are environment
-paths, never host paths. `fs.write` does not create parent directories: call
-`fs/mkdir` first. Read/write permissions apply across the environment VFS;
-per-app roots are future work.
+additional method grant, but **SDK calls still require ipc**. `sound/status`
+needs only `ipc` and reports
+`{supported,player,sample_rate,max_notes,max_duration_ms,presets}` — the
+honest probe for whether this host can render audio before a caller asks
+`sound/play` (which requires `sound`) to play. Files use standard base64
+(`encoding/base64`); all filesystem paths are environment paths, never host
+paths. `fs.write` does not create parent directories: call `fs/mkdir` first.
+Read/write permissions apply across the environment VFS; per-app roots are
+future work.
+
+`sound/play` accepts either a named preset (`sound`: `bark`, `beep`, or
+`chime`) or an explicit `notes` list — the two are mutually exclusive. Each
+note is `{"frequency_hz":20-8000, "duration_ms":10-2000, "wave":"sine|square|triangle|sawtooth"}`;
+`wave` is required on every note — there is no default — and
+`frequency_hz: 0` renders a rest. Sequences are capped at 64 notes and 10 s
+total. The runtime synthesizes a 22050 Hz 16-bit mono WAV in-process and
+hands the finished clip to a discovered host player (`afplay` on macOS,
+`pw-play`/`paplay`/`aplay` on Linux, PowerShell `System.Media.SoundPlayer`
+on Windows); playback is fire-and-forget and never blocks the IPC response.
+Playback is also bounded: at most four detached host players may be in
+flight at once, and when saturated `sound/play` fails with a busy error
+(`platform: audio playback busy`) instead of queueing. Each clip is staged
+as a private 0600 temp file that the runtime deletes when playback ends.
+Apps cannot pass file paths, host commands, or raw audio. On hosts with no
+player the route errors with `platform: host audio playback is unsupported`
+rather than pretending to play.
 
 Example of writing with `permissions:["ipc","fs.write"]`:
 
@@ -1258,7 +1280,7 @@ operations, decimals, overflow, and divide-by-zero behave identically.
   "name": "Dogcalc",
   "version": "0.1.0",
   "entrypoint": "dogcalc",
-  "permissions": ["ipc"],
+  "permissions": ["ipc", "sound"],
   "description": "The calculator, but every button is a dog: breed digits and BOOP/WAG/FETCH keys on a real grid pad."
 }
 ```
@@ -1295,13 +1317,13 @@ onto the same key map.
 `{"result":"6"}`, the same headless contract as `app/com.gostalgia.calculator/calc`
 running through `calculator.Evaluate`.
 
-The grant is `ipc` alone. The `BOOP =` key is wired for an optional bark:
-after an equals press the app checks its own grant via `session/whoami` (once
-per launch) for a `sound` capability, and only then calls `sound/play` with
-`{"sound":"bark"}`. The audio adapter and capability are still pending
-(issue #105), and the SDK does not yet define the grant, so the bark is
-dormant by construction: no grant, no route, or a failed call all ship
-silently rather than surfacing as calculator errors.
+The grant is `ipc` plus `sound`. The `BOOP =` key plays an optional bark:
+after an equals press the app checks its own grant via `session/whoami`
+(once per launch) for the `sound` capability, and only then calls
+`sound/play` with `{"sound":"bark"}` — the runtime's named-preset form. On
+hosts with an audio adapter the bark is live; everywhere else the route
+reports unsupported, and in either case a failed call ships silently rather
+than surfacing as a calculator error.
 
 ### Calculator retirement
 

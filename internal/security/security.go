@@ -279,6 +279,7 @@ const (
 	CapBackupRead     = sdk.CapBackupRead
 	CapBackupWrite    = sdk.CapBackupWrite
 	CapNotify         = sdk.CapNotify
+	CapSound          = sdk.CapSound
 	CapAdmin          = "admin"
 )
 
@@ -340,6 +341,7 @@ func AdminCapabilities() *Capabilities {
 		CapProfileRead, CapProfileWrite,
 		CapPackageRead, CapPackageWrite,
 		CapBackupRead, CapBackupWrite,
+		CapSound,
 		CapAdmin,
 	)
 }
