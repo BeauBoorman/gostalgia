@@ -113,6 +113,8 @@ func TestSoundPlayPreset(t *testing.T) {
 	if int(dataLen) != len(wav)-44 {
 		t.Fatalf("data chunk = %d bytes, want %d", dataLen, len(wav)-44)
 	}
+	// Exact by construction: the clip is always floor(total_ms*rate/1000)
+	// samples because note boundaries use cumulative positions.
 	wantSamples := out.DurationMs * soundSampleRate / 1000
 	if int(dataLen) != wantSamples*2 {
 		t.Fatalf("data chunk = %d bytes, want %d samples", dataLen, wantSamples)

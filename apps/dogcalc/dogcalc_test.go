@@ -557,6 +557,92 @@ func TestBarkRouteMissing(t *testing.T) {
 	}
 }
 
+// TestBarkSkippedWhenHostUnsupported: the grant names sound but the status
+// probe reports an unsupported host, so the equals press latches off and
+// never spends the doomed sound/play call.
+func TestBarkSkippedWhenHostUnsupported(t *testing.T) {
+	d := &Dog{pad: calculator.NewPad()}
+	_, r := launchDogInstance(t, d)
+
+	if err := r.Handle("session/whoami", func(context.Context, ipc.Request) (any, error) {
+		return map[string]any{"capabilities": []string{"ipc", "sound"}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Handle(soundStatusRoute, func(context.Context, ipc.Request) (any, error) {
+		return map[string]any{"supported": false, "player": ""}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	plays := 0
+	if err := r.Handle(soundRoute, func(context.Context, ipc.Request) (any, error) {
+		mu.Lock()
+		plays++
+		mu.Unlock()
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	v := fetchView(t, r, 2)
+	press := cellPress(t, r, v.Instance, 2)
+	press("digit_1")
+	v = press("eq")
+	if v.Items[0].Detail != "1" || v.State != sdk.ViewReady {
+		t.Fatalf("eq view = %q state=%q, want 1/ready", v.Items[0].Detail, v.State)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if plays != 0 {
+		t.Errorf("sound/play called %d times on an unsupported host, want 0", plays)
+	}
+	if d.sound != soundOff {
+		t.Errorf("sound probe = %d, want latched off", d.sound)
+	}
+}
+
+// TestBarkAfterSupportedProbe walks the full probe path — whoami grants
+// sound, status reports supported — and the equals press barks.
+func TestBarkAfterSupportedProbe(t *testing.T) {
+	d := &Dog{pad: calculator.NewPad()}
+	_, r := launchDogInstance(t, d)
+
+	if err := r.Handle("session/whoami", func(context.Context, ipc.Request) (any, error) {
+		return map[string]any{"capabilities": []string{"ipc", "sound"}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Handle(soundStatusRoute, func(context.Context, ipc.Request) (any, error) {
+		return map[string]any{"supported": true, "player": "fake"}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	plays := 0
+	if err := r.Handle(soundRoute, func(context.Context, ipc.Request) (any, error) {
+		mu.Lock()
+		plays++
+		mu.Unlock()
+		return map[string]bool{"played": true}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	v := fetchView(t, r, 2)
+	press := cellPress(t, r, v.Instance, 2)
+	press("digit_1")
+	press("eq")
+	mu.Lock()
+	defer mu.Unlock()
+	if plays != 1 {
+		t.Errorf("sound/play called %d times, want 1", plays)
+	}
+	if d.sound != soundOn {
+		t.Errorf("sound probe = %d, want latched on", d.sound)
+	}
+}
+
 func TestRelaunchReset(t *testing.T) {
 	bus := events.NewBus()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))

@@ -2,6 +2,7 @@ package platform
 
 import (
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,13 +75,18 @@ func TestUnsupportedAudioAdapter(t *testing.T) {
 	}
 }
 
-// TestAudioHelperProcess is spawned by TestPlayWAVDetached as a stand-in
-// host player: it exits immediately when GO_AUDIO_HELPER is set.
+// TestAudioHelperProcess is spawned by the playWAVDetached tests as a
+// stand-in host player: GO_AUDIO_HELPER=1 exits immediately, and
+// GO_AUDIO_HELPER=hang blocks on stdin until the test closes the pipe so
+// in-flight slots stay occupied for exactly as long as the test wants.
 func TestAudioHelperProcess(t *testing.T) {
-	if os.Getenv("GO_AUDIO_HELPER") != "1" {
-		return
+	switch os.Getenv("GO_AUDIO_HELPER") {
+	case "1":
+		os.Exit(0)
+	case "hang":
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
 	}
-	os.Exit(0)
 }
 
 func TestPlayWAVDetached(t *testing.T) {
@@ -126,6 +132,61 @@ func TestPlayWAVDetachedStartFailure(t *testing.T) {
 	}
 	if _, statErr := os.Stat(file); !os.IsNotExist(statErr) {
 		t.Fatalf("staging file leaked after start failure: %v", statErr)
+	}
+}
+
+// TestPlayWAVDetachedInFlightCap saturates the in-flight cap with helpers
+// that block on stdin, proves the next call fails with ErrAudioBusy instead
+// of queueing or spawning an extra host process, and proves slots are
+// released once the players exit.
+func TestPlayWAVDetachedInFlightCap(t *testing.T) {
+	if testing.Short() {
+		t.Skip("process spawn")
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer func() { _ = w.Close() }()
+
+	hang := func(string) *exec.Cmd {
+		cmd := exec.Command(os.Args[0], "-test.run=TestAudioHelperProcess")
+		cmd.Env = append(os.Environ(), "GO_AUDIO_HELPER=hang")
+		cmd.Stdin = r
+		return cmd
+	}
+	for i := 0; i < maxAudioInFlight; i++ {
+		if err := playWAVDetached(hang, []byte("RIFF-fake-clip")); err != nil {
+			t.Fatalf("play %d of %d: %v", i, maxAudioInFlight, err)
+		}
+	}
+	if err := playWAVDetached(hang, []byte("RIFF-fake-clip")); !errors.Is(err, ErrAudioBusy) {
+		t.Fatalf("saturated play err = %v, want ErrAudioBusy", err)
+	}
+
+	// Closing the write end ends every helper; the reapers must release
+	// their slots so playback recovers.
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := playWAVDetached(func(string) *exec.Cmd {
+			cmd := exec.Command(os.Args[0], "-test.run=TestAudioHelperProcess")
+			cmd.Env = append(os.Environ(), "GO_AUDIO_HELPER=1")
+			return cmd
+		}, []byte("RIFF-fake-clip"))
+		if err == nil {
+			return
+		}
+		if !errors.Is(err, ErrAudioBusy) {
+			t.Fatalf("post-drain play err = %v, want success or ErrAudioBusy", err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("in-flight slots never released after players exited")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

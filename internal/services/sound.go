@@ -226,12 +226,18 @@ func soundDurationMs(notes []soundNote) int {
 }
 
 // synthesizePCM renders the note sequence to 16-bit mono PCM samples.
+// Note boundaries fall on cumulative sample positions, so per-note
+// truncation cannot shrink the clip below its declared duration: the total
+// is always floor(total_ms * sample_rate / 1000) samples.
 func synthesizePCM(notes []soundNote) []int16 {
 	total := soundDurationMs(notes)
 	out := make([]int16, 0, total*soundSampleRate/1000)
 	fadeSamples := soundEnvelopeMs * soundSampleRate / 1000
+	elapsedMs := 0
 	for _, n := range notes {
-		count := n.DurationMs * soundSampleRate / 1000
+		start := elapsedMs * soundSampleRate / 1000
+		elapsedMs += n.DurationMs
+		count := elapsedMs*soundSampleRate/1000 - start
 		if n.FrequencyHz == 0 {
 			// A rest is true silence, not a DC offset from waveSample(0).
 			out = append(out, make([]int16, count)...)

@@ -363,11 +363,16 @@ future work.
 `sound/play` accepts either a named preset (`sound`: `bark`, `beep`, or
 `chime`) or an explicit `notes` list — the two are mutually exclusive. Each
 note is `{"frequency_hz":20-8000, "duration_ms":10-2000, "wave":"sine|square|triangle|sawtooth"}`;
+`wave` is required on every note — there is no default — and
 `frequency_hz: 0` renders a rest. Sequences are capped at 64 notes and 10 s
 total. The runtime synthesizes a 22050 Hz 16-bit mono WAV in-process and
 hands the finished clip to a discovered host player (`afplay` on macOS,
 `pw-play`/`paplay`/`aplay` on Linux, PowerShell `System.Media.SoundPlayer`
 on Windows); playback is fire-and-forget and never blocks the IPC response.
+Playback is also bounded: at most four detached host players may be in
+flight at once, and when saturated `sound/play` fails with a busy error
+(`platform: audio playback busy`) instead of queueing. Each clip is staged
+as a private 0600 temp file that the runtime deletes when playback ends.
 Apps cannot pass file paths, host commands, or raw audio. On hosts with no
 player the route errors with `platform: host audio playback is unsupported`
 rather than pretending to play.
