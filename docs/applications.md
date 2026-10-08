@@ -407,7 +407,7 @@ handler as an operator too: it must not borrow operator capabilities.
 Run `go build ./...`, `go vet ./...`, `gofmt -l .` (empty output), and
 `go test -race ./...`. Do not add another external dependency to an app.
 
-## 7. Data/action presentation contract (version 1)
+## 7. Data/action presentation contract (versions 1–2)
 
 **There is exactly one terminal owner: the experience/shell.** Only it enters
 raw mode, renders, restores the terminal, chooses styles, edits inputs, moves
@@ -435,52 +435,84 @@ manifest grants, handler concurrency, cancellation, and error rules.
 
 | Method (`app/<app-id>/...`) | Params | Result |
 |---|---|---|
-| `view` | `sdk.ViewRequest`: `{"version":1}` | complete `sdk.View` snapshot |
-| `action` | `sdk.ActionRequest`: `{version,instance,request_id,action,item_id?,values?}` | complete updated `sdk.View` |
+| `view` | `sdk.ViewRequest`: `{"version":N}` | complete `sdk.View` snapshot |
+| `action` | `sdk.ActionRequest`: `{version,instance,request_id,action,item_id?,cell_id?,values?}` | complete updated `sdk.View` |
 | `cancel` | `sdk.CancelRequest`: `{version,instance,request_id}` | `{"canceled":true}`, cancellation intent recorded |
 
 `version` is the presentation protocol version, independent of manifest
-version. Missing/unsupported versions, unknown request fields, malformed
-params, and stale instances are errors. The SDK assigns a fresh opaque
-`instance` on every Init. Action and cancel requests must echo it; an old
-screen can never target a new launch by accident. Each action uses a distinct
-`request_id` matching `[a-z][a-z0-9_-]*` (up to 64 bytes). It identifies
-in-flight work, **not** a durable idempotency key; do not automatically retry a
-mutating action after a lost response.
+version. Requests may name any version in `[sdk.MinPresentationVersion,
+sdk.PresentationVersion]` (currently 1–2); the response is stamped with the
+requested version and must validate under it, so version-2 elements served to
+a version-1 request are an error rather than silently dropped content. The
+shell asks for the newest version it supports and falls back on an
+unsupported-version reply, so version-1 apps keep rendering. Inside both
+callbacks, `sdk.PresentationRequestVersion(ctx)` reports the negotiated
+version (0 outside a presentation callback) so one snapshot can adapt its
+content to older and newer clients. Missing/unsupported versions, unknown
+request fields, malformed params, and stale instances are errors. The SDK
+assigns a fresh opaque `instance` on every Init. Action and cancel requests
+must echo it; an old screen can never target a new launch by accident. Each
+action uses a distinct `request_id` matching `[a-z][a-z0-9_-]*` (up to 64
+bytes). It identifies in-flight work, **not** a durable idempotency key; do
+not automatically retry a mutating action after a lost response.
 
 ### Typed snapshot, not widgets
 
 `sdk.View` has `version`, `instance`, `title`, `state`, `items`, `fields`,
-`actions`, `status`, and `error`. It is a full replacement, including explicit
-empty values, not a patch. Its small concrete vocabulary is:
+`actions`, `blocks`, `meters`, `grid`, `status`, and `error`. It is a full
+replacement, including explicit empty values, not a patch. Its small concrete
+vocabulary is:
 
 - `sdk.Item`: stable local `id`, `label`, and textual `detail`.
 - `sdk.Field`: local `id`, `label`, initial text `value`, and `required`.
-  Version 1 fields are single-line text. The shell owns editing; periodic
+  Fields are single-line text. The shell owns editing; periodic
   snapshots preserve drafts for surviving field IDs. To reset an input, change
   its ID or reopen the view.
 - `sdk.Action`: local `id`, `label`, and `disabled`.
 - `sdk.ViewState`: `ready`, `loading`, or `error`. An error state requires an
   error banner. `status` is informational text, not an IPC error.
+- `sdk.Block` (version 2): a preformatted multi-line text region for ASCII art
+  or pre-wrapped content. `id`, optional `label` caption, and `text`. Lines are
+  rendered verbatim in order: the shell clips each line at the viewport edge
+  and never wraps, so apps can draw fixed-width figures.
+- `sdk.Meter` (version 2): `id`, `label`, and a finite `value` fraction. The
+  shell clamps `value` to [0,1] and draws it in the theme's progress vocabulary
+  (ASCII `#`/`-` in monochrome).
+- `sdk.Grid` (version 2): `label`, `columns` (1–16), and `cells` filled
+  row-major with a possibly short final row; rows are implicit
+  (`ceil(len(cells)/columns)`).
+- `sdk.Cell` (version 2): `id`, `label`, optional `action`, and `disabled`.
+  `action` names the request sent when the cell is activated and does not have
+  to appear in `actions` — a cell-declared action is enabled only together
+  with that cell's `cell_id`. An empty `action` makes the cell a plain
+  selection datum whose ID still rides along on action requests. A disabled
+  cell is drawn dimmed and never activates, like a disabled `sdk.Action`.
 
 IDs are unique within each collection and match `[a-z][a-z0-9_-]*`, up to 64
-bytes. Collections are bounded to 100 items, 16 fields, and 16 actions.
-Titles/labels are bounded to 256 bytes; field values, item details, status, and
-error to 4096 bytes each. `View.Validate()` checks the contract. The SDK stamps
-and validates callback results; the shell validates replies and strips terminal
-controls before rendering every piece of app text.
+bytes. Collections are bounded to 100 items, 16 fields, 16 actions, 4 blocks,
+and 8 meters; each block holds at most 32 lines and 16384 bytes, and a grid at
+most 64 cells. Titles/labels are bounded to 256 bytes; field values, item
+details, status, and error to 4096 bytes each. New collections carry their own
+deliberate budgets instead of reusing item byte limits. `View.Validate()`
+checks the contract, including rejecting blocks, meters, and grid on a
+version-1 snapshot. The SDK stamps and validates callback results; the shell
+validates replies and strips terminal controls before rendering every piece
+of app text.
 
 Before invoking an action callback, the SDK validates the current snapshot,
 rejects unknown/disabled actions and actions on a loading view, rejects
-unrecognized item/field IDs and oversized inputs, and checks required fields.
-`values` is a `map[string]string` keyed by field ID, and `item_id` is an
-optional selection. App callbacks still validate domain rules and
+unrecognized item/field/cell IDs, disabled cells, and oversized inputs, and
+checks required fields. `values` is a `map[string]string` keyed by field ID;
+`item_id` and `cell_id` are optional selections. `cell_id` must name an
+enabled cell in the current grid, and a cell-declared action is rejected
+without its own `cell_id`. App callbacks still validate domain rules and
 authorization, and must synchronize shared state.
 
-This deliberately supports a concrete list/text-form/action screen, not a
-speculative layout or widget framework. Files and Notes can build on these
-data types and scoped filesystem service calls; rich editors, pagination,
-multiple views, and app-defined shortcuts are not part of version 1.
+This deliberately supports a concrete list/text-form/action screen plus
+bounded art, gauge, and pad regions, not a speculative layout or widget
+framework. Files and Notes can build on these data types and scoped
+filesystem service calls; rich editors, pagination, multiple views, and
+app-defined shortcuts are not part of versions 1–2.
 
 ### Echo, interactive and headless
 
@@ -491,10 +523,13 @@ same synchronized operation. Neither path imports Charm or accesses a host
 file or terminal.
 
 In the shell, press F2, select a running Echo instance, and press F4. Type a
-message and press Enter. Tab/Shift-Tab move field/action focus; Enter invokes
-the focused action (the first action when a field is focused); Up/Down select
-an item. F2 always returns to the shelf, Ctrl-C/Ctrl-D always exit, and apps
-cannot intercept these global hotkeys.
+message and press Enter. Tab/Shift-Tab move field/action focus — the grid is
+the last stop when a version-2 snapshot carries one. Enter invokes the focused
+action (the first action when a field is focused) or the focused cell's
+declared action; Up/Down select an item, and all four arrows move the cell
+selection while the grid is focused. A list action's request carries the
+current `item_id` and `cell_id` selections. F2 always returns to the shelf,
+Ctrl-C/Ctrl-D always exit, and apps cannot intercept these global hotkeys.
 
 The same operations run without any UI:
 

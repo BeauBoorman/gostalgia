@@ -137,6 +137,40 @@ func TestExternalApplicationE2E(t *testing.T) {
 		t.Fatalf("updated view status = %q, want running-e2e", view.Status)
 	}
 
+	// 4b. Version-2 elements negotiate; cell actions route semantically.
+	var v2 sdk.View
+	must(t, client.Call(ctx, base+"view", sdk.ViewRequest{Version: 2}, &v2))
+	must(t, v2.Validate())
+	if v2.Version != 2 || len(v2.Blocks) != 1 || len(v2.Meters) != 2 || v2.Grid == nil || len(v2.Grid.Cells) != 6 {
+		t.Fatalf("version-2 view missing elements: %+v", v2)
+	}
+	press := sdk.ActionRequest{Version: 2, Instance: v2.Instance, RequestID: "press1", Action: "press", CellID: "feed"}
+	must(t, client.Call(ctx, base+"action", press, &v2))
+	if v2.Status != "pressed feed" || len(v2.Grid.Cells) != 6 {
+		t.Fatalf("cell action snapshot: %+v", v2)
+	}
+	for _, p := range []sdk.ActionRequest{
+		{Version: 2, Instance: v2.Instance, RequestID: "press2", Action: "press"},
+		{Version: 2, Instance: v2.Instance, RequestID: "press3", Action: "press", CellID: "nap"},
+		{Version: 2, Instance: v2.Instance, RequestID: "press4", Action: "press", CellID: "cell-404"},
+		{Version: 1, Instance: v2.Instance, RequestID: "press5", Action: "press", CellID: "feed"},
+	} {
+		if err := client.Call(ctx, base+"action", p, nil); err == nil {
+			t.Fatalf("invalid cell action accepted: %+v", p)
+		}
+	}
+	must(t, client.Call(ctx, base+"action", sdk.ActionRequest{
+		Version: 2, Instance: v2.Instance, RequestID: "reset1", Action: "reset",
+	}, &v2))
+	// A version-1 request must not carry version-2 elements.
+	must(t, client.Call(ctx, base+"view", sdk.ViewRequest{Version: 1}, &view))
+	if view.Version != 1 || len(view.Blocks) != 0 || len(view.Meters) != 0 || view.Grid != nil {
+		t.Fatalf("version-1 view leaked version-2 elements: %+v", view)
+	}
+	if view.Status != "initialized" {
+		t.Fatalf("reset action state = %q, want initialized", view.Status)
+	}
+
 	// 5. Verify stdout log capture into bounded ring buffers via proc/logs
 	var logs struct {
 		ID     int32                     `json:"id"`

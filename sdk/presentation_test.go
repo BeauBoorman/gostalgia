@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -51,7 +52,8 @@ func TestPresentationValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, change := range []func(*View){
-		func(v *View) { v.Version++ },
+		func(v *View) { v.Version = PresentationVersion + 1 },
+		func(v *View) { v.Version = MinPresentationVersion - 1 },
 		func(v *View) { v.Instance = "" },
 		func(v *View) { v.Title = " " },
 		func(v *View) { v.State = "future" },
@@ -62,6 +64,42 @@ func TestPresentationValidation(t *testing.T) {
 		func(v *View) { v.Items = make([]Item, 101) },
 		func(v *View) { v.Fields = []Field{{ID: "text", Label: "Text", Value: strings.Repeat("x", 4097)}} },
 		func(v *View) { v.Actions = []Action{{ID: "bad/id", Label: "Bad"}} },
+		func(v *View) {
+			v.Version = 1
+			v.Blocks = []Block{{ID: "art", Text: "x"}}
+		},
+		func(v *View) {
+			v.Version = 1
+			v.Meters = []Meter{{ID: "fuel", Label: "Fuel"}}
+		},
+		func(v *View) {
+			v.Version = 1
+			v.Grid = &Grid{Columns: 1, Cells: []Cell{{ID: "a", Label: "A"}}}
+		},
+		func(v *View) { v.Blocks = make([]Block, 5) },
+		func(v *View) { v.Blocks = []Block{{ID: "bad id", Text: "x"}} },
+		func(v *View) {
+			v.Blocks = []Block{{ID: "art", Label: strings.Repeat("x", 257), Text: "x"}}
+		},
+		func(v *View) {
+			v.Blocks = []Block{{ID: "art", Text: strings.Repeat("x", 16385)}}
+		},
+		func(v *View) {
+			v.Blocks = []Block{{ID: "art", Text: strings.Repeat("x\n", 33)}}
+		},
+		func(v *View) { v.Meters = make([]Meter, 9) },
+		func(v *View) { v.Meters = []Meter{{ID: "fuel", Label: " "}} },
+		func(v *View) { v.Meters = []Meter{{ID: "fuel", Label: "Fuel", Value: math.NaN()}} },
+		func(v *View) { v.Meters = []Meter{{ID: "fuel", Label: "Fuel", Value: math.Inf(1)}} },
+		func(v *View) { v.Grid = &Grid{Columns: 0} },
+		func(v *View) { v.Grid = &Grid{Columns: 17} },
+		func(v *View) {
+			v.Grid = &Grid{Columns: 1, Cells: []Cell{{ID: "a", Label: "A"}, {ID: "a", Label: "B"}}}
+		},
+		func(v *View) {
+			v.Grid = &Grid{Columns: 1, Cells: []Cell{{ID: "a", Label: "A", Action: "bad/action"}}}
+		},
+		func(v *View) { v.Grid = &Grid{Label: strings.Repeat("x", 257), Columns: 1} },
 	} {
 		v := good
 		change(&v)
@@ -98,7 +136,8 @@ func TestPresentationTypedRoutesAndInputs(t *testing.T) {
 		t.Fatalf("action: %v, %v", out, err)
 	}
 	for _, change := range []func(*ActionRequest){
-		func(p *ActionRequest) { p.Version = 2 },
+		func(p *ActionRequest) { p.Version = PresentationVersion + 1 },
+		func(p *ActionRequest) { p.Version = MinPresentationVersion - 1 },
 		func(p *ActionRequest) { p.Instance = "previous-launch" },
 		func(p *ActionRequest) { p.RequestID = "" },
 		func(p *ActionRequest) { p.Action = "missing" },
@@ -117,7 +156,7 @@ func TestPresentationTypedRoutesAndInputs(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatal("invalid input reached callback")
 	}
-	for _, raw := range []string{"", "null", `{"version":2}`, `{"version":1,"unknown":true}`, `{"version":1} {}`, `[]`} {
+	for _, raw := range []string{"", "null", `{"version":3}`, `{"version":0}`, `{"version":1,"unknown":true}`, `{"version":1} {}`, `[]`} {
 		if _, err := routes["view"](context.Background(), json.RawMessage(raw)); err == nil {
 			t.Errorf("accepted params %q", raw)
 		}
@@ -203,5 +242,107 @@ func TestPresentationCallbackErrorsAndLoading(t *testing.T) {
 	c := NewContext(Manifest{}, nil, nil, nil)
 	if err := c.Present(nil, nil); err == nil {
 		t.Fatal("nil callbacks accepted")
+	}
+}
+
+func gridView() View {
+	return View{
+		Title: "Pad", State: ViewReady,
+		Items:  []Item{{ID: "one", Label: "One"}},
+		Fields: []Field{{ID: "text", Label: "Text", Required: true}},
+		Actions: []Action{
+			{ID: "submit", Label: "Submit"},
+			{ID: "off", Label: "Off", Disabled: true},
+		},
+		Blocks: []Block{{ID: "art", Label: "Mascot", Text: "(\\_/)\n(o.o)\n> ^ <"}},
+		Meters: []Meter{{ID: "charge", Label: "Charge", Value: 1.5}},
+		Grid: &Grid{Label: "Pad", Columns: 2, Cells: []Cell{
+			{ID: "nw", Label: "NW", Action: "move"},
+			{ID: "ne", Label: "NE", Action: "move"},
+			{ID: "sw", Label: "SW"},
+			{ID: "se", Label: "SE", Disabled: true},
+		}},
+	}
+}
+
+func TestPresentationVersionNegotiation(t *testing.T) {
+	var seen []int
+	routes := presentTest(t, func(ctx context.Context) (View, error) {
+		seen = append(seen, PresentationRequestVersion(ctx))
+		return testView(), nil
+	}, func(ctx context.Context, p ActionRequest) (View, error) { return testView(), nil })
+	for _, version := range []int{1, 2} {
+		out, err := invokePresentation(t, routes["view"], ViewRequest{Version: version})
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := out.(View)
+		if v.Version != version || len(v.Blocks) != 0 || v.Grid != nil {
+			t.Fatalf("negotiated view: %+v", v)
+		}
+		if err := v.Validate(); err != nil {
+			t.Fatalf("negotiated version %d view did not validate: %v", version, err)
+		}
+	}
+	if len(seen) != 2 || seen[0] != 1 || seen[1] != 2 {
+		t.Fatalf("callbacks did not observe negotiated versions: %v", seen)
+	}
+	if PresentationRequestVersion(context.Background()) != 0 {
+		t.Fatal("request version leaked outside a callback")
+	}
+}
+
+func TestPresentationV2ElementsAndCellActions(t *testing.T) {
+	var last ActionRequest
+	routes := presentTest(t, func(context.Context) (View, error) { return gridView(), nil },
+		func(ctx context.Context, p ActionRequest) (View, error) {
+			last = p
+			return gridView(), nil
+		})
+	out, err := invokePresentation(t, routes["view"], ViewRequest{Version: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := out.(View)
+	if v.Version != 2 || len(v.Blocks) != 1 || len(v.Meters) != 1 || v.Grid == nil || len(v.Grid.Cells) != 4 {
+		t.Fatalf("version 2 snapshot dropped elements: %+v", v)
+	}
+	instance := v.Instance
+	// A version-1 request must fail rather than silently drop the new elements.
+	if _, err := invokePresentation(t, routes["view"], ViewRequest{Version: 1}); err == nil {
+		t.Fatal("version-1 request accepted a snapshot carrying version-2 elements")
+	}
+	base := ActionRequest{Version: 2, Instance: instance, RequestID: "r1", Values: map[string]string{"text": "x"}}
+	for _, change := range []struct {
+		name  string
+		apply func(*ActionRequest)
+		ok    bool
+	}{
+		{"cell action with its cell_id", func(p *ActionRequest) { p.Action, p.CellID = "move", "nw" }, true},
+		{"cell action without cell_id", func(p *ActionRequest) { p.Action = "move" }, false},
+		{"cell action with wrong cell", func(p *ActionRequest) { p.Action, p.CellID = "move", "sw" }, false},
+		{"disabled cell", func(p *ActionRequest) { p.Action, p.CellID = "move", "se" }, false},
+		{"unknown cell", func(p *ActionRequest) { p.CellID = "cell-404" }, false},
+		{"list action with datum cell", func(p *ActionRequest) { p.Action, p.CellID = "submit", "sw" }, true},
+		{"list action with item and cell", func(p *ActionRequest) {
+			p.Action, p.ItemID, p.CellID = "submit", "one", "nw"
+		}, true},
+		{"disabled list action with cell", func(p *ActionRequest) { p.Action, p.CellID = "off", "nw" }, false},
+	} {
+		p := base
+		change.apply(&p)
+		_, err := invokePresentation(t, routes["action"], p)
+		if ok := err == nil; ok != change.ok {
+			t.Fatalf("%s: err = %v", change.name, err)
+		}
+	}
+	if last.Action != "submit" || last.CellID != "nw" || last.ItemID != "one" {
+		t.Fatalf("action routing lost cell/item selection: %+v", last)
+	}
+	// A version-1 action request cannot validate against a version-2 snapshot.
+	p := base
+	p.Version = 1
+	if _, err := invokePresentation(t, routes["action"], p); err == nil {
+		t.Fatal("version-1 action accepted against version-2 snapshot")
 	}
 }

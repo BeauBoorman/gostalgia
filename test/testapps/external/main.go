@@ -34,7 +34,7 @@ func (a *externalApp) Init(ctx *sdk.Context) error {
 	})
 	// presentation routes
 	viewFn := func(c context.Context) (sdk.View, error) {
-		return sdk.View{
+		v := sdk.View{
 			State:  sdk.ViewReady,
 			Title:  "External Test App",
 			Status: a.state,
@@ -44,11 +44,36 @@ func (a *externalApp) Init(ctx *sdk.Context) error {
 			Actions: []sdk.Action{
 				{ID: "set_state", Label: "Set State"},
 			},
-		}, nil
+		}
+		if sdk.PresentationRequestVersion(c) >= 2 {
+			v.Blocks = []sdk.Block{{
+				ID: "mascot", Label: "Mascot",
+				Text: " (\\_/)\n (o.o)\n / >\\",
+			}}
+			v.Meters = []sdk.Meter{
+				{ID: "charge", Label: "Charge", Value: 0.42},
+				{ID: "hunger", Label: "Hunger", Value: 1.4},
+			}
+			v.Grid = &sdk.Grid{Label: "Pad", Columns: 3, Cells: []sdk.Cell{
+				{ID: "feed", Label: "Feed", Action: "press"},
+				{ID: "pet", Label: "Pet", Action: "press"},
+				{ID: "nap", Label: "Nap", Disabled: true},
+				{ID: "stats", Label: "Stats"},
+				{ID: "play", Label: "Play", Action: "press"},
+				{ID: "vet", Label: "Vet", Action: "press"},
+			}}
+			v.Actions = append(v.Actions, sdk.Action{ID: "reset", Label: "Reset"})
+		}
+		return v, nil
 	}
 	actionFn := func(c context.Context, r sdk.ActionRequest) (sdk.View, error) {
-		if r.Action == "set_state" {
+		switch r.Action {
+		case "set_state":
 			a.state = r.Values["state"]
+		case "press":
+			a.state = "pressed " + r.CellID
+		case "reset":
+			a.state = "initialized"
 		}
 		return viewFn(c)
 	}

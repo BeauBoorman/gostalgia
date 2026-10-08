@@ -58,6 +58,87 @@ func (s *screenInstance) Run(ctx context.Context) error {
 
 func (s *screenInstance) Stop(context.Context) error { s.stops.Add(1); return nil }
 
+// padInstance serves an adaptive version-2 snapshot over the real IPC router.
+type padInstance struct{ pressed string }
+
+func (s *padInstance) Init(c *sdk.Context) error {
+	view := func(ctx context.Context) (sdk.View, error) {
+		v := sdk.View{
+			Title: "Pad", State: sdk.ViewReady, Status: s.pressed,
+			Actions: []sdk.Action{{ID: "adopt", Label: "Adopt"}},
+		}
+		if sdk.PresentationRequestVersion(ctx) >= 2 {
+			v.Blocks = []sdk.Block{{ID: "art", Text: "(o.o)"}}
+			v.Meters = []sdk.Meter{{ID: "charge", Label: "Charge", Value: 0.5}}
+			v.Grid = &sdk.Grid{Columns: 2, Cells: []sdk.Cell{
+				{ID: "nw", Label: "NW", Action: "press"},
+				{ID: "se", Label: "SE", Disabled: true},
+			}}
+		}
+		return v, nil
+	}
+	return c.Present(view, func(ctx context.Context, p sdk.ActionRequest) (sdk.View, error) {
+		if p.Action == "press" {
+			s.pressed = p.CellID
+		}
+		return view(ctx)
+	})
+}
+
+func (s *padInstance) Run(ctx context.Context) error { <-ctx.Done(); return nil }
+func (s *padInstance) Stop(context.Context) error    { return nil }
+
+func TestPresentationV2OverRouter(t *testing.T) {
+	m, r := newTestManager(t)
+	man := fakeManifest
+	man.ID, man.Entrypoint = "com.test.pad", "pad"
+	s := &padInstance{}
+	must(t, m.reg.RegisterBuiltin(man, func() (sdk.Instance, error) { return s, nil }))
+	_, err := m.Launch(context.Background(), man.ID)
+	must(t, err)
+	t.Cleanup(func() { _ = m.Stop(man.ID, time.Second) })
+
+	ctx := ipc.WithCapabilities(context.Background(), security.AdminCapabilities())
+	call := func(method string, params any, out any) {
+		raw, err := json.Marshal(params)
+		must(t, err)
+		resp := r.Dispatch(ctx, ipc.Request{Method: method, Params: raw})
+		if !resp.OK {
+			t.Fatalf("%s: %s", method, resp.Error)
+		}
+		must(t, json.Unmarshal(resp.Data, out))
+	}
+	const base = "app/com.test.pad/"
+	var v2 sdk.View
+	call(base+"view", sdk.ViewRequest{Version: 2}, &v2)
+	must(t, v2.Validate())
+	if v2.Version != 2 || len(v2.Blocks) != 1 || len(v2.Meters) != 1 || v2.Grid == nil {
+		t.Fatalf("version-2 snapshot over router: %+v", v2)
+	}
+	call(base+"action", sdk.ActionRequest{
+		Version: 2, Instance: v2.Instance, RequestID: "p1", Action: "press", CellID: "nw",
+	}, &v2)
+	if s.pressed != "nw" {
+		t.Fatalf("cell action did not route: %q", s.pressed)
+	}
+	for _, p := range []sdk.ActionRequest{
+		{Version: 2, Instance: v2.Instance, RequestID: "p2", Action: "press"},
+		{Version: 2, Instance: v2.Instance, RequestID: "p3", Action: "press", CellID: "se"},
+		{Version: 1, Instance: v2.Instance, RequestID: "p4", Action: "press", CellID: "nw"},
+	} {
+		raw, err := json.Marshal(p)
+		must(t, err)
+		if resp := r.Dispatch(ctx, ipc.Request{Method: base + "action", Params: raw}); resp.OK {
+			t.Fatalf("invalid cell action dispatched: %+v", p)
+		}
+	}
+	var v1 sdk.View
+	call(base+"view", sdk.ViewRequest{Version: 1}, &v1)
+	if v1.Version != 1 || len(v1.Blocks) != 0 || v1.Grid != nil {
+		t.Fatalf("version-1 snapshot leaked version-2 elements: %+v", v1)
+	}
+}
+
 func launchScreen(t *testing.T, mode string) (*Manager, *ipc.Router, *screenInstance, *process.Process) {
 	t.Helper()
 	m, r := newTestManager(t)

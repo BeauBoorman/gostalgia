@@ -7,13 +7,37 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 	"sync"
 )
 
-// PresentationVersion versions the data/action protocol, independently of an
-// app's manifest version. Apps supply data, never terminal widgets or keymaps.
-const PresentationVersion = 1
+// PresentationVersion is the newest data/action protocol version, independent
+// of an app's manifest version. Version 2 is additive: every version-1
+// collection keeps its meaning, and blocks, meters, and grid become available.
+// Apps supply data, never terminal widgets or keymaps.
+const PresentationVersion = 2
+
+// MinPresentationVersion is the oldest protocol version still answered. A
+// request may name any version in [MinPresentationVersion, PresentationVersion];
+// the response is stamped with the requested version and must validate under
+// it, so version-2 elements in a snapshot served to a version-1 request are an
+// error rather than silently dropped content.
+const MinPresentationVersion = 1
+
+// Snapshot bounds shared by every version. New collections get their own
+// deliberate budgets instead of reusing item byte limits.
+const (
+	maxViewItems   = 100
+	maxViewFields  = 16
+	maxViewActions = 16
+	maxViewBlocks  = 4
+	maxBlockLines  = 32
+	maxBlockBytes  = 16384
+	maxViewMeters  = 8
+	maxGridColumns = 16
+	maxGridCells   = 64
+)
 
 type ViewState string
 
@@ -44,8 +68,49 @@ type Action struct {
 	Disabled bool   `json:"disabled"`
 }
 
+// Block is a preformatted multi-line text region, such as ASCII art. Lines are
+// sanitized and rendered verbatim in order: they clip at the viewport edge and
+// never wrap, so apps can draw fixed-width figures. Label is an optional
+// caption. Version 2 and later.
+type Block struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	Text  string `json:"text"`
+}
+
+// Meter is a labeled gauge rendered in the theme's progress vocabulary. Value
+// is a finite fraction; the renderer clamps it to [0,1]. Version 2 and later.
+type Meter struct {
+	ID    string  `json:"id"`
+	Label string  `json:"label"`
+	Value float64 `json:"value"`
+}
+
+// Cell is one selectable element of a Grid. Action names the request sent
+// when the cell is activated; it does not have to appear in Actions. An empty
+// Action makes the cell a plain selection datum whose id rides along as
+// cell_id on action requests. Disabled cells are drawn dimmed and activating
+// one is a no-op, like a disabled Action. Version 2 and later.
+type Cell struct {
+	ID       string `json:"id"`
+	Label    string `json:"label"`
+	Action   string `json:"action,omitempty"`
+	Disabled bool   `json:"disabled,omitempty"`
+}
+
+// Grid is a rows x columns pad of selectable cells, filled row-major with a
+// possibly short final row. Rows are implicit: ceil(len(Cells)/Columns).
+// Version 2 and later.
+type Grid struct {
+	Label   string `json:"label"`
+	Columns int    `json:"columns"`
+	Cells   []Cell `json:"cells"`
+}
+
 // View is a complete snapshot, not a patch or a tree of speculative widgets.
 // Present supplies Version and Instance; Instance changes on every launch.
+// Blocks, meters, and grid are additive version-2 elements; a version-1
+// snapshot must not carry them.
 type View struct {
 	Version  int       `json:"version"`
 	Instance string    `json:"instance"`
@@ -54,6 +119,9 @@ type View struct {
 	Items    []Item    `json:"items"`
 	Fields   []Field   `json:"fields"`
 	Actions  []Action  `json:"actions"`
+	Blocks   []Block   `json:"blocks,omitempty"`
+	Meters   []Meter   `json:"meters,omitempty"`
+	Grid     *Grid     `json:"grid,omitempty"`
 	Status   string    `json:"status"`
 	Error    string    `json:"error"`
 }
@@ -63,13 +131,17 @@ type ViewRequest struct {
 }
 
 // ActionRequest carries semantic input only. RequestID identifies an in-flight
-// operation for cancellation; it is not a durable idempotency key.
+// operation for cancellation; it is not a durable idempotency key. ItemID is
+// the selected item and CellID the selected grid cell, when those collections
+// exist; an action declared on a cell is only enabled together with that
+// cell's cell_id.
 type ActionRequest struct {
 	Version   int               `json:"version"`
 	Instance  string            `json:"instance"`
 	RequestID string            `json:"request_id"`
 	Action    string            `json:"action"`
 	ItemID    string            `json:"item_id,omitempty"`
+	CellID    string            `json:"cell_id,omitempty"`
 	Values    map[string]string `json:"values,omitempty"`
 }
 
@@ -83,10 +155,21 @@ type CancelResult struct {
 	Canceled bool `json:"canceled"`
 }
 
+type requestVersionKey struct{}
+
+// PresentationRequestVersion reports the protocol version a view or action
+// request was negotiated at, so one callback can serve version-appropriate
+// content to older and newer clients. Outside a presentation callback it
+// returns zero.
+func PresentationRequestVersion(ctx context.Context) int {
+	v, _ := ctx.Value(requestVersionKey{}).(int)
+	return v
+}
+
 // Validate bounds snapshots and rejects ambiguous IDs and unsupported states.
 // All text remains untrusted; the experience must strip terminal controls.
 func (v View) Validate() error {
-	if v.Version != PresentationVersion || v.Instance == "" {
+	if v.Version < MinPresentationVersion || v.Version > PresentationVersion || v.Instance == "" {
 		return fmt.Errorf("presentation: unsupported version or missing instance")
 	}
 	if strings.TrimSpace(v.Title) == "" || len(v.Title) > 256 ||
@@ -102,8 +185,12 @@ func (v View) Validate() error {
 	default:
 		return fmt.Errorf("presentation: unknown view state %q", v.State)
 	}
-	if len(v.Items) > 100 || len(v.Fields) > 16 || len(v.Actions) > 16 {
-		return fmt.Errorf("presentation: snapshot exceeds item/field/action limits")
+	if len(v.Items) > maxViewItems || len(v.Fields) > maxViewFields || len(v.Actions) > maxViewActions ||
+		len(v.Blocks) > maxViewBlocks || len(v.Meters) > maxViewMeters {
+		return fmt.Errorf("presentation: snapshot exceeds element limits")
+	}
+	if v.Version < 2 && (len(v.Blocks) > 0 || len(v.Meters) > 0 || v.Grid != nil) {
+		return fmt.Errorf("presentation: blocks, meters, and grid require version 2")
 	}
 	check := func(id, label string, seen map[string]bool) error {
 		if !entryPattern.MatchString(id) || len(id) > 64 || seen[id] ||
@@ -137,6 +224,41 @@ func (v View) Validate() error {
 			return err
 		}
 	}
+	seen = make(map[string]bool)
+	for _, block := range v.Blocks {
+		if !entryPattern.MatchString(block.ID) || len(block.ID) > 64 || seen[block.ID] || len(block.Label) > 256 {
+			return fmt.Errorf("presentation: invalid or duplicate block %q", block.ID)
+		}
+		seen[block.ID] = true
+		// Art gets its own cell budget, not item bytes: bounded lines and total
+		// size. Lines are never wrapped; the renderer clips them honestly.
+		if len(block.Text) > maxBlockBytes || strings.Count(block.Text, "\n")+1 > maxBlockLines {
+			return fmt.Errorf("presentation: block %q exceeds line or size budget", block.ID)
+		}
+	}
+	seen = make(map[string]bool)
+	for _, meter := range v.Meters {
+		if err := check(meter.ID, meter.Label, seen); err != nil {
+			return err
+		}
+		if math.IsNaN(meter.Value) || math.IsInf(meter.Value, 0) {
+			return fmt.Errorf("presentation: meter %q value is not finite", meter.ID)
+		}
+	}
+	if g := v.Grid; g != nil {
+		if g.Columns < 1 || g.Columns > maxGridColumns || len(g.Cells) > maxGridCells || len(g.Label) > 256 {
+			return fmt.Errorf("presentation: invalid grid dimensions or label")
+		}
+		seen = make(map[string]bool)
+		for _, cell := range g.Cells {
+			if err := check(cell.ID, cell.Label, seen); err != nil {
+				return err
+			}
+			if cell.Action != "" && (!entryPattern.MatchString(cell.Action) || len(cell.Action) > 64) {
+				return fmt.Errorf("presentation: invalid cell action %q", cell.Action)
+			}
+		}
+	}
 	return nil
 }
 
@@ -145,6 +267,11 @@ func (v View) Validate() error {
 // an IPC error; returning ViewError keeps a recoverable error banner on screen.
 // Actions must honor cancellation before committing work. Cancellation is
 // cooperative and cannot undo an operation that has already committed.
+//
+// Requests may negotiate any version in [MinPresentationVersion,
+// PresentationVersion]; snapshots are stamped and validated at the requested
+// version. PresentationRequestVersion reports the negotiated version inside
+// callbacks so one snapshot can serve older and newer clients.
 func (c *Context) Present(snapshot func(context.Context) (View, error), action func(context.Context, ActionRequest) (View, error)) error {
 	if snapshot == nil || action == nil {
 		return fmt.Errorf("presentation: snapshot and action callbacks are required")
@@ -155,15 +282,15 @@ func (c *Context) Present(snapshot func(context.Context) (View, error), action f
 	// The socket can dispatch cancel before action. Remember a bounded recent
 	// window of cancellation intents so that race does not execute canceled work.
 	var canceled []string
-	finish := func(v View, err error) (any, error) {
+	finish := func(version int, v View, err error) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		v.Version, v.Instance = PresentationVersion, instance
+		v.Version, v.Instance = version, instance
 		return v, v.Validate()
 	}
 	check := func(version int, owner, request string) error {
-		if version != PresentationVersion || owner != instance {
+		if version < MinPresentationVersion || version > PresentationVersion || owner != instance {
 			return fmt.Errorf("presentation: unsupported version or stale instance")
 		}
 		if !entryPattern.MatchString(request) || len(request) > 64 {
@@ -176,10 +303,12 @@ func (c *Context) Present(snapshot func(context.Context) (View, error), action f
 		if err := decodePresentation(raw, &p); err != nil {
 			return nil, err
 		}
-		if p.Version != PresentationVersion {
+		if p.Version < MinPresentationVersion || p.Version > PresentationVersion {
 			return nil, fmt.Errorf("presentation: unsupported version %d", p.Version)
 		}
-		return finish(snapshot(ctx))
+		ctx = context.WithValue(ctx, requestVersionKey{}, p.Version)
+		v, err := snapshot(ctx)
+		return finish(p.Version, v, err)
 	}); err != nil {
 		return err
 	}
@@ -193,6 +322,7 @@ func (c *Context) Present(snapshot func(context.Context) (View, error), action f
 		}
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
+		ctx = context.WithValue(ctx, requestVersionKey{}, p.Version)
 		mu.Lock()
 		for _, id := range canceled {
 			if id == p.RequestID {
@@ -215,7 +345,7 @@ func (c *Context) Present(snapshot func(context.Context) (View, error), action f
 		if err != nil {
 			return nil, err
 		}
-		v.Version, v.Instance = PresentationVersion, instance
+		v.Version, v.Instance = p.Version, instance
 		if err := v.Validate(); err != nil {
 			return nil, err
 		}
@@ -225,7 +355,8 @@ func (c *Context) Present(snapshot func(context.Context) (View, error), action f
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		return finish(action(ctx, p))
+		v2, err := action(ctx, p)
+		return finish(p.Version, v2, err)
 	}); err != nil {
 		return err
 	}
@@ -254,6 +385,23 @@ func validateAction(v View, p ActionRequest) error {
 	enabled := false
 	for _, a := range v.Actions {
 		if a.ID == p.Action && !a.Disabled {
+			enabled = true
+		}
+	}
+	if p.CellID != "" {
+		var cell *Cell
+		if v.Grid != nil {
+			for i := range v.Grid.Cells {
+				if v.Grid.Cells[i].ID == p.CellID {
+					cell = &v.Grid.Cells[i]
+				}
+			}
+		}
+		if cell == nil || cell.Disabled {
+			return fmt.Errorf("presentation: unknown or disabled cell %q", p.CellID)
+		}
+		// A cell-declared action is enabled only alongside its own cell_id.
+		if cell.Action == p.Action {
 			enabled = true
 		}
 	}
