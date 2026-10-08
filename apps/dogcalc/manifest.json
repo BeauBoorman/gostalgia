@@ -3,6 +3,6 @@
   "name": "Dogcalc",
   "version": "0.1.0",
   "entrypoint": "dogcalc",
-  "permissions": ["ipc"],
+  "permissions": ["ipc", "sound"],
   "description": "The calculator, but every button is a dog: breed digits and BOOP/WAG/FETCH keys on a real grid pad."
 }

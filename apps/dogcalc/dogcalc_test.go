@@ -136,8 +136,8 @@ func TestManifestValidity(t *testing.T) {
 	if !json.Valid(ManifestJSON()) {
 		t.Error("ManifestJSON is not valid JSON")
 	}
-	if len(m.Permissions) != 1 || m.Permissions[0] != "ipc" {
-		t.Errorf("permissions = %v, want [ipc]", m.Permissions)
+	if len(m.Permissions) != 2 || m.Permissions[0] != "ipc" || m.Permissions[1] != "sound" {
+		t.Errorf("permissions = %v, want [ipc sound]", m.Permissions)
 	}
 }
 

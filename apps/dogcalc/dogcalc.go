@@ -27,12 +27,12 @@ const padColumns = 4
 // which key was booped.
 const pressAction = "press"
 
-// soundCapability and soundRoute name the optional audio grant and route from
-// the host audio adapter work. The manifest cannot declare a grant the SDK
-// does not yet define, so the bark stays wired but dormant: it plays only if
-// this instance's grant ever reports the capability and the route exists.
+// soundCapability and soundRoute name the optional audio grant and route
+// served by the host audio adapter. The manifest declares the grant, so the
+// bark plays wherever an adapter answers; hosts without one report
+// unsupported and the failed call is swallowed — never a calculator error.
 const (
-	soundCapability = "sound"
+	soundCapability = sdk.CapSound
 	soundRoute      = "sound/play"
 )
 
