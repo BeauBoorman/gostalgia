@@ -278,6 +278,7 @@ const (
 	CapPackageWrite   = sdk.CapPackageWrite
 	CapBackupRead     = sdk.CapBackupRead
 	CapBackupWrite    = sdk.CapBackupWrite
+	CapNotify         = sdk.CapNotify
 	CapAdmin          = "admin"
 )
 

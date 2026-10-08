@@ -48,23 +48,40 @@ func (Event) Type() string { return "svc.state" }
 // stopTimeout bounds a single service's Stop.
 const stopTimeout = 10 * time.Second
 
+// NotificationRecord is a user-facing notification from a service or app.
+type NotificationRecord struct {
+	Title     string    `json:"title"`
+	Message   string    `json:"message"`
+	Level     string    `json:"level"`
+	Source    string    `json:"source"`
+	PID       int32     `json:"pid,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// NotificationSink records user-facing notifications. It is the boundary
+// between core services and the experience-layer notification pipeline.
+type NotificationSink interface {
+	Record(NotificationRecord) bool
+}
+
 // Context carries the runtime wiring to services so they never import the
 // runtime package itself. Fields are populated once, before StartAll.
 type Context struct {
-	Root     string                // environment root directory
-	Version  string                // environment version
-	Config   *config.Store         // system configuration
-	Layered  *config.LayeredStore  // layered configuration store
-	Events   *events.Bus           // event bus
-	Log      *slog.Logger          // runtime logger
-	Router   *ipc.Router           // IPC router (in-proc + socket)
-	VFS      vfs.FS                // environment filesystem
-	Procs    *process.Manager      // process manager
-	Apps     *app.Manager          // application manager
-	Sessions *session.Manager      // session manager
-	Profiles *profile.Manager      // profile manager
-	Tokens   *security.TokenStore  // credential store for IPC authentication
-	Policy   *security.PolicyStore // operator policy store
+	Root          string                // environment root directory
+	Version       string                // environment version
+	Config        *config.Store         // system configuration
+	Layered       *config.LayeredStore  // layered configuration store
+	Events        *events.Bus           // event bus
+	Log           *slog.Logger          // runtime logger
+	Router        *ipc.Router           // IPC router (in-proc + socket)
+	VFS           vfs.FS                // environment filesystem
+	Procs         *process.Manager      // process manager
+	Apps          *app.Manager          // application manager
+	Sessions      *session.Manager      // session manager
+	Profiles      *profile.Manager      // profile manager
+	Tokens        *security.TokenStore  // credential store for IPC authentication
+	Policy        *security.PolicyStore // operator policy store
+	Notifications NotificationSink      // user-facing notification pipeline
 
 	Token    string // Operator IPC auth token (recorded in runtime.json)
 	Endpoint string // IPC endpoint, set by the ipc service once listening
