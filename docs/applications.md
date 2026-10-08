@@ -1613,3 +1613,75 @@ settings, library, and the probed sound story), `toggle` (`{row, step}`),
 `set` (`{bpm?, scale?}`), `play` (returns `{played, notes, duration_ms}` or
 `{played:false, reason}` — the silent path is a state, not an error),
 `save` (`{name}`), `load` (`{id}`), `delete` (`{id}`), and `list`.
+
+## 21. Adventure: a text adventure (`com.gostalgia.adventure`)
+
+`apps/adventure` (display name **Adventure**) is a hand-authored interactive
+fiction, "The Brass Elephant": six rooms around a manor foyer, a verb+noun
+parser, and one honest puzzle chain — light the lamp, brave the flooded
+cellar for the key, unlock the study, pocket the elephant, and leave by the
+front door. It exists to prove the contract can carry a game loop: narrative
+renders as view items, commands arrive through the input field, and
+`look`/`inventory`/`help` are also actions.
+
+```json
+{
+  "id": "com.gostalgia.adventure",
+  "permissions": ["ipc", "fs.read", "fs.write"]
+}
+```
+
+`ipc` covers routes and presentation; `fs.read`/`fs.write` cover the save
+file. There is no path grant: the app touches only
+`/apps/data/com.gostalgia.adventure/`. Denied storage doesn't stop the game
+— the banner reports it, saves report `save failed: ...` on the status
+line, and the next command after the grant lands persists everything.
+
+### The world and the parser
+
+The world is data, not code: `rooms` (name, description, gated exits,
+starting items), `items` (noun aliases, descriptions, a declarative
+`useRule`), `directions`, and `verbs` are tables a designer edits, and
+`validateWorld` checks every cross-reference so a typo is a boot failure,
+not a runtime surprise. Exit gates are conditions on flags and inventory —
+the cellar stairs `If` `lamp_lit` and `Carry` the lamp, and failing that
+gate is `Fatal`; the front door `Goal` ends the game when the elephant is
+carried. `use` rules check room, flag, and carried-item conditions and
+raise flags on success, so one mechanism covers lighting the lamp, reading
+the note, and unlocking the study door by key or by door.
+
+The parser understands one verb plus an optional noun: `go`, `take`,
+`drop`, `look`, `use`, `inventory`, `help`, `restart`, with aliases
+(`get`, `x`, `read`, `unlock`, `i`) and bare directions (`n`, `south`,
+`u`). Fillers like `the`/`at`/`to` are stripped from the noun slot, and
+`pick up lamp` collapses to `take lamp`. Every failure is in-fiction —
+unknown verbs ("You can't..."), absent nouns ("You don't see that here."),
+missing nouns ("Take what?"), overlong input, and empty input all land in
+the transcript, never as IPC errors. The command field and the buttons
+share one dispatch, and every action echoes as a `> verb` line, so
+commands and actions stay in sync.
+
+The transcript is the view: each line is an item, newest at the bottom,
+bounded to the newest 63 with a leading `… N earlier lines` notice item
+rather than silent loss. Stored state keeps a longer 200-line tail. Death
+(`go down` in the dark) and victory (out the door with the elephant)
+render honestly — the title changes, the transcript says so, and the only
+live words are `restart` and `help`.
+
+### Persistence and routes
+
+One document, `/apps/data/com.gostalgia.adventure/save.json`
+(`{version, room, inventory, locations, flags, turns, ended,
+transcript}`), written with atomic `fs/save` after every command and
+flushed again on Stop if a save is still pending. Item locations persist
+only when an item rests somewhere other than home or the inventory.
+Loading repairs before rendering — unknown rooms reset to the foyer,
+unknown items and end states are dropped, an item that is nowhere returns
+home — and the healed copy is written back. A missing file is a fresh
+expedition; a corrupt or wrong-version file is a fresh expedition with an
+honest status note. A relaunch with a live save waits pending: the view
+offers **Continue** and **New game** actions (typed `continue`, `new`, or
+`restart` words make the same choice), and the saved transcript tail stays
+on screen so the player remembers where they were. Programmatic routes
+under `app/com.gostalgia.adventure/`: `state`, `command` (`text` — bad
+input is an in-fiction reply, not an IPC error), `restart`.
