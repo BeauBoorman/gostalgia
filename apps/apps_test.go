@@ -23,6 +23,7 @@ import (
 	"gostalgia/apps/pomodoro"
 	"gostalgia/apps/rss"
 	"gostalgia/apps/settings"
+	"gostalgia/apps/sysmon"
 	"gostalgia/apps/todo"
 	"gostalgia/internal/app"
 	"gostalgia/internal/events"
@@ -66,7 +67,7 @@ func TestSeedManifestsWritesIdempotently(t *testing.T) {
 		t.Fatalf("second SeedManifests (idempotency): %v", err)
 	}
 
-	for _, id := range []string{echo.ID, notes.ID, files.ID, settings.ID, calculator.ID, compendium.ID, dogcalc.ID, petwatch.ID, pomodoro.ID, todo.ID, musictoy.ID, rss.ID, adventure.ID} {
+	for _, id := range []string{echo.ID, notes.ID, files.ID, settings.ID, calculator.ID, compendium.ID, dogcalc.ID, petwatch.ID, pomodoro.ID, todo.ID, musictoy.ID, rss.ID, adventure.ID, sysmon.ID} {
 		data, err := env.ReadFile("/apps/manifests/" + id + ".json")
 		if err != nil {
 			t.Fatalf("seeded manifest readable for %s: %v", id, err)
