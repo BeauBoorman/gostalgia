@@ -31,6 +31,30 @@ func screenData() sdk.View {
 	}
 }
 
+// padData is a version-2 snapshot exercising every new element: a multi-line
+// art block, meters (one out of range for the clamp), and a grid pad with a
+// cell-declared action, a disabled cell, and a datum cell.
+func padData() sdk.View {
+	return sdk.View{
+		Version: 2, Instance: "launch", Title: "Pad", State: sdk.ViewReady,
+		Items:   []sdk.Item{{ID: "one", Label: "One", Detail: "first"}},
+		Fields:  []sdk.Field{{ID: "text", Label: "Text"}},
+		Actions: []sdk.Action{{ID: "adopt", Label: "Adopt"}},
+		Blocks:  []sdk.Block{{ID: "art", Label: "Mascot", Text: "(\\_/)\n(o.o)\n> ^ <"}},
+		Meters: []sdk.Meter{
+			{ID: "charge", Label: "Charge", Value: 0.5},
+			{ID: "hunger", Label: "Hunger", Value: 1.4},
+		},
+		Grid: &sdk.Grid{Label: "Pad", Columns: 2, Cells: []sdk.Cell{
+			{ID: "nw", Label: "NW", Action: "press"},
+			{ID: "ne", Label: "NE", Action: "press"},
+			{ID: "sw", Label: "SW"},
+			{ID: "se", Label: "SE", Disabled: true},
+		}},
+		Status: "waiting",
+	}
+}
+
 func screenStatus() appStatus {
 	var a appStatus
 	a.Manifest.ID, a.Manifest.Name, a.Running, a.PID = "com.test.screen", "Screen", true, 42
@@ -262,5 +286,236 @@ func TestPresentationUsesExplicitThemeAndFocusTokens(t *testing.T) {
 	}
 	if rendered[0] == rendered[1] || ansi.Strip(rendered[0]) != ansi.Strip(rendered[1]) {
 		t.Fatal("app palettes must differ without changing layout")
+	}
+}
+
+func TestPresentationGridNavigationAndCellActions(t *testing.T) {
+	var received sdk.ActionRequest
+	m := New(context.Background(), callerFunc(func(ctx context.Context, method string, params, out any) error {
+		v := padData()
+		if strings.HasSuffix(method, "/action") {
+			received = params.(sdk.ActionRequest)
+			v.Status = "pressed " + received.CellID
+		}
+		return writeJSON(out, v)
+	}), nil)
+	m.openView(screenStatus())
+	epoch := m.presentation.epoch
+	m.Update(viewMsg{epoch: epoch, data: padData()})
+	v := m.presentation
+	if v.version != 2 {
+		t.Fatalf("negotiated version = %d, want 2", v.version)
+	}
+	// The grid is the last tab stop: field, action, then grid.
+	m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if !v.gridFocused() {
+		t.Fatal("tab ring did not reach the grid stop")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if v.cell != 1 {
+		t.Fatalf("cell = %d, want 1", v.cell)
+	}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("cell enter did not dispatch its action")
+	}
+	m.Update(cmd())
+	if received.Action != "press" || received.CellID != "ne" || received.Version != 2 ||
+		received.Instance != "launch" || received.RequestID == "" {
+		t.Fatalf("cell action routing: %+v", received)
+	}
+	// Down lands on the disabled SE cell; activation is a no-op.
+	m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd != nil {
+		t.Fatal("disabled cell dispatched an action")
+	}
+	// Left lands on the datum cell (no action); activation is a no-op.
+	m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}); cmd != nil {
+		t.Fatal("datum cell dispatched an action")
+	}
+	// Up clamps back to NW rather than wrapping.
+	m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if v.cell != 0 {
+		t.Fatalf("cell = %d after clamping, want 0", v.cell)
+	}
+	// A list action rides along with the selected cell_id and item_id.
+	m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if v.gridFocused() {
+		t.Fatal("shift+tab stayed on the grid")
+	}
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("focused action did not dispatch")
+	}
+	m.Update(cmd())
+	if received.Action != "adopt" || received.CellID != "nw" || received.ItemID != "one" {
+		t.Fatalf("list action lost selection: %+v", received)
+	}
+	// Refresh preserves grid focus and selection by ID.
+	v.focus = len(v.data.Fields) + len(v.data.Actions)
+	v.cell = 3
+	data := padData()
+	data.Grid.Cells[0], data.Grid.Cells[3] = data.Grid.Cells[3], data.Grid.Cells[0]
+	m.applyView(data)
+	if !v.gridFocused() || v.data.Grid.Cells[v.cell].ID != "se" {
+		t.Fatalf("refresh lost grid focus/selection: focus=%d cell=%d", v.focus, v.cell)
+	}
+	// After the swap the disabled se cell sits at index 0; a list action must
+	// not attach its cell_id, which the SDK would reject as meaningless input.
+	v.cell = 0
+	m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("list action did not dispatch with a disabled cell selected")
+	}
+	m.Update(cmd())
+	if received.Action != "adopt" || received.CellID != "" {
+		t.Fatalf("disabled cell leaked cell_id into a list action: %+v", received)
+	}
+}
+
+func TestPresentationVersionNegotiationFallback(t *testing.T) {
+	var requested []int
+	m := New(context.Background(), callerFunc(func(ctx context.Context, method string, params, out any) error {
+		if strings.HasSuffix(method, "/view") {
+			p := params.(sdk.ViewRequest)
+			requested = append(requested, p.Version)
+			if p.Version > 1 {
+				return errors.New("presentation: unsupported version 2")
+			}
+		}
+		return writeJSON(out, screenData())
+	}), nil)
+	batch := m.openView(screenStatus())().(tea.BatchMsg)
+	m.Update(batch[0]())
+	if v := m.presentation; v == nil || v.version != 1 {
+		t.Fatalf("negotiated version = %+v", m.presentation)
+	}
+	if len(requested) != 2 || requested[0] != 2 || requested[1] != 1 {
+		t.Fatalf("negotiation requests = %v, want [2 1]", requested)
+	}
+	// A version-2 app answers at 2 without a fallback request.
+	m2 := New(context.Background(), callerFunc(func(ctx context.Context, method string, params, out any) error {
+		return writeJSON(out, padData())
+	}), nil)
+	batch = m2.openView(screenStatus())().(tea.BatchMsg)
+	m2.Update(batch[0]())
+	if v := m2.presentation; v == nil || v.version != 2 || v.data.Grid == nil {
+		t.Fatalf("version-2 negotiation: %+v", m2.presentation)
+	}
+}
+
+func TestPresentationRenegotiatesAfterFailedOpen(t *testing.T) {
+	var requested []int
+	failV1 := true
+	m := New(context.Background(), callerFunc(func(ctx context.Context, method string, params, out any) error {
+		switch {
+		case method == "app/list":
+			return writeJSON(out, []appStatus{screenStatus()})
+		case strings.HasSuffix(method, "/view"):
+			p := params.(sdk.ViewRequest)
+			requested = append(requested, p.Version)
+			if p.Version > 1 {
+				return errors.New("presentation: unsupported version 2")
+			}
+			if failV1 {
+				failV1 = false
+				return errors.New("i/o timeout")
+			}
+		}
+		return writeJSON(out, screenData())
+	}), nil)
+	batch := m.openView(screenStatus())().(tea.BatchMsg)
+	m.Update(batch[0]())
+	v := m.presentation
+	if v == nil || v.instance != "" || v.data.State != sdk.ViewError {
+		t.Fatalf("open failure did not leave an unnegotiated error view: %+v", v)
+	}
+	// The poll renegotiates instead of hammering a version-1 app at version 2
+	// forever; the stamped version is adopted on recovery.
+	m.Update(m.checkView()())
+	if v.instance != "launch" || v.version != 1 || v.data.State != sdk.ViewReady {
+		t.Fatalf("renegotiation did not recover: %+v", v)
+	}
+	if len(requested) != 4 || requested[0] != 2 || requested[1] != 1 || requested[2] != 2 || requested[3] != 1 {
+		t.Fatalf("negotiation requests = %v, want [2 1 2 1]", requested)
+	}
+}
+
+func TestPresentationRejectsNewerStampedVersion(t *testing.T) {
+	m := New(context.Background(), callerFunc(func(ctx context.Context, method string, params, out any) error {
+		if method == "app/list" {
+			return writeJSON(out, []appStatus{screenStatus()})
+		}
+		return writeJSON(out, padData()) // always stamps version 2
+	}), nil)
+	m.openView(screenStatus())
+	v := m.presentation
+	// A v1-negotiated session must refuse a v2-stamped reply: a raw-IPC app
+	// cannot serve elements the shell never asked for.
+	v.instance, v.version = "launch", 1
+	m.Update(m.checkView()())
+	if v.banner == "" || v.data.Grid != nil {
+		t.Fatalf("newer-stamped snapshot adopted: banner=%q grid=%v", v.banner, v.data.Grid)
+	}
+}
+
+func TestFetchViewStepsDownAndRejectsNewerStamp(t *testing.T) {
+	var requested []int
+	client := callerFunc(func(ctx context.Context, method string, params, out any) error {
+		p := params.(sdk.ViewRequest)
+		requested = append(requested, p.Version)
+		if p.Version > 2 {
+			return errors.New("presentation: unsupported version 3")
+		}
+		return writeJSON(out, padData())
+	})
+	data, version, err := fetchView(context.Background(), client, "com.test.screen", 3)
+	if err != nil || version != 2 || data.Version != 2 {
+		t.Fatalf("fetchView = %v, %d, %v", data, version, err)
+	}
+	if len(requested) != 2 || requested[0] != 3 || requested[1] != 2 {
+		t.Fatalf("step-down requests = %v, want [3 2]", requested)
+	}
+	// A reply stamped newer than requested is refused outright.
+	_, _, err = fetchView(context.Background(), client, "com.test.screen", 1)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("newer stamp accepted: %v", err)
+	}
+}
+
+func TestPresentationV2ElementsStayInBounds(t *testing.T) {
+	m := New(context.Background(), noopCaller{}, nil)
+	m.openView(screenStatus())
+	epoch := m.presentation.epoch
+	data := padData()
+	// Wide-but-valid art: 32 full-width lines sit inside the line/byte budget,
+	// and the contract itself must accept them before the renderer clips.
+	data.Blocks[0].Text = strings.Repeat("界"+strings.Repeat("=", 200)+"\n", 32)
+	data.Grid.Label += "\x1b[31m\r"
+	if err := data.Validate(); err != nil {
+		t.Fatalf("oversized-but-legal art rejected: %v", err)
+	}
+	// What the renderer cannot host, the contract rejects.
+	for _, text := range []string{strings.Repeat("x\n", 33), strings.Repeat("x", 16385)} {
+		bad := padData()
+		bad.Blocks[0].Text = text
+		if err := bad.Validate(); err == nil {
+			t.Fatalf("contract accepted a block of %d bytes", len(text))
+		}
+	}
+	m.Update(viewMsg{epoch: epoch, data: data})
+	for _, size := range [][2]int{{80, 24}, {30, 10}, {120, 40}} {
+		m.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		view := m.View()
+		if strings.Contains(view, "\a") || strings.Contains(view, "\r") {
+			t.Fatal("version-2 elements leaked terminal controls")
+		}
+		if lipgloss.Width(view) > size[0] || lipgloss.Height(view) > size[1] {
+			t.Fatalf("version-2 view escaped %dx%d bounds", size[0], size[1])
+		}
 	}
 }

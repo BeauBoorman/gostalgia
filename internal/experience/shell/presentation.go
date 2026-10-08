@@ -3,6 +3,7 @@ package shell
 import (
 	"context"
 	"crypto/rand"
+	"fmt"
 	"strings"
 	"time"
 
@@ -15,14 +16,17 @@ import (
 
 // appView is shell-owned state. No app supplies a tea.Model, keymap, style, or
 // terminal handle. Epoch/sequence guards reject replies after dismissal,
-// cancellation, or a later operation.
+// cancellation, or a later operation. version is the negotiated presentation
+// protocol; cell is the selected grid cell when a version-2 grid exists.
 type appView struct {
 	id, instance string
 	pid          int32
 	epoch, seq   uint64
+	version      int
 	data         sdk.View
 	values       map[string]string
 	focus, item  int
+	cell         int
 	itemFocus    bool
 	busy         bool
 	request      string
@@ -32,6 +36,7 @@ type appView struct {
 
 type viewMsg struct {
 	epoch, seq uint64
+	version    int
 	data       sdk.View
 	err        error
 	action     bool
@@ -42,15 +47,43 @@ type viewCheckMsg struct {
 	epoch, seq uint64
 	apps       []appStatus
 	data       *sdk.View
+	version    int
 	err        error
 	viewErr    error
 }
 type viewCancelMsg struct{ err error }
 
+// fetchView requests a snapshot at the newest version the shell supports and
+// steps down one version at a time while the app reports an unsupported
+// version, so an app speaking only an older contract keeps rendering and a
+// future newer shell does not strand mid-version apps at the oldest contract.
+// The fallback matches error text because the protocol has no structured
+// unsupported-version error; keep the message check this narrow. The stamped
+// snapshot version is the negotiated version callers reuse on action and
+// cancel requests. A reply stamped newer than requested is rejected: an app
+// speaking raw IPC must not serve elements the shell never asked for.
+func fetchView(ctx context.Context, client Caller, id string, version int) (sdk.View, int, error) {
+	var data sdk.View
+	for {
+		err := client.Call(ctx, "app/"+id+"/view", sdk.ViewRequest{Version: version}, &data)
+		if err != nil {
+			if version > sdk.MinPresentationVersion && strings.Contains(err.Error(), "unsupported version") {
+				version--
+				continue
+			}
+			return data, data.Version, err
+		}
+		if data.Version > version {
+			return data, data.Version, fmt.Errorf("presentation: view stamped version %d exceeds requested %d", data.Version, version)
+		}
+		return data, data.Version, data.Validate()
+	}
+}
+
 func (m *Model) openView(a appStatus) tea.Cmd {
 	m.viewEpoch++
 	v := &appView{
-		id: a.Manifest.ID, pid: a.PID, epoch: m.viewEpoch,
+		id: a.Manifest.ID, pid: a.PID, epoch: m.viewEpoch, version: sdk.PresentationVersion,
 		data:   sdk.View{Title: a.Manifest.Name, State: sdk.ViewLoading},
 		values: make(map[string]string),
 	}
@@ -59,12 +92,8 @@ func (m *Model) openView(a appStatus) tea.Cmd {
 	return tea.Batch(func() tea.Msg {
 		ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		var data sdk.View
-		err := client.Call(ctx, "app/"+id+"/view", sdk.ViewRequest{Version: sdk.PresentationVersion}, &data)
-		if err == nil {
-			err = data.Validate()
-		}
-		return viewMsg{epoch: epoch, data: data, err: err}
+		data, version, err := fetchView(ctx, client, id, sdk.PresentationVersion)
+		return viewMsg{epoch: epoch, version: version, data: data, err: err}
 	}, viewTick(epoch))
 }
 
@@ -90,7 +119,7 @@ func (m *Model) cancelViewAction(v *appView) tea.Cmd {
 	v.busy = false
 	v.seq++
 	v.banner = "Canceled. Work already committed cannot be undone."
-	params := sdk.CancelRequest{Version: sdk.PresentationVersion, Instance: v.instance, RequestID: v.request}
+	params := sdk.CancelRequest{Version: v.version, Instance: v.instance, RequestID: v.request}
 	ctx, client, id := context.WithoutCancel(m.ctx), m.client, v.id
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -102,7 +131,8 @@ func (m *Model) cancelViewAction(v *appView) tea.Cmd {
 
 func (m *Model) checkView() tea.Cmd {
 	v := m.presentation
-	epoch, seq, id, pid, busy := v.epoch, v.seq, v.id, v.pid, v.busy
+	epoch, seq, id, pid, busy, version := v.epoch, v.seq, v.id, v.pid, v.busy, v.version
+	negotiated := v.instance != ""
 	ctx, client := m.ctx, m.client
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -112,12 +142,26 @@ func (m *Model) checkView() tea.Cmd {
 		if msg.err == nil && !busy {
 			for _, a := range msg.apps {
 				if a.Manifest.ID == id && a.Running && a.PID == pid {
-					var data sdk.View
-					msg.viewErr = client.Call(ctx, "app/"+id+"/view", sdk.ViewRequest{Version: sdk.PresentationVersion}, &data)
-					if msg.viewErr == nil {
-						msg.viewErr = data.Validate()
+					if !negotiated {
+						// The open fetch failed before negotiation finished, so
+						// renegotiate instead of polling at a version the app
+						// may not speak.
+						var data sdk.View
+						data, msg.version, msg.viewErr = fetchView(ctx, client, id, sdk.PresentationVersion)
 						if msg.viewErr == nil {
 							msg.data = &data
+						}
+					} else {
+						var data sdk.View
+						msg.viewErr = client.Call(ctx, "app/"+id+"/view", sdk.ViewRequest{Version: version}, &data)
+						if msg.viewErr == nil {
+							msg.viewErr = data.Validate()
+						}
+						if msg.viewErr == nil && data.Version > version {
+							msg.viewErr = fmt.Errorf("presentation: view stamped version %d exceeds requested %d", data.Version, version)
+						}
+						if msg.viewErr == nil {
+							msg.data, msg.version = &data, data.Version
 						}
 					}
 					break
@@ -133,7 +177,7 @@ func (m *Model) applyView(data sdk.View) bool {
 	if v.instance != "" && v.instance != data.Instance {
 		return false
 	}
-	var itemID, fieldID, actionID string
+	var itemID, fieldID, actionID, cellID string
 	if v.item < len(v.data.Items) {
 		itemID = v.data.Items[v.item].ID
 	}
@@ -142,8 +186,12 @@ func (m *Model) applyView(data sdk.View) bool {
 	} else if index := v.focus - len(v.data.Fields); index < len(v.data.Actions) {
 		actionID = v.data.Actions[index].ID
 	}
+	if v.data.Grid != nil && v.cell < len(v.data.Grid.Cells) {
+		cellID = v.data.Grid.Cells[v.cell].ID
+	}
+	wasGrid := v.gridFocused()
 	v.instance, v.data = data.Instance, data
-	v.focus, v.item = 0, 0
+	v.focus, v.item, v.cell = 0, 0, 0
 	fields := make(map[string]string)
 	for i, f := range data.Fields {
 		value, exists := v.values[f.ID]
@@ -164,6 +212,17 @@ func (m *Model) applyView(data sdk.View) bool {
 		if item.ID == itemID {
 			v.item = i
 		}
+	}
+	if data.Grid != nil {
+		for i, c := range data.Grid.Cells {
+			if c.ID == cellID {
+				v.cell = i
+				break
+			}
+		}
+	}
+	if wasGrid && v.grid() != nil {
+		v.focus = len(data.Fields) + len(data.Actions)
 	}
 	v.values = fields
 	return true
@@ -188,10 +247,15 @@ func (m *Model) updatePresentation(msg tea.Msg) tea.Cmd {
 			if v.instance == "" {
 				v.data.State = sdk.ViewError
 			}
-		} else if !m.applyView(msg.data) {
-			m.append(entry{"App instance changed; view closed.", "error"})
-			return m.dismissView()
 		} else {
+			v.version = msg.version
+			if v.version == 0 {
+				v.version = msg.data.Version
+			}
+			if !m.applyView(msg.data) {
+				m.append(entry{"App instance changed; view closed.", "error"})
+				return m.dismissView()
+			}
 			v.banner = ""
 		}
 		if msg.action && v.id == "com.gostalgia.settings" {
@@ -221,9 +285,14 @@ func (m *Model) updatePresentation(msg tea.Msg) tea.Cmd {
 		if msg.seq == v.seq && msg.viewErr != nil {
 			v.banner = safe(msg.viewErr.Error())
 		}
-		if msg.seq == v.seq && msg.data != nil && !m.applyView(*msg.data) {
-			m.append(entry{"App instance changed; view closed.", "error"})
-			return m.dismissView()
+		if msg.seq == v.seq && msg.data != nil {
+			if msg.version != 0 {
+				v.version = msg.version
+			}
+			if !m.applyView(*msg.data) {
+				m.append(entry{"App instance changed; view closed.", "error"})
+				return m.dismissView()
+			}
 		}
 		return viewTick(v.epoch)
 	case viewCancelMsg:
@@ -232,6 +301,83 @@ func (m *Model) updatePresentation(msg tea.Msg) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+// gridFocused reports whether the tab ring rests on the grid stop. The grid is
+// always the last focusable element, after fields and actions.
+func (v *appView) grid() *sdk.Grid {
+	if g := v.data.Grid; g != nil && len(g.Cells) > 0 {
+		return g
+	}
+	return nil
+}
+
+func (v *appView) gridFocused() bool {
+	return v.grid() != nil && v.focus == len(v.data.Fields)+len(v.data.Actions)
+}
+
+// topActionDisabled reports whether a same-named top-level action is
+// disabled; cell and list actions share one namespace, so the flag vetoes a
+// cell's declaration too (the SDK enforces the same rule).
+func (v *appView) topActionDisabled(id string) bool {
+	for _, a := range v.data.Actions {
+		if a.ID == id {
+			return a.Disabled
+		}
+	}
+	return false
+}
+
+// moveCell walks the selection clamped to row/column edges; a short final row
+// lands on its last cell.
+func (v *appView) moveCell(dcol, drow int) {
+	g := v.grid()
+	if g == nil {
+		return
+	}
+	cols := g.Columns
+	rows := (len(g.Cells) + cols - 1) / cols
+	col := min(cols-1, max(0, v.cell%cols+dcol))
+	row := min(rows-1, max(0, v.cell/cols+drow))
+	v.cell = min(len(g.Cells)-1, row*cols+col)
+}
+
+// viewRun dispatches a semantic action for the focused action or cell. Callers
+// set Action, CellID, and ItemID; the request picks up the negotiated version,
+// instance, a bounded request ID, and current field values.
+func (m *Model) viewRun(p sdk.ActionRequest) tea.Cmd {
+	v := m.presentation
+	p.Version, p.Instance = v.version, v.instance
+	p.RequestID = "r" + strings.ToLower(rand.Text())
+	p.Values = make(map[string]string, len(v.values))
+	for id, value := range v.values {
+		p.Values[id] = value
+	}
+	v.seq++
+	v.request, v.busy, v.banner = p.RequestID, true, ""
+	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+	v.cancel = cancel
+	epoch, seq, id, client := v.epoch, v.seq, v.id, m.client
+	return func() tea.Msg {
+		defer cancel()
+		var data sdk.View
+		err := client.Call(ctx, "app/"+id+"/action", p, &data)
+		if err == nil {
+			err = data.Validate()
+			if err == nil && data.Version > p.Version {
+				err = fmt.Errorf("presentation: view stamped version %d exceeds requested %d", data.Version, p.Version)
+			}
+		} else {
+			// A timeout/disconnect of the local wait is not server-side
+			// cancellation. Best-effort cancel using a fresh deadline.
+			cancelCtx, stop := context.WithTimeout(context.WithoutCancel(m.ctx), 2*time.Second)
+			_ = client.Call(cancelCtx, "app/"+id+"/cancel", sdk.CancelRequest{
+				Version: p.Version, Instance: p.Instance, RequestID: p.RequestID,
+			}, nil)
+			stop()
+		}
+		return viewMsg{epoch: epoch, seq: seq, version: p.Version, data: data, err: err, action: true}
+	}
 }
 
 func (m *Model) viewKey(key tea.KeyMsg) tea.Cmd {
@@ -247,6 +393,9 @@ func (m *Model) viewKey(key tea.KeyMsg) tea.Cmd {
 	}
 	fields, actions := v.data.Fields, v.data.Actions
 	total := len(fields) + len(actions)
+	if v.grid() != nil {
+		total++
+	}
 	switch key.String() {
 	case "tab", "shift+tab":
 		v.itemFocus, m.scroll = false, 0
@@ -258,52 +407,59 @@ func (m *Model) viewKey(key tea.KeyMsg) tea.Cmd {
 			v.focus = (v.focus + delta) % total
 		}
 	case "up":
-		v.itemFocus, m.scroll = true, 0
-		v.item = max(0, v.item-1)
+		if v.gridFocused() {
+			v.moveCell(0, -1)
+		} else {
+			v.itemFocus = true
+			v.item = max(0, v.item-1)
+		}
+		m.scroll = 0
 	case "down":
-		v.itemFocus, m.scroll = true, 0
-		v.item = min(max(0, len(v.data.Items)-1), v.item+1)
+		if v.gridFocused() {
+			v.moveCell(0, 1)
+		} else {
+			v.itemFocus = true
+			v.item = min(max(0, len(v.data.Items)-1), v.item+1)
+		}
+		m.scroll = 0
+	case "left":
+		if v.gridFocused() {
+			v.moveCell(-1, 0)
+			m.scroll = 0
+		}
+	case "right":
+		if v.gridFocused() {
+			v.moveCell(1, 0)
+			m.scroll = 0
+		}
 	case "enter":
+		if v.data.State == sdk.ViewLoading {
+			return nil
+		}
+		if v.gridFocused() {
+			c := v.grid().Cells[v.cell]
+			if c.Disabled || c.Action == "" || v.topActionDisabled(c.Action) {
+				return nil
+			}
+			return m.viewRun(sdk.ActionRequest{Action: c.Action, CellID: c.ID})
+		}
 		index := v.focus - len(fields)
 		if index < 0 {
 			index = 0
 		}
-		if index >= len(actions) || actions[index].Disabled || v.data.State == sdk.ViewLoading {
+		if index >= len(actions) || actions[index].Disabled {
 			return nil
 		}
-		values := make(map[string]string)
-		for id, value := range v.values {
-			values[id] = value
-		}
-		p := sdk.ActionRequest{
-			Version: sdk.PresentationVersion, Instance: v.instance,
-			RequestID: "r" + strings.ToLower(rand.Text()), Action: actions[index].ID, Values: values,
-		}
+		p := sdk.ActionRequest{Action: actions[index].ID}
 		if len(v.data.Items) > 0 {
 			p.ItemID = v.data.Items[v.item].ID
 		}
-		v.seq++
-		v.request, v.busy, v.banner = p.RequestID, true, ""
-		ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
-		v.cancel = cancel
-		epoch, seq, id, client := v.epoch, v.seq, v.id, m.client
-		return func() tea.Msg {
-			defer cancel()
-			var data sdk.View
-			err := client.Call(ctx, "app/"+id+"/action", p, &data)
-			if err == nil {
-				err = data.Validate()
-			} else {
-				// A timeout/disconnect of the local wait is not server-side
-				// cancellation. Best-effort cancel using a fresh deadline.
-				cancelCtx, stop := context.WithTimeout(context.WithoutCancel(m.ctx), 2*time.Second)
-				_ = client.Call(cancelCtx, "app/"+id+"/cancel", sdk.CancelRequest{
-					Version: p.Version, Instance: p.Instance, RequestID: p.RequestID,
-				}, nil)
-				stop()
-			}
-			return viewMsg{epoch: epoch, seq: seq, data: data, err: err, action: true}
+		// A disabled cell's id is meaningless input the SDK rejects; omit it
+		// so list actions keep working while one is selected.
+		if g := v.grid(); g != nil && !g.Cells[v.cell].Disabled {
+			p.CellID = g.Cells[v.cell].ID
 		}
+		return m.viewRun(p)
 	default:
 		if v.focus >= len(fields) {
 			return nil
@@ -336,7 +492,11 @@ func viewText(s string) string { return strings.ReplaceAll(safe(s), "\n", " ") }
 
 func (m *Model) viewLines(height int) []string {
 	v := m.presentation
-	lines := []string{m.kit.Heading(viewText(v.data.Title)), m.kit.Muted("Tab focus · Enter action · ↑↓ item · Esc cancel/back")}
+	hints := "Tab focus · Enter action · ↑↓ item · Esc cancel/back"
+	if v.grid() != nil {
+		hints = "Tab focus · Enter action · ↑↓ item · ←→↑↓ grid · Esc cancel/back"
+	}
+	lines := []string{m.kit.Heading(viewText(v.data.Title)), m.kit.Muted(hints)}
 	if v.busy || v.data.State == sdk.ViewLoading {
 		lines = append(lines, m.kit.Badge("Loading…", theme.Busy, max(0, m.width-4)))
 	}
@@ -347,6 +507,20 @@ func (m *Model) viewLines(height int) []string {
 		lines = append(lines, m.kit.StatusText(viewText(v.data.Error), theme.Error))
 	}
 	var rows []string
+	for _, block := range v.data.Blocks {
+		if block.Label != "" {
+			rows = append(rows, m.kit.Muted(viewText(block.Label)))
+		}
+		for _, line := range strings.Split(safe(block.Text), "\n") {
+			rows = append(rows, m.kit.Text(line))
+		}
+	}
+	for _, meter := range v.data.Meters {
+		rows = append(rows, m.kit.Progress(ui.Progress{
+			Label: meter.Label, Value: meter.Value,
+		}, max(1, m.width-8)))
+	}
+	itemBase := len(rows)
 	for i, item := range v.data.Items {
 		text := viewText(item.Label + ": " + item.Detail)
 		if i == v.item {
@@ -356,6 +530,7 @@ func (m *Model) viewLines(height int) []string {
 		}
 		rows = append(rows, text)
 	}
+	formBase := len(rows)
 	for i, field := range v.data.Fields {
 		label := viewText(field.Label) + ": "
 		value := viewText(v.values[field.ID])
@@ -380,10 +555,54 @@ func (m *Model) viewLines(height int) []string {
 		}
 		rows = append(rows, text)
 	}
+	gridBase, gridRow := -1, 0
+	if g := v.grid(); g != nil {
+		if g.Label != "" {
+			rows = append(rows, m.kit.Muted(viewText(g.Label)))
+		}
+		gridBase, gridRow = len(rows), v.cell/g.Columns
+		focused := v.gridFocused()
+		for row := 0; row*g.Columns < len(g.Cells); row++ {
+			var cells []string
+			for col := 0; col < g.Columns; col++ {
+				i := row*g.Columns + col
+				if i >= len(g.Cells) {
+					break
+				}
+				c := g.Cells[i]
+				text := "[" + viewText(c.Label) + "]"
+				switch {
+				case c.Disabled:
+					text += " (disabled)"
+					if i == v.cell {
+						// Keep the cursor visible on a disabled cell: theme
+						// marker plus the dimmed label.
+						text = m.kit.StatusText(m.kit.Theme().Focus.Marker+" "+text, theme.Disabled)
+					} else {
+						text = m.kit.StatusText(text, theme.Disabled)
+					}
+				case focused && i == v.cell:
+					text = m.kit.FocusText(text)
+				case i == v.cell:
+					// Selection has no fill in plain/monochrome; the theme
+					// marker keeps the selected cell visible, matching item
+					// selection.
+					text = m.kit.Text(m.kit.Theme().Focus.Marker + " " + text)
+				default:
+					text = m.kit.Text(text)
+				}
+				cells = append(cells, text)
+			}
+			rows = append(rows, strings.Join(cells, " "))
+		}
+	}
 	visible := max(1, height-len(lines)-1)
-	focus := len(v.data.Items) + v.focus
-	if v.itemFocus {
-		focus = v.item
+	focus := formBase + v.focus
+	switch {
+	case v.itemFocus:
+		focus = itemBase + v.item
+	case gridBase >= 0 && v.gridFocused():
+		focus = gridBase + gridRow
 	}
 	start := max(0, min(focus-visible+1, max(0, len(rows)-visible))-m.scroll)
 	lines = append(lines, rows[start:min(len(rows), start+visible)]...)

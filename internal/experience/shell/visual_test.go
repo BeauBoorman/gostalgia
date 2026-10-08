@@ -87,6 +87,91 @@ func TestShellVisualSnapshots(t *testing.T) {
 	}
 }
 
+// TestPresentationV2Snapshots pins the version-2 elements across theme
+// vocabularies and a small screen: ASCII-only monochrome, high-contrast
+// markers, and honest clipping when the pad doesn't fit.
+func TestPresentationV2Snapshots(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		theme         theme.Theme
+		width, height int
+		mutate        func(*sdk.View)
+		setup         func(*appView)
+		want          string
+	}{
+		{"app-v2", theme.Nostalgia(), 80, 24, nil, nil, ""},
+		{"app-v2-monochrome", theme.Monochrome(), 80, 24, nil, nil, ""},
+		{"app-v2-highcontrast", theme.HighContrast(), 80, 24, nil, nil, ""},
+		{"app-v2-small", theme.Nostalgia(), 30, 10, nil, nil, ""},
+		// An unfocused grid keeps a theme marker on the selected cell.
+		{"app-v2-mono-unfocused", theme.Monochrome(), 80, 24, nil,
+			func(v *appView) { v.focus = 1 }, "> [NE]"},
+		// A focused cursor on a disabled cell stays visible: marker + dimmed.
+		{"app-v2-mono-disabled-cell", theme.Monochrome(), 80, 24, nil,
+			func(v *appView) { v.cell = 3 }, "> [SE] (disabled)"},
+		// Art wider than the viewport clips honestly with an ellipsis.
+		{"app-v2-clip", theme.Monochrome(), 40, 24, func(v *sdk.View) {
+			v.Blocks[0].Text = strings.Repeat("=", 60) + "\n" + v.Blocks[0].Text
+		}, nil, "=====…"},
+		// A focused grid keeps its selection marker on a small screen.
+		{"app-v2-grid-small", theme.Nostalgia(), 40, 18, nil, nil, "› [NE]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewWithTheme(context.Background(), noopCaller{}, nil, tc.theme, ui.Plain)
+			m.Update(tea.WindowSizeMsg{Width: tc.width, Height: tc.height})
+			data := padData()
+			if tc.mutate != nil {
+				tc.mutate(&data)
+			}
+			v := &appView{
+				data: data, instance: "launch", version: 2,
+				values: map[string]string{"text": "draft"}, focus: 2, cell: 1,
+			}
+			if tc.setup != nil {
+				tc.setup(v)
+			}
+			m.presentation = v
+			rendered := strings.Split(m.View(), "\n")
+			for i := range rendered {
+				rendered[i] = strings.TrimRight(rendered[i], " ")
+			}
+			got := strings.Join(rendered, "\n") + "\n"
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Fatalf("%s lacks %q:\n%s", tc.name, tc.want, got)
+			}
+			path := filepath.Join("testdata", tc.name+".golden")
+			if *updateVisual {
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != string(want) {
+				t.Fatalf("version-2 visual snapshot changed:\n%s", got)
+			}
+		})
+	}
+	// Themes change color, not layout: ANSI-stripped output must be identical.
+	var stripped []string
+	for _, th := range []theme.Theme{theme.Nostalgia(), theme.Midnight()} {
+		m := NewWithTheme(context.Background(), noopCaller{}, nil, th, ui.TrueColor)
+		m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+		m.presentation = &appView{
+			data: padData(), instance: "launch", version: 2, values: map[string]string{"text": "draft"},
+		}
+		stripped = append(stripped, ansi.Strip(m.View()))
+	}
+	if stripped[0] != stripped[1] {
+		t.Fatal("theme selection changed version-2 layout")
+	}
+}
+
 func TestShellExplicitThemeAndViewport(t *testing.T) {
 	for _, mode := range []ui.ColorMode{ui.Plain, ui.ANSI256, ui.TrueColor} {
 		warm := NewWithTheme(context.Background(), noopCaller{}, nil, theme.Nostalgia(), mode)

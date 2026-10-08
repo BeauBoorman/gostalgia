@@ -130,6 +130,28 @@ only terminal owner; apps provide SDK data, not Charm views. Existing app
 snapshot/lifecycle polling is functional refresh, not decorative animation.
 Dialogs and progress are reusable building blocks, not new shell commands.
 
+Version 2 of the contract (#115) adds three bounded elements rendered from the
+same kit, never app-supplied widgets:
+
+- **Blocks** are sanitized preformatted text regions (captions optional). Lines
+  render verbatim in order and clip at the viewport edge rather than wrapping,
+  so fixed-width art stays honest on small screens.
+- **Meters** draw the `Progress` component in the theme's vocabulary — `━`/`·`
+  in nostalgia and midnight, ASCII `#`/`-` in monochrome, `━`/`─` in
+  high-contrast — with the fraction clamped to [0,1].
+- **Grids** are row-major pads of selectable cells and the last stop on the
+  Tab/Shift-Tab focus ring. Arrow keys move the cell selection (clamped at
+  edges); Enter invokes the focused cell's declared action as a semantic
+  `cell_id` request. Disabled cells dim like disabled actions and never
+  activate. Theme focus markers (`›`, `»`, `>`) highlight the selected cell.
+
+The shell chrome for all three — panel borders, focus markers, and the gauge
+vocabulary — degrades to ASCII in monochrome and clips without overflow at
+every viewport. App-supplied block text is sanitized but rendered verbatim, so
+monochrome only guarantees the shell's own chrome is ASCII, not app content;
+apps targeting monochrome terminals should keep their block text to ASCII.
+Golden snapshots pin the elements per theme.
+
 ## Navigation, home screen, and command palette
 
 Issue #23 expands the shell into a cohesive navigation environment comprising
