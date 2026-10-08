@@ -7,6 +7,7 @@ import (
 
 	"gostalgia/apps/calculator"
 	"gostalgia/apps/compendium"
+	"gostalgia/apps/dogcalc"
 	"gostalgia/apps/echo"
 	"gostalgia/apps/files"
 	"gostalgia/apps/notes"
@@ -40,6 +41,9 @@ func Register(r Registrar) error {
 	if err := r.RegisterBuiltin(compendium.Manifest(), compendium.Factory); err != nil {
 		return fmt.Errorf("apps: register %s: %w", compendium.ID, err)
 	}
+	if err := r.RegisterBuiltin(dogcalc.Manifest(), dogcalc.Factory); err != nil {
+		return fmt.Errorf("apps: register %s: %w", dogcalc.ID, err)
+	}
 	if err := r.RegisterBuiltin(petwatch.Manifest(), petwatch.Factory); err != nil {
 		return fmt.Errorf("apps: register %s: %w", petwatch.ID, err)
 	}
@@ -48,5 +52,5 @@ func Register(r Registrar) error {
 
 // Manifests returns fresh builtin declarations, without filesystem access.
 func Manifests() []sdk.Manifest {
-	return []sdk.Manifest{echo.Manifest(), notes.Manifest(), files.Manifest(), settings.Manifest(), calculator.Manifest(), compendium.Manifest(), petwatch.Manifest()}
+	return []sdk.Manifest{echo.Manifest(), notes.Manifest(), files.Manifest(), settings.Manifest(), calculator.Manifest(), compendium.Manifest(), dogcalc.Manifest(), petwatch.Manifest()}
 }
