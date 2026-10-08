@@ -1,0 +1,8 @@
+{
+  "id": "com.gostalgia.adventure",
+  "name": "Adventure",
+  "version": "0.1.0",
+  "entrypoint": "adventure",
+  "permissions": ["ipc", "fs.read", "fs.write"],
+  "description": "A compact hand-authored text adventure: rooms, exits, items, and a verb+noun parser proving the contract can carry a game loop."
+}
