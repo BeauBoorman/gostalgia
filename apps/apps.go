@@ -13,6 +13,7 @@ import (
 	"gostalgia/apps/notes"
 	"gostalgia/apps/petwatch"
 	"gostalgia/apps/settings"
+	"gostalgia/apps/todo"
 	"gostalgia/sdk"
 )
 
@@ -47,10 +48,13 @@ func Register(r Registrar) error {
 	if err := r.RegisterBuiltin(petwatch.Manifest(), petwatch.Factory); err != nil {
 		return fmt.Errorf("apps: register %s: %w", petwatch.ID, err)
 	}
+	if err := r.RegisterBuiltin(todo.Manifest(), todo.Factory); err != nil {
+		return fmt.Errorf("apps: register %s: %w", todo.ID, err)
+	}
 	return nil
 }
 
 // Manifests returns fresh builtin declarations, without filesystem access.
 func Manifests() []sdk.Manifest {
-	return []sdk.Manifest{echo.Manifest(), notes.Manifest(), files.Manifest(), settings.Manifest(), calculator.Manifest(), compendium.Manifest(), dogcalc.Manifest(), petwatch.Manifest()}
+	return []sdk.Manifest{echo.Manifest(), notes.Manifest(), files.Manifest(), settings.Manifest(), calculator.Manifest(), compendium.Manifest(), dogcalc.Manifest(), petwatch.Manifest(), todo.Manifest()}
 }
