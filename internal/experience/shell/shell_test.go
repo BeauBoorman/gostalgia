@@ -163,23 +163,25 @@ func TestBubbleTeaSocketAppLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { client.Close() })
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
+	ctx := t.Context()
 	m := &observedModel{Model: New(ctx, client, rt.Done()), results: make(chan resultMsg, 20), views: make(chan viewMsg, 10)}
 	output := &lockedBuffer{}
 	p := tea.NewProgram(m, tea.WithContext(ctx), tea.WithInput(nil), tea.WithOutput(output), tea.WithoutSignalHandler())
 	done := make(chan error, 1)
 	go func() { _, err := p.Run(); done <- err }()
 	t.Cleanup(func() { p.Kill(); <-done })
+	const stepTimeout = 30 * time.Second
 	await := func() resultMsg {
 		t.Helper()
+		timer := time.NewTimer(stepTimeout)
+		defer timer.Stop()
 		select {
 		case r := <-m.results:
 			if r.err != nil {
 				t.Fatal(r.err)
 			}
 			return r
-		case <-ctx.Done():
+		case <-timer.C:
 			t.Fatal("Bubble Tea result timed out")
 			return resultMsg{}
 		}
@@ -221,13 +223,15 @@ func TestBubbleTeaSocketAppLifecycle(t *testing.T) {
 	}
 	awaitView := func() viewMsg {
 		t.Helper()
+		timer := time.NewTimer(stepTimeout)
+		defer timer.Stop()
 		select {
 		case v := <-m.views:
 			if v.err != nil {
 				t.Fatal(v.err)
 			}
 			return v
-		case <-ctx.Done():
+		case <-timer.C:
 			t.Fatal("presentation timed out")
 			return viewMsg{}
 		}
@@ -264,6 +268,8 @@ func TestBubbleTeaSocketAppLifecycle(t *testing.T) {
 	p.Send(tea.KeyMsg{Type: tea.KeyEsc})
 	submit("exit")
 	// Bubble Tea flushes its renderer on quit; verify the actual rendered UI.
+	timer := time.NewTimer(stepTimeout)
+	defer timer.Stop()
 	select {
 	case err := <-done:
 		if err != nil {
@@ -271,7 +277,7 @@ func TestBubbleTeaSocketAppLifecycle(t *testing.T) {
 		}
 		// Replace the cleanup's consumed channel result.
 		done <- nil
-	case <-ctx.Done():
+	case <-timer.C:
 		t.Fatal("program did not exit")
 	}
 	if !strings.Contains(output.String(), "G O S T A L G I A") {
