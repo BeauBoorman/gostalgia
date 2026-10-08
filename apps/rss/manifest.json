@@ -1,0 +1,8 @@
+{
+  "id": "com.gostalgia.rss",
+  "name": "RSS",
+  "version": "0.1.0",
+  "entrypoint": "rss",
+  "permissions": ["ipc", "net.egress", "fs.read", "fs.write", "notify"],
+  "description": "A feed reader: subscribe to RSS 2.0 and Atom feeds, poll them in the background, and read headlines."
+}

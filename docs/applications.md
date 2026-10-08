@@ -1451,6 +1451,87 @@ Programmatic routes under `app/com.gostalgia.pomodoro/`: `state`, `start`
 (optional length params), `pause`, `skip`, `reset`, `configure`. Timer-driven
 transitions post an `info` alert ("work session done — short break (5m)
 started") and mirror the same text in the status line.
+
+## 17. RSS: a feed reader (`com.gostalgia.rss`)
+
+`apps/rss` (display name **RSS**) is the pack's feed reader: subscribe to
+RSS 2.0 and Atom feeds, poll them in the background, and read headlines
+with read/unread tracking. It exists to exercise capability-gated egress —
+every fetch is one `net/fetch` call under `net.egress`, gated again by the
+operator's network policy — and it parses feeds with `encoding/xml` only.
+
+```json
+{
+  "id": "com.gostalgia.rss",
+  "permissions": ["ipc", "net.egress", "fs.read", "fs.write", "notify"]
+}
+```
+
+`ipc` covers routes and presentation; `net.egress` covers `net/fetch`;
+`fs.read`/`fs.write` cover the state file; `notify` lets a refresh post one
+`notify/post` summary when genuinely new headlines arrive. **The operator
+must allowlist each feed's host** in `network.allowed_hosts` (or set `*`)
+and enable `network.enabled` before any headline arrives — feeds live on
+arbitrary domains by nature, so there is no useful default allowlist. If
+`notify` is absent or revoked, posting fails once, `notifyDown` latches,
+and every status line carries an "alerts unavailable" marker until a post
+succeeds.
+
+### Feeds and headlines
+
+The item list has two zones: one row per subscription (`feed_N`, label =
+the feed's own title, detail = `N unread of M · updated 2h ago`, or the
+honest fetch problem with a `checked Xm ago` stamp), then headlines from
+every feed flattened newest-first — `[ ]`/`[x]` checkbox in the label,
+feed name, age, and link in the detail. Undated entries sink to the tail.
+The `feed_url` field feeds `subscribe`; `refresh` refetches the selected
+feed or all feeds when nothing is selected; `unsubscribe` drops the
+selected feed and its stored headlines; `mark_read` marks one headline —
+or every headline on a selected feed — and `mark_unread` flips one back.
+Domain rejections (bad URL, duplicate subscription, headline selected for
+a feed action, marking an already-read item) land in the status line,
+never as IPC errors.
+
+Headlines dedupe by content key — the feed's `guid`/`id` when present,
+else link+title — and keep stable `item_N` identities across refreshes, so
+a mark-read survives reordering. Stored state is bounded: 16 feeds, 50
+headlines each (newest win), 64 rendered rows with a trailing `… and N
+more` indicator past the cap.
+
+### Fetching, polling, and honest failures
+
+`subscribe` records the feed first, then fetches — a subscription survives
+even when its first fetch cannot complete. Fetches run outside the state
+lock so a slow feed never stalls rendering, and each result merges back
+under it; a feed unsubscribed mid-batch is skipped. `Run` polls every
+subscription on a fixed 5-minute interval and exits on `ctx.Done()`,
+leaving no goroutine behind.
+
+Every failure mode degrades to status text on the feed row, never to lost
+state: a missing `net.egress` grant, egress disabled by policy, a host off
+the allowlist, plaintext HTTP under an HTTPS-only policy, a network error,
+a non-2xx response, and malformed or non-feed XML each say what happened
+— and, for policy denials, what the operator can do about it. A failing
+feed keeps its last good headlines ("showing 30 headlines from 2h ago"),
+and a relaunch renders the count of failing feeds in the status line. A
+feed's first successful fetch is baseline sync, not news; `notify/post`
+fires only for headlines merged into an already-fetched feed.
+
+### Persistence and routes
+
+One document, `/apps/data/com.gostalgia.rss/state.json`
+(`{version, feeds, feed_seq, item_seq}` — read state rides inside each
+stored headline), written with atomic `fs/save` after every mutation and
+after each fetch batch, flushed on Stop if a save is still pending. A
+missing file is an empty reader; a corrupt or wrong-version file is an
+honest error banner over an empty list, left alone until the next change
+saves over it. Loading repairs before rendering — seq counters pushed
+past stored ids, duplicates reassigned, keys deduped, bounds enforced —
+and the healed copy is written back. Programmatic routes under
+`app/com.gostalgia.rss/`: `state`, `subscribe`, `unsubscribe`, `refresh`
+(optional `id`), `list` (optional `feed`, `unread_only`), `mark_read`,
+`mark_unread`.
+
 ## 22. Musictoy: a step sequencer (`com.gostalgia.musictoy`)
 
 `apps/musictoy` (display name **Musictoy**) is the pack's chiptune music toy
