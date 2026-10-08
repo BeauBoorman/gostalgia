@@ -1,0 +1,8 @@
+{
+  "id": "com.gostalgia.weather",
+  "name": "Weather",
+  "version": "0.1.0",
+  "entrypoint": "weather",
+  "permissions": ["ipc", "net.egress", "fs.read", "fs.write"],
+  "description": "Current conditions and a multi-day forecast over capability-gated egress via the keyless Open-Meteo API."
+}

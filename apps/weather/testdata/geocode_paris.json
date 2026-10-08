@@ -1,0 +1,100 @@
+{
+  "results": [
+    {
+      "id": 2988507,
+      "name": "Paris",
+      "latitude": 48.8534,
+      "longitude": 2.3488,
+      "elevation": 42.0,
+      "feature_code": "PPLC",
+      "country_code": "FR",
+      "admin1_id": 3012874,
+      "admin2_id": 2968815,
+      "timezone": "Europe/Paris",
+      "population": 2138551,
+      "country_id": 3017382,
+      "country": "France",
+      "admin1": "Île-de-France",
+      "admin2": "Paris"
+    },
+    {
+      "id": 4717560,
+      "name": "Paris",
+      "latitude": 33.6609,
+      "longitude": -95.5555,
+      "elevation": 183.0,
+      "feature_code": "PPLA2",
+      "country_code": "US",
+      "admin1_id": 4736286,
+      "timezone": "America/Chicago",
+      "population": 25171,
+      "country_id": 6252001,
+      "country": "United States",
+      "admin1": "Texas"
+    },
+    {
+      "id": 2637896,
+      "name": "Paris",
+      "latitude": 51.0,
+      "longitude": -2.0,
+      "elevation": 61.0,
+      "feature_code": "PPL",
+      "country_code": "GB",
+      "admin1_id": 6269131,
+      "timezone": "Europe/London",
+      "country_id": 2635167,
+      "country": "United Kingdom",
+      "admin1": "England"
+    },
+    {
+      "id": 6097878,
+      "name": "Paris",
+      "latitude": 43.2001,
+      "longitude": -80.3829,
+      "elevation": 248.0,
+      "feature_code": "PPL",
+      "country_code": "CA",
+      "admin1_id": 6093943,
+      "timezone": "America/Toronto",
+      "population": 11700,
+      "country_id": 6251999,
+      "country": "Canada",
+      "admin1": "Ontario"
+    },
+    {
+      "id": 5347327,
+      "name": "Paris",
+      "latitude": 38.2097,
+      "longitude": -122.0,
+      "elevation": 200.0,
+      "feature_code": "PPL",
+      "country_code": "US",
+      "admin1_id": 5332921,
+      "timezone": "America/Los_Angeles",
+      "country_id": 6252001,
+      "country": "United States",
+      "admin1": "California"
+    },
+    {
+      "id": 4005278,
+      "name": "Paris",
+      "latitude": 19.5112,
+      "longitude": -99.0,
+      "elevation": 2240.0,
+      "feature_code": "PPL",
+      "country_code": "MX",
+      "timezone": "America/Mexico_City",
+      "country_id": 3996063,
+      "country": "Mexico",
+      "admin1": "México"
+    },
+    {
+      "id": 0,
+      "name": "",
+      "latitude": 10.0,
+      "longitude": 10.0,
+      "country": "Nowhere",
+      "admin1": "Void"
+    }
+  ]
+}
