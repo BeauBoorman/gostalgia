@@ -1366,3 +1366,66 @@ reserved ids reassigned, untitled entries labeled, timestamps pinned —
 and the healed copy is written back. Programmatic routes under
 `app/com.gostalgia.todo/`: `list` (optional `filter`), `add`, `complete`,
 `delete`, `clear_done`.
+
+## 16. Pomodoro: a focus timer (`com.gostalgia.pomodoro`)
+
+`apps/pomodoro` (display name **Pomodoro**) is a work/break interval timer:
+work sessions alternate with short breaks, and every Nth work session earns a
+long break. The countdown is derived from a pinned `ends_at` anchor and
+rendered inside the ordinary view snapshot — the shell's periodic polling is
+the whole live-update story; the app never pushes. A version-2 request also
+gets a block-font `countdown` block plus `m_phase` and `m_cycle` meters;
+version-1 requests keep the same countdown in the timer item's detail and the
+status line.
+
+```json
+{
+  "id": "com.gostalgia.pomodoro",
+  "permissions": ["ipc", "fs.read", "fs.write", "notify"]
+}
+```
+
+`ipc` covers routes and presentation; `fs.read`/`fs.write` cover the state
+file (timer anchor, config, cycle counters, and the bounded session log);
+`notify` lets a finished phase post a `notify/post` alert. Without the grant
+the post fails once, `notifyDown` latches, and every status line carries an
+"alerts unavailable" marker until a post succeeds — the transition itself is
+never blocked on the notification pipeline.
+
+### Phases, cycles, and the timer goroutine
+
+The phase machine is `work -> short -> work -> ... -> long -> work`, where the
+break after the `cycles`-th ended work session is a long one and ends the
+cycle. Ended work sessions advance `cycle_pos` whether they finished or were
+skipped, but only unskipped ones count as `work_done` focus sessions. The
+`Run` goroutine ticks every 500 ms and performs **one** transition per tick —
+a dormant stretch never cascades stale phase-end alerts — and exits on
+`ctx.Done()`, so stopping or relaunching leaves no goroutine behind.
+
+While idle, the view offers four fields (`work_min` 5–120, `short_min` and
+`long_min` 1–30, `cycles` 1–8) that `start` validates and applies. The
+`configure` route accepts the same bounded lengths any time; a running phase
+keeps the anchor it began with, so changes apply from the next phase.
+
+### Honest relaunch semantics
+
+`Stop` (and every mutation) persists `{timer, config, cycle_pos, work_done,
+log}` to `/apps/data/com.gostalgia.pomodoro/state.json` via atomic `fs/save`,
+with `saved_at` stamped at write time. On the next launch a non-idle timer
+always **relands paused**: a running phase restores the remainder it had at
+the last save (`ends_at - saved_at`, clamped at zero) rather than pretending
+the wall-clock gap was focus time; a phase that ran out while off lands
+paused at 0:00 so resuming fires the pending transition honestly. The status
+line says the timer did not run while the app was off. The session log keeps
+the newest 50 ended phases with their real `started_at`/`ended_at` bounds and
+a `skipped` flag, rendered as the trailing view items.
+
+### Actions and routes
+
+Actions: `start` (Start from idle — applies the field lengths — or Resume
+from paused), `pause`, `skip` (ends the phase early, marks the log entry
+skipped, no notification), `reset` (back to ready; history survives).
+Programmatic routes under `app/com.gostalgia.pomodoro/`: `state`, `start`
+(optional length params), `pause`, `skip`, `reset`, `configure`. Timer-driven
+transitions post an `info` alert ("work session done — short break (5m)
+started") and mirror the same text in the status line.
