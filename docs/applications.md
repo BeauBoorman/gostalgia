@@ -1532,3 +1532,82 @@ settings, library, and the probed sound story), `toggle` (`{row, step}`),
 `set` (`{bpm?, scale?}`), `play` (returns `{played, notes, duration_ms}` or
 `{played:false, reason}` — the silent path is a state, not an error),
 `save` (`{name}`), `load` (`{id}`), `delete` (`{id}`), and `list`.
+
+## 18. Markview: a Markdown viewer (`com.gostalgia.markview`)
+
+`apps/markview` (display name **Markview**) is the read-only rendered view
+of Markdown documents — the open-with companion to Notes' editor, and the
+inverse of Compendium's sealed private vault. It exists so that a `.md` or
+`.markdown` file living anywhere in the environment VFS can be opened for
+reading without handing the viewer a standing filesystem permission.
+
+```json
+{
+  "id": "com.gostalgia.markview",
+  "permissions": ["ipc"],
+  "document_types": [".md", ".markdown"]
+}
+```
+
+`ipc` is the whole permission grant: routes and presentation, nothing else.
+The manifest declares `.md` and `.markdown` document types, which
+`doc/associations` registers as handlers — Markview becomes an open-with
+alternative for `.md` (Notes keeps the seeded default) and the default
+handler for `.markdown`. There is deliberately **no** `fs.read`: the handoff
+grant is the access model, not a manifest permission.
+
+### The access model is the handoff grant
+
+Files open-with and `doc/handoff` route a document to Markview the same way
+they route one to Notes: the handoff manager issues a session-bound grant
+for the exact document path — non-recursive, so no sibling or directory
+access travels with it — and dispatches `app/com.gostalgia.markview/open`
+with `{path, mode, grant_id, force}`. Inside `open`, the app's `fs/stat` and
+`fs/read` calls resolve under that grant: `GrantStore.FindMatchingGrant`
+satisfies `requireReadAccess` for the app principal without the app ever
+holding `fs.read` itself. Open without a covering grant is the ordinary
+`fs/*` denial surfaced honestly in the view's error slot; the grant dies
+with the app run, and a reload after revocation fails the same way. The
+`reload` route and Reload action re-read the path under whatever grant is
+still held — useful while the document changes on disk.
+
+### Rendering: structure into items, never raw markup
+
+A line-oriented, stdlib-only parser (`markdown.go`) walks the document once
+and emits rows: ATX and setext headings (label `# Title`…`###### Title`,
+detail `h1 · line N`), bullet/ordered/task list items (`•`, `1.`, `[ ]`,
+`[x]`, indented per depth), block quotes (`│ ` prefixed per depth), fenced
+and indented code (each source line as a `┃`-guttered item, fence language
+in the detail), thematic breaks (`───`), pipe tables (cells joined with
+`│`), and paragraphs wrapped at ~110 runes with continuation rows indented.
+Inline markup flattens honestly: emphasis and strikethrough markers drop,
+code spans show their contents, links render `text (target)` with the
+optional title dropped, images collapse to `[image: alt]`, autolinks stay
+readable, raw HTML tags are removed rather than passed through, entities
+decode, and escapes reveal literals. Every row carries its source line in
+the item detail (`list · line 42`) so the reader can locate it in the
+original. Items — not v2 blocks — carry everything, so the view looks the
+same at presentation versions 1 and 2 and document order is preserved
+(blocks render above items and cannot interleave).
+
+### Honest rejection and bounded views
+
+`open` refuses non-Markdown extensions, directories, missing paths, and
+binary content: files must be valid UTF-8 with no NUL bytes and under 10%
+control characters — the answer is "not a Markdown document (binary
+content)", not a garbled render. `fs/read` is bounded at 1 MiB; a larger
+file renders its head with a `… document truncated` indicator naming the
+window. Rendering caps at 8192 parsed rows (with a `… document exceeds the
+row cap` indicator), and the view pages at 56 rows per page — always inside
+the contract's 64-item budget — with Prev/Next page actions and an explicit
+`… and N more rows` indicator naming the remainder.
+
+### Routes and actions
+
+Under `app/com.gostalgia.markview/`: `open` (the handoff entry point; also
+usable directly — `{path, mode, grant_id, force}`), `doc` (current document
+metadata: path, name, sizes, lines, rows, cap flags, page), `reload`, plus
+the presentation `view`/`action`/`cancel` routes. View actions: `open`
+(uses the `open_path` field — denied paths surface an error banner),
+`reload`, `prev_page`, `next_page`. With no document open the view explains
+the grant-gated access model instead of pretending to have content.
