@@ -1,0 +1,8 @@
+{
+  "id": "com.gostalgia.sysmon",
+  "name": "Sysmon",
+  "version": "0.1.0",
+  "entrypoint": "sysmon",
+  "permissions": ["ipc", "proc.list", "proc.stop"],
+  "description": "A process-and-system monitor: uptime, a live process table with state/CPU/RAM/exit info, and recent exit history — refreshed entirely by the shell's poll. Terminates child processes only, behind the proc.stop grant, and never itself."
+}

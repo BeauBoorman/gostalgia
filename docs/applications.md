@@ -1532,6 +1532,72 @@ and the healed copy is written back. Programmatic routes under
 (optional `id`), `list` (optional `feed`, `unread_only`), `mark_read`,
 `mark_unread`.
 
+## 20. Sysmon: process monitor (`com.gostalgia.sysmon`)
+
+`apps/sysmon` (display name **Sysmon**) is the shelf-launchable sibling of
+the shell's Task Manager: uptime, a live process table with
+state/CPU/RAM/exit info, and recent exit history, all built from the
+runtime's own diagnostics — `sys/status`, `proc/list`, `proc/info`, and
+`proc/history` are re-fetched inside every view snapshot. The shell's
+~500 ms poll is the whole refresh story: the app runs no timers and spawns
+no goroutines, and every poll re-reads the real tables.
+
+```json
+{
+  "id": "com.gostalgia.sysmon",
+  "permissions": ["ipc", "proc.list", "proc.stop"]
+}
+```
+
+`ipc` covers routes and presentation; `proc.list` covers the three read
+routes; `proc.stop` covers `proc/stop` for the kill action. When the grant
+is omitted the monitor is fully read-only: the `kill` action is simply not
+declared, and a forged request fails twice — the SDK rejects the
+undeclared action and the app re-checks the manifest itself. Denied reads
+degrade honestly per section: a failed `sys/status` leaves an
+"status unavailable" uptime row, a failed `proc/list` leaves a "Process
+list unavailable" notice, a failed `proc/history` leaves a "History
+unavailable" notice, and every failure also lands on the error banner.
+
+### The table, selection, and sort
+
+The first row is always `uptime` ("up 1h 30m · user guest · gostalgia
+0.7.0"). Live processes follow as `pid  name` items whose details carry
+state, kind, `cpu`/`mem` (cumulative ms and humanized bytes, `-` when the
+platform cannot sample — in-proc processes never fake metrics), uptime or
+`exit N · ended …` for terminal states, restart counts, and errors.
+Sysmon's own row is marked `(this monitor)` rather than hidden, so the
+table still matches `gctl ps`. History rows (`hist_` ids, newest first,
+capped at 8) follow; the live table caps at 64 rows with a trailing
+`… and N more` notice item, like todo's. An empty environment reads "No
+live processes" instead of a blank area.
+
+`sort` cycles the order `pid → name → cpu → ram`; pid and name are
+ascending, cpu and ram descending with unmeasured rows sunk last. `details`
+pins a `detail` row under uptime for the highlighted process — the pinned
+process is re-fetched through `proc/info` every poll, so the row tracks
+live state and keeps reporting honestly after the process exits
+(`proc/info` falls back to the bounded history buffer) or vanishes
+entirely ("no detail: process: no such process N"). Selecting the same row
+again unpins it. Both live and history rows are selectable.
+
+### Kill
+
+`kill` (`Terminate`) acts on the highlighted process row and is the
+deliberately narrow end of `proc/stop`: only `kind == "child"` processes
+are terminable here — in-proc apps belong to the app manager, not a
+monitor, and are refused with an explicit "is in-proc" rejection. History
+rows fail as "already exited", stale rows as "is gone", and Sysmon's own
+row — by PID (learned once via `session/whoami`) and by name — is refused
+before the route is ever touched. A denied `proc/stop` call surfaces its
+`permission denied` text verbatim in the status line. All rejections are
+status-line feedback, never IPC errors; the table keeps rendering.
+
+Programmatic route under `app/com.gostalgia.sysmon/`: `snapshot` returns
+the same assembly the view renders (`uptime_seconds`, `user`, `version`,
+`sort`, `selected_pid`, `self_pid`, `processes`, `history`, and an
+`errors` map naming each failed call), so scripts get one call instead of
+three.
 ## 22. Musictoy: a step sequencer (`com.gostalgia.musictoy`)
 
 `apps/musictoy` (display name **Musictoy**) is the pack's chiptune music toy
