@@ -10,6 +10,7 @@ import (
 	"gostalgia/apps/dogcalc"
 	"gostalgia/apps/echo"
 	"gostalgia/apps/files"
+	"gostalgia/apps/markview"
 	"gostalgia/apps/musictoy"
 	"gostalgia/apps/notes"
 	"gostalgia/apps/petwatch"
@@ -65,6 +66,9 @@ func Register(r Registrar) error {
 	if err := r.RegisterBuiltin(rss.Manifest(), rss.Factory); err != nil {
 		return fmt.Errorf("apps: register %s: %w", rss.ID, err)
 	}
+	if err := r.RegisterBuiltin(markview.Manifest(), markview.Factory); err != nil {
+		return fmt.Errorf("apps: register %s: %w", markview.ID, err)
+	}
 	if err := r.RegisterBuiltin(sysmon.Manifest(), sysmon.Factory); err != nil {
 		return fmt.Errorf("apps: register %s: %w", sysmon.ID, err)
 	}
@@ -76,5 +80,5 @@ func Register(r Registrar) error {
 
 // Manifests returns fresh builtin declarations, without filesystem access.
 func Manifests() []sdk.Manifest {
-	return []sdk.Manifest{echo.Manifest(), notes.Manifest(), files.Manifest(), settings.Manifest(), calculator.Manifest(), compendium.Manifest(), dogcalc.Manifest(), petwatch.Manifest(), pomodoro.Manifest(), todo.Manifest(), musictoy.Manifest(), rss.Manifest(), sysmon.Manifest(), weather.Manifest()}
+	return []sdk.Manifest{echo.Manifest(), notes.Manifest(), files.Manifest(), settings.Manifest(), calculator.Manifest(), compendium.Manifest(), dogcalc.Manifest(), petwatch.Manifest(), pomodoro.Manifest(), todo.Manifest(), musictoy.Manifest(), rss.Manifest(), markview.Manifest(), sysmon.Manifest(), weather.Manifest()}
 }
