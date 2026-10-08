@@ -1452,6 +1452,168 @@ Programmatic routes under `app/com.gostalgia.pomodoro/`: `state`, `start`
 transitions post an `info` alert ("work session done — short break (5m)
 started") and mirror the same text in the status line.
 
+## 17. RSS: a feed reader (`com.gostalgia.rss`)
+
+`apps/rss` (display name **RSS**) is the pack's feed reader: subscribe to
+RSS 2.0 and Atom feeds, poll them in the background, and read headlines
+with read/unread tracking. It exists to exercise capability-gated egress —
+every fetch is one `net/fetch` call under `net.egress`, gated again by the
+operator's network policy — and it parses feeds with `encoding/xml` only.
+
+```json
+{
+  "id": "com.gostalgia.rss",
+  "permissions": ["ipc", "net.egress", "fs.read", "fs.write", "notify"]
+}
+```
+
+`ipc` covers routes and presentation; `net.egress` covers `net/fetch`;
+`fs.read`/`fs.write` cover the state file; `notify` lets a refresh post one
+`notify/post` summary when genuinely new headlines arrive. **The operator
+must allowlist each feed's host** in `network.allowed_hosts` (or set `*`)
+and enable `network.enabled` before any headline arrives — feeds live on
+arbitrary domains by nature, so there is no useful default allowlist. If
+`notify` is absent or revoked, posting fails once, `notifyDown` latches,
+and every status line carries an "alerts unavailable" marker until a post
+succeeds.
+
+### Feeds and headlines
+
+The item list has two zones: one row per subscription (`feed_N`, label =
+the feed's own title, detail = `N unread of M · updated 2h ago`, or the
+honest fetch problem with a `checked Xm ago` stamp), then headlines from
+every feed flattened newest-first — `[ ]`/`[x]` checkbox in the label,
+feed name, age, and link in the detail. Undated entries sink to the tail.
+The `feed_url` field feeds `subscribe`; `refresh` refetches the selected
+feed or all feeds when nothing is selected; `unsubscribe` drops the
+selected feed and its stored headlines; `mark_read` marks one headline —
+or every headline on a selected feed — and `mark_unread` flips one back.
+Domain rejections (bad URL, duplicate subscription, headline selected for
+a feed action, marking an already-read item) land in the status line,
+never as IPC errors.
+
+Headlines dedupe by content key — the feed's `guid`/`id` when present,
+else link+title — and keep stable `item_N` identities across refreshes, so
+a mark-read survives reordering. Stored state is bounded: 16 feeds, 50
+headlines each (newest win), 64 rendered rows with a trailing `… and N
+more` indicator past the cap.
+
+### Fetching, polling, and honest failures
+
+`subscribe` records the feed first, then fetches — a subscription survives
+even when its first fetch cannot complete. Fetches run outside the state
+lock so a slow feed never stalls rendering, and each result merges back
+under it; a feed unsubscribed mid-batch is skipped. `Run` polls every
+subscription on a fixed 5-minute interval and exits on `ctx.Done()`,
+leaving no goroutine behind.
+
+Every failure mode degrades to status text on the feed row, never to lost
+state: a missing `net.egress` grant, egress disabled by policy, a host off
+the allowlist, plaintext HTTP under an HTTPS-only policy, a network error,
+a non-2xx response, and malformed or non-feed XML each say what happened
+— and, for policy denials, what the operator can do about it. A failing
+feed keeps its last good headlines ("showing 30 headlines from 2h ago"),
+and a relaunch renders the count of failing feeds in the status line. A
+feed's first successful fetch is baseline sync, not news; `notify/post`
+fires only for headlines merged into an already-fetched feed.
+
+### Persistence and routes
+
+One document, `/apps/data/com.gostalgia.rss/state.json`
+(`{version, feeds, feed_seq, item_seq}` — read state rides inside each
+stored headline), written with atomic `fs/save` after every mutation and
+after each fetch batch, flushed on Stop if a save is still pending. A
+missing file is an empty reader; a corrupt or wrong-version file is an
+honest error banner over an empty list, left alone until the next change
+saves over it. Loading repairs before rendering — seq counters pushed
+past stored ids, duplicates reassigned, keys deduped, bounds enforced —
+and the healed copy is written back. Programmatic routes under
+`app/com.gostalgia.rss/`: `state`, `subscribe`, `unsubscribe`, `refresh`
+(optional `id`), `list` (optional `feed`, `unread_only`), `mark_read`,
+`mark_unread`.
+
+## 22. Musictoy: a step sequencer (`com.gostalgia.musictoy`)
+
+`apps/musictoy` (display name **Musictoy**) is the pack's chiptune music toy
+and the flagship consumer of the `sound` capability: a 16-step, 4-row step
+sequencer where each row is a pitched voice. Toggle cells to compose a loop,
+press Play to hear one pass of it, save the pattern to a bounded library.
+
+```json
+{
+  "id": "com.gostalgia.musictoy",
+  "permissions": ["ipc", "fs.read", "fs.write", "sound"]
+}
+```
+
+`ipc` covers routes and presentation; `fs.read`/`fs.write` cover the
+app-private pattern document; `sound` covers `sound/play` (and `ipc` covers
+the `sound/status` probe).
+
+### The step grid and the rows
+
+A version-2 snapshot carries a 16-column `Grid` of exactly 64 cells — the
+pad maximum — where cell `r{row}s{step}` declares the shared `step` action
+and a press toggles the cell (`x` on, `·` off). A version-1 snapshot gets
+the fallback instead: the four rows rendered as items with their encoded
+step strings, plus a `row_edit` field and `apply_row` action that accept
+`<row> <16 x/. glyphs>` (e.g. `lead x.x..x..x....x`) or `<row> clear`. Rows
+are named or 1-indexed: `lead`, `high`, `low`, `bass` — top to bottom,
+highest pitch to lowest.
+
+Each row is a fixed voice: sawtooth lead, two square middle rows, triangle
+bass. Pitches come from a data-driven scale table — `pentatonic` (minor:
+root, ♭3, 5th, octave), `major` (root, 3rd, 5th, octave), and `chromatic`
+(the diminished stack) — each mapping row to semitone offset over a 110Hz
+root. `scale` cycles the table live; the `set` route takes a name. Tempo is
+the `tempo_bpm` field plus the `tempo` action, validated to 60–240 bpm; the
+field is prefilled with the current value.
+
+### Playback and the clip bounds
+
+`sound/play` bounds a clip at 64 notes and 10 seconds, and the route is
+monophonic — there are no chords, only sequences. Musictoy resolves both
+honestly: a step with several rows set **arpeggiates them bottom-up inside
+the step's own timeslice** (the classic chip chord trick), and Play fires
+**one bounded pass** per press. One pass can never exceed the contract:
+64 cells emit at most 64 notes, and at the 60bpm tempo floor a full loop
+lasts 4 seconds, far under the 10s ceiling. There is no Stop action — the
+host player is fire-and-forget and the clip always self-terminates within a
+few seconds — and there is no loop mode, because looping would mean
+re-issuing play calls on a timer the primitive does not provide. The status
+line and the `play` route both report the single pass plainly ("playing one
+pass: N notes over Xs").
+
+Playback availability is probed once per launch exactly like Dogcalc's
+bark: `session/whoami` for the `sound` grant, then `sound/status` for host
+support. Without the grant, on an unsupported host, or when the audio
+service is unreachable, the Play action renders disabled and the status
+line says why — "playback unavailable — \<reason\>; composing and saving
+still work" — while editing, saving, and loading all keep working. A
+saturated adapter (`ErrAudioBusy`) surfaces once as "audio busy" on the
+status line and is never retry-looped; an adapter that vanishes between
+probe and press relatches the probe so later views disable Play honestly.
+
+### Persistence and routes
+
+One versioned document, `/apps/data/com.gostalgia.musictoy/patterns.json`
+(`{version, bpm, scale, rows, patterns, seq}`), written with atomic
+`fs/save` after every mutation and flushed again on Stop if a save is still
+pending. `rows` is the working pattern as four 16-character strings; the
+library holds at most 16 named snapshots of `{id, name, bpm, scale, rows,
+saved_at}` (saving an existing name replaces it in place). A missing file
+is a fresh blank pattern; a corrupt or wrong-version file is an honest
+error banner over usable fresh state, and loading heals before rendering —
+tempo and scale clamped to known values, malformed row strings rebuilt,
+duplicate ids reassigned — with the repaired copy written back. Without the
+fs grants the app keeps working in memory and reports each failed save.
+
+Programmatic routes under `app/com.gostalgia.musictoy/`: `state` (pattern,
+settings, library, and the probed sound story), `toggle` (`{row, step}`),
+`set` (`{bpm?, scale?}`), `play` (returns `{played, notes, duration_ms}` or
+`{played:false, reason}` — the silent path is a state, not an error),
+`save` (`{name}`), `load` (`{id}`), `delete` (`{id}`), and `list`.
+
 ## 19. Weather: current conditions + forecast (`com.gostalgia.weather`)
 
 `apps/weather` is Gostalgia's weather app: current conditions and a five-day

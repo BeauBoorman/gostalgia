@@ -1,0 +1,8 @@
+{
+  "id": "com.gostalgia.musictoy",
+  "name": "Musictoy",
+  "version": "0.1.0",
+  "entrypoint": "musictoy",
+  "permissions": ["ipc", "fs.read", "fs.write", "sound"],
+  "description": "A chiptune step sequencer: toggle steps on a 16x4 pitch grid, press play, save the pattern."
+}
