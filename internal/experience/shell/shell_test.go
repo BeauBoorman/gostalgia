@@ -165,11 +165,10 @@ func TestBubbleTeaSocketAppLifecycle(t *testing.T) {
 	t.Cleanup(func() { client.Close() })
 	// Issue #132: one 15s budget for the whole lifecycle starved later
 	// awaits whenever a loaded CI runner burned the budget early. Instead,
-	// keep a cancel-only context for the program (the model already bounds
-	// every IPC call with its own 3-5s deadline) and give each await its own
-	// deadline, so one slow stage cannot starve the rest.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// give the program the test-scoped context (the model already bounds
+	// every IPC call with its own 3-10s deadline) and give each await its
+	// own deadline, so one slow stage cannot starve the rest.
+	ctx := t.Context()
 	m := &observedModel{Model: New(ctx, client, rt.Done()), results: make(chan resultMsg, 20), views: make(chan viewMsg, 10)}
 	output := &lockedBuffer{}
 	p := tea.NewProgram(m, tea.WithContext(ctx), tea.WithInput(nil), tea.WithOutput(output), tea.WithoutSignalHandler())
@@ -183,7 +182,7 @@ func TestBubbleTeaSocketAppLifecycle(t *testing.T) {
 	// fires. The await timer also starts earlier than the production timer
 	// (it is armed before tea dispatches the key), so headroom is required,
 	// not just >=.
-	const perStep = 15 * time.Second
+	const perStep = 30 * time.Second
 	await := func(step string) resultMsg {
 		t.Helper()
 		timer := time.NewTimer(perStep)
